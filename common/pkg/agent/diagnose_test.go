@@ -131,7 +131,7 @@ func TestDiagnoseHappyPathWithGroundedEvidence(t *testing.T) {
 	if src.calls != 1 {
 		t.Fatalf("应调用一次日志查询: %d", src.calls)
 	}
-	if diag.ToolCalls != 1 || diag.Provider != "fake" || diag.PromptVersion != PromptVersionDiagnoseV1 {
+	if diag.ToolCalls != 1 || diag.Provider != "fake" || diag.PromptVersion != PromptVersionDiagnoseV2 {
 		t.Fatalf("运行元信息不符: %+v", diag)
 	}
 	if diag.Trace == nil || diag.Trace.ModelCalls != 2 {
@@ -306,6 +306,56 @@ func TestRenderRunContextMarksUnknowns(t *testing.T) {
 		if !strings.Contains(full, want) {
 			t.Fatalf("材料缺少 %q:\n%s", want, full)
 		}
+	}
+}
+
+// TestDiagnosePromptAndSchemaAgreeOnConfidence 锁定"提示词与 Schema 对 confidence 的说法一致"。
+//
+// 真实联调事故：Schema 要求 0-100 整数，提示词却写 0.0-1.0，
+// 模型按提示词回了 0.95 → 结构校验失败 → 白烧一轮修复（实测多花 17.8s / 3885 tokens）。
+func TestDiagnosePromptAndSchemaAgreeOnConfidence(t *testing.T) {
+	if strings.Contains(PromptDiagnoseV1, "0.0-1.0") {
+		t.Fatalf("提示词仍在教模型输出 0.0-1.0，与 Schema 的整数百分比冲突")
+	}
+	if !strings.Contains(PromptDiagnoseV1, "0-100 的整数") {
+		t.Fatalf("提示词必须明确要求 0-100 整数百分比")
+	}
+}
+
+// TestRunContextFactsAreCitable 锁定"材料里的事实可以逐字引用，且能通过 grounding 校验"。
+//
+// 真实联调事故：材料从未显示过任何 ref，模型只能自己写"步骤0 的输出"这种描述，
+// grounding 判为捏造证据 → 正确的诊断结论被降级为"证据不足"。
+func TestRunContextFactsAreCitable(t *testing.T) {
+	rc := failedRunContext()
+	rendered := renderRunContext(rc)
+	given := givenEvidence(rc)
+	if len(given) == 0 {
+		t.Fatal("材料自带的事实必须登记为可引用证据")
+	}
+
+	// 材料里必须能看到 ref 字符串，模型才可能逐字复制
+	for _, e := range given {
+		if !strings.Contains(rendered, "[ref: "+e.Ref+"]") {
+			t.Fatalf("材料里没有显示 ref %q，模型无从引用:\n%s", e.Ref, rendered)
+		}
+		if strings.TrimSpace(e.Quote) == "" {
+			t.Fatalf("证据 %q 缺少原文片段", e.Ref)
+		}
+	}
+
+	// 登记之后，这些 ref 必须能通过 grounding 校验（否则等于没登记）
+	trace := newTrace("s", "g", "v")
+	trace.addEvidence(given...)
+	observed := trace.EvidenceRefs()
+	for _, e := range given {
+		if !refObserved(observed, e.Ref) {
+			t.Fatalf("材料事实 ref %q 未进入可引用集合", e.Ref)
+		}
+	}
+	// 没观测到的 ref 仍然必须被拦下（grounding 不能被放宽）
+	if refObserved(observed, "job_run_step:不存在#9") {
+		t.Fatal("不存在的 ref 不应通过 grounding 校验")
 	}
 }
 

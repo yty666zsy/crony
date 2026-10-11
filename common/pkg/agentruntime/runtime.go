@@ -145,10 +145,19 @@ func (r *Runtime) RunDiagnosis(ctx context.Context, req DiagnosisRequest) (*Diag
 		rc.Extra = append(rc.Extra, req.Extra...)
 	}
 
+	// 会话 id：默认用确定性 id；force 重诊断时换一个唯一 id。
+	// 否则第二次 Insert 会撞 session_id 唯一索引（Error 1062），
+	// 表现为"接口返回了新结论、库里还是旧结论"。
+	sessionID := agent.DiagnoseSessionID(rc.JobID, runID)
+	if req.Force {
+		if existing, lerr := loadDiagnosisSession(runID); lerr == nil && existing != nil {
+			sessionID = agent.RetrySessionID(sessionID, existing.ID)
+		}
+	}
+
 	started := time.Now()
-	out, derr := agent.Diagnose(ctx, r.agent, rc)
-	sessionID := ""
-	if out.Trace != nil {
+	out, derr := agent.DiagnoseWithSession(ctx, r.agent, rc, sessionID)
+	if out.Trace != nil && out.Trace.SessionID != "" {
 		sessionID = out.Trace.SessionID
 	}
 

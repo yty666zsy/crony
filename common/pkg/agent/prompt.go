@@ -7,8 +7,15 @@ import "fmt"
 // 为什么要版本号：模型输出的质量会随提示词漂移，出了问题必须能回答
 // "这条错误建议是哪一版提示词生成的"。版本号会写进 trace 与落库的会话记录。
 const (
-	// PromptVersionDiagnoseV1 故障诊断提示词 v1。
-	PromptVersionDiagnoseV1 = "diagnose-v1"
+	// PromptVersionDiagnoseV2 故障诊断提示词 v2。
+	//
+	// v1 -> v2 的变更（真实联调后修订，必须换版本号，否则历史会话无法归因）：
+	//  1. confidence 的输出格式与 Schema 对齐（0-100 整数，v1 误写成 0.0-1.0，
+	//     导致模型合规的首轮回答被结构校验判错、白烧一轮修复）；
+	//  2. 明确要求"逐字复制材料里 [ref: ...] 标注的标识或工具观测的 ref"，
+	//     v1 只说"观测里出现的 ref"，材料里从未显示过 ref 字符串，
+	//     模型只能自己描述位置，于是正确结论也被 grounding 标记为捏造证据。
+	PromptVersionDiagnoseV2 = "diagnose-v2"
 	// PromptVersionNLJobV1 自然语言建任务提示词 v1。
 	PromptVersionNLJobV1 = "nljob-v1"
 )
@@ -24,8 +31,10 @@ const PromptDiagnoseV1 = `你是 crony 的运维故障诊断助手。你的职�
 ## 硬规则
 1. 你只能调用提供的只读工具。你不能执行任何变更、不能重启服务、不能改配置、不能删文件。
    所有处置动作都只是"建议"，最终由人确认后手动执行。
-2. 每一个结论都必须挂到真实观测到的证据上。证据引用必须来自本次运行的工具观测，格式是
-   观测里出现的 ref（例如 node.log:12 / job_run:900001 / http://host/health / n1）。
+2. 每一个结论都必须挂到真实观测到的证据上。证据引用必须**逐字复制**下面两种来源里的 ref：
+   - 材料里方括号标注的标识，例如 [ref: job_run:j12-t1791708060]、[ref: job_run_step:j12-t1791708060#0]、[ref: job:12]；
+   - 工具观测里返回的 ref，例如 log_search 的 job_run_step:<run_id>#<step_index>、shell 的 ref、URL、节点名。
+   不要用自己描述的位置当 ref（例如"步骤0 的输出"不是 ref，会被判为捏造证据）。
    没有证据支撑的推测，必须写进 assumptions 并明确标注"未验证"。
 3. 分不清就说分不清。若已有材料不足以定位原因，把 evidence_sufficient 置为 false，
    并在 next_data_to_collect 里写清"还需要看什么"。**不要为了给答案而编造原因。**
@@ -38,7 +47,7 @@ const PromptDiagnoseV1 = `你是 crony 的运维故障诊断助手。你的职�
   "summary": "一句话结论（含最可能原因与置信度）",
   "category": "config|dependency|environment|network|resource|permission|code|schedule|unknown",
   "cause": "最可能的原因，尽量具体到可验证的机制",
-  "confidence": 0.0-1.0,
+  "confidence": 0-100 的整数（百分比，不是 0-1 小数）,
   "evidence": [
     {"ref": "观测里的 ref", "quote": "观测原文片段（不超过 200 字）", "why": "这条证据如何支持结论"}
   ],

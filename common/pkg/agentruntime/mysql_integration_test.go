@@ -89,7 +89,7 @@ func TestIntegrationAgentSessionStore(t *testing.T) {
 		StopReason:    string(agent.StopCompleted),
 		Provider:      "offline",
 		Model:         "offline-model",
-		PromptVersion: agent.PromptVersionDiagnoseV1,
+		PromptVersion: agent.PromptVersionDiagnoseV2,
 		SystemPrompt:  agent.PromptDiagnoseV1,
 		ModelCalls:    2,
 		ToolCalls:     3,
@@ -377,7 +377,54 @@ func TestIntegrationDiagnosisAgainstRealMySQL(t *testing.T) {
 		t.Fatalf("回放结论不一致: %q vs %q", replay.Diagnosis.Summary, res.Diagnosis.Summary)
 	}
 
-	// 7) 不存在的运行记录必须是可识别的业务错误
+	// 7) force 重诊断：必须落库成功，且**不覆盖**已有轨迹。
+	//
+	// 真实联调事故：session_id 是确定性的 diagnose:<run_id>，force 再诊断时
+	// Insert 撞唯一索引（Error 1062），接口返回了新结论、库里却还是旧结论。
+	//
+	// 离线 provider 的脚本是一次性的，所以这里重新装配一个运行时（同一配置）。
+	rtForced, err := New(Options{
+		Config:   offlineConfig(fmt.Sprintf(`{"name":"log_search","arguments":{"keyword":"Access denied","job_id":%d}}`, jobID), response),
+		Policy:   tools.DefaultPolicy(),
+		Sources:  tools.Sources{Logs: &DBLogSource{}},
+		NodeUUID: "it-node",
+	})
+	if err != nil {
+		t.Fatalf("装配重诊断运行时失败: %v", err)
+	}
+	forced, err := rtForced.RunDiagnosis(context.Background(), DiagnosisRequest{RunID: runID, Force: true})
+	if err != nil {
+		t.Fatalf("force 重诊断失败: %v", err)
+	}
+	if forced.PersistError != "" {
+		t.Fatalf("force 重诊断必须落库成功，实际 persist_error=%s", forced.PersistError)
+	}
+	if forced.Replayed {
+		t.Fatal("force=true 不应回放旧结论")
+	}
+	if forced.SessionID == res.SessionID {
+		t.Fatalf("重诊断必须换新的 session_id（否则覆盖审计轨迹），实际仍为 %s", forced.SessionID)
+	}
+	for _, sid := range []string{res.SessionID, forced.SessionID} {
+		s := &models.AgentSession{SessionID: sid}
+		if err := s.FindBySessionID(); err != nil {
+			t.Fatalf("会话 %s 必须可查（重诊断不得丢掉历史轨迹）: %v", sid, err)
+		}
+	}
+	defer func() {
+		_ = db.Exec("delete from "+models.CronyAgentSessionTableName+" where session_id = ?", forced.SessionID).Error
+		_ = db.Exec("delete from "+models.CronyAgentStepTableName+" where session_id = ?", forced.SessionID).Error
+	}()
+	// 不带 force 时必须回放**最新**那条，而不是第一条
+	replayLatest, err := rt.RunDiagnosis(context.Background(), DiagnosisRequest{RunID: runID})
+	if err != nil {
+		t.Fatalf("回放最新诊断失败: %v", err)
+	}
+	if !replayLatest.Replayed || replayLatest.SessionID != forced.SessionID {
+		t.Fatalf("回放应返回最新会话 %s，实际 %s（replayed=%v）", forced.SessionID, replayLatest.SessionID, replayLatest.Replayed)
+	}
+
+	// 8) 不存在的运行记录必须是可识别的业务错误
 	if _, err := rt.RunDiagnosis(context.Background(), DiagnosisRequest{RunID: tag + "-ghost"}); err == nil {
 		t.Fatal("不存在的 run_id 必须报错")
 	} else if !strings.Contains(err.Error(), "不存在") {

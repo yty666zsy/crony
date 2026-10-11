@@ -107,6 +107,15 @@ type Input struct {
 	System string
 	// Context 背景材料片段（任务定义、最近运行结果……按顺序拼进用户消息）。
 	Context []string
+	// Given 材料自带的客观事实，作为"可被引用的证据"预先登记进轨迹。
+	//
+	// 为什么需要：grounding 校验只承认本次真实观测到的 ref（Trace.EvidenceRefs）。
+	// 但诊断材料里的 job_run / job_run_step 记录本身就是从数据库读出来的客观事实，
+	// 模型据此下结论是完全正确的。如果不登记，模型引用材料事实时会被判为"捏造证据"，
+	// 于是**正确结论也被降级为证据不足**（真实联调中确实发生了）。
+	// 登记后，材料里的每个事实块都有稳定 ref（形如 job_run:<run_id>），
+	// 模型逐字引用即可通过校验；引用不存在的东西仍然会被拦下。
+	Given []tools.Evidence
 	// PromptVersion 提示词版本号（进轨迹，用于事后归因）。
 	PromptVersion string
 }
@@ -185,6 +194,8 @@ func (a *Agent) Registry() *tools.Registry { return a.registry }
 func (a *Agent) Run(ctx context.Context, in Input, schema *jsonschema.Schema) (Outcome, error) {
 	cfg := a.cfg
 	trace := newTrace(in.SessionID, in.Goal, in.PromptVersion)
+	// 材料自带的事实先登记为可引用证据，再进入循环。
+	trace.addEvidence(in.Given...)
 	out := Outcome{Trace: trace}
 
 	if a.gateway == nil || !a.gateway.HasProvider() {
