@@ -86,6 +86,17 @@ curl -s http://127.0.0.1:5273/src/api/client.js | head -c 400
 # 应看到 "VITE_USE_MOCK": "false"
 ```
 
+**2026-10-11 阶段 3 复跑时的实测结果**（真 admin 8089 + 真 MySQL 13306 + 真模型）：
+
+```
+import.meta.env = {"BASE_URL": "/", "DEV": true, "MODE": "development", "PROD": false,
+ "SSR": false, "VITE_API_BASE": "http://127.0.0.1:8089", "VITE_USE_MOCK": "false"}
+```
+
+即运行中的 dev server（<http://127.0.0.1:5273/>）**确实是真后端模式**，
+不是"看起来像联调"。注意 `.env` 里仍是 `VITE_USE_MOCK=true`——
+**没有 `.env.local` 的机器上，`pnpm dev` 默认是 Mock**，这是最容易误判的一处。
+
 ---
 
 ## 2. 目录结构
