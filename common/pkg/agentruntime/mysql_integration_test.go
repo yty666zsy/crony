@@ -89,7 +89,7 @@ func TestIntegrationAgentSessionStore(t *testing.T) {
 		StopReason:    string(agent.StopCompleted),
 		Provider:      "offline",
 		Model:         "offline-model",
-		PromptVersion: agent.PromptVersionDiagnoseV2,
+		PromptVersion: agent.PromptVersionDiagnoseV4,
 		SystemPrompt:  agent.PromptDiagnoseV1,
 		ModelCalls:    2,
 		ToolCalls:     3,

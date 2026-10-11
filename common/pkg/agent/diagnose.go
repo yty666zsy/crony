@@ -236,7 +236,7 @@ func DiagnoseWithSession(ctx context.Context, a *Agent, rc RunContext, sessionID
 		JobID:         rc.JobID,
 		RunID:         rc.RunID,
 		AdvisoryOnly:  true,
-		PromptVersion: PromptVersionDiagnoseV2,
+		PromptVersion: PromptVersionDiagnoseV4,
 		Category:      "unknown",
 	}
 	if a == nil {
@@ -252,7 +252,7 @@ func DiagnoseWithSession(ctx context.Context, a *Agent, rc RunContext, sessionID
 		System:        PromptDiagnoseV1,
 		Context:       []string{renderRunContext(rc)},
 		Given:         givenEvidence(rc),
-		PromptVersion: PromptVersionDiagnoseV2,
+		PromptVersion: PromptVersionDiagnoseV4,
 	}
 	out, err := a.Run(ctx, in, DiagnosisSchema())
 	diag.Trace = out.Trace

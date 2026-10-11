@@ -131,7 +131,7 @@ func TestDiagnoseHappyPathWithGroundedEvidence(t *testing.T) {
 	if src.calls != 1 {
 		t.Fatalf("应调用一次日志查询: %d", src.calls)
 	}
-	if diag.ToolCalls != 1 || diag.Provider != "fake" || diag.PromptVersion != PromptVersionDiagnoseV2 {
+	if diag.ToolCalls != 1 || diag.Provider != "fake" || diag.PromptVersion != PromptVersionDiagnoseV4 {
 		t.Fatalf("运行元信息不符: %+v", diag)
 	}
 	if diag.Trace == nil || diag.Trace.ModelCalls != 2 {
@@ -141,6 +141,37 @@ func TestDiagnoseHappyPathWithGroundedEvidence(t *testing.T) {
 	for _, want := range []string{"【诊断】", "证据链", "已排除", "建议动作", "需人工执行", "1045"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("人话报告缺少 %q:\n%s", want, text)
+		}
+	}
+}
+
+// TestDiagnosePromptRequiresObservingNodeSideFacts 锁定 v3/v4 的新规则：
+// "节点侧/环境侧事实必须先观测，再断言"，且**结论句本身**也要受约束。
+//
+// 为什么要有这条测试：这条规则来自一次真实联调——node_status 工具已接入，
+// 同一个播种用例里模型**一次工具都没调**，却在总结里断言"13307 未在节点上监听"。
+// 提示词是这条纪律的唯一执行点（grounding 校验只能查 ref 真假，查不出
+// "这个结论本应观测却靠推测"），所以必须把规则文本本身钉住。
+//
+// v3 的实测：模型学会了把"需在节点确认"写进 next_data_to_collect，
+// 但 summary 里依然是断言句 → v4 增加"summary/cause 措辞同样受约束"，
+// 本测试同时钉住这两条。
+func TestDiagnosePromptRequiresObservingNodeSideFacts(t *testing.T) {
+	if PromptVersionDiagnoseV4 == PromptVersionDiagnoseV2 || PromptVersionDiagnoseV4 == PromptVersionDiagnoseV3 {
+		t.Fatal("v4 必须是新版本号，否则历史会话无法归因")
+	}
+	for _, want := range []string{
+		"节点侧/环境侧事实必须先观测",
+		"连接被拒绝",
+		"不等于",
+		"next_data_to_collect",
+		// v4 新增：结论句措辞约束（实测 v3 只约束了 next_data_to_collect）
+		"同样约束 summary 与 cause 的措辞",
+		"疑似目标实例未在该节点监听（需在节点确认）",
+		"不可以说",
+	} {
+		if !strings.Contains(PromptDiagnoseV1, want) {
+			t.Fatalf("提示词缺少节点侧事实规则的关键句 %q", want)
 		}
 	}
 }

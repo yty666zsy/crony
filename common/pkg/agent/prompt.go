@@ -16,6 +16,28 @@ const (
 	//     v1 只说"观测里出现的 ref"，材料里从未显示过 ref 字符串，
 	//     模型只能自己描述位置，于是正确结论也被 grounding 标记为捏造证据。
 	PromptVersionDiagnoseV2 = "diagnose-v2"
+	// PromptVersionDiagnoseV3 故障诊断提示词 v3。
+	//
+	// v2 -> v3 的变更（2026-10-11 真实联调后修订）：新增规则 7「节点侧/环境侧事实必须先观测」。
+	//
+	// 触发这次修订的实证：接入 node_status 工具后重跑同一个播种用例，模型**一次工具都没调**
+	// （1 次模型调用、0 个工具步骤），却在总结里断言"127.0.0.1:13307 未在 node-it-01 上监听"
+	// ——这是模型**无法从 admin 侧观测到**的节点本机事实：它可以由材料推测（连接被拒），
+	// 但"端口未监听"本身没有被任何工具观测过。tools 可用却不用，把推测写成事实，
+	// 正是本项目 grounding 纪律要防的事（证据链没坏，但结论的口径越界了）。
+	// 规则 7 要求：这类断言要么先调工具观测，要么降级为 assumptions / next_data_to_collect。
+	PromptVersionDiagnoseV3 = "diagnose-v3"
+	// PromptVersionDiagnoseV4 故障诊断提示词 v4。
+	//
+	// v3 -> v4 的变更（2026-10-11 同一次联调复跑后修订）：
+	// v3 只约束了"证据与 assumptions"，实测模型**做到了**把"端口未监听需在节点确认"
+	// 写进 next_data_to_collect，但 summary/cause 里依然把"13307 未在节点上监听"
+	// 当成既定结论（`evidence_sufficient=false` 也压不住这句话——人先读的是 summary）。
+	// 说明规则必须直接约束**结论句本身**，于是 v4 明确：
+	//   - summary / cause 不得把"未观测的节点侧事实"写成既定结论；
+	//   - 若最可能原因属于该类事实，summary 必须用"疑似/需在节点确认"的措辞；
+	//   - 并给出了"连不上 ≠ 端口未监听"的对照写法。
+	PromptVersionDiagnoseV4 = "diagnose-v4"
 	// PromptVersionNLJobV1 自然语言建任务提示词 v1。
 	PromptVersionNLJobV1 = "nljob-v1"
 )
@@ -41,6 +63,19 @@ const PromptDiagnoseV1 = `你是 crony 的运维故障诊断助手。你的职�
 4. 至少给出 2 条被排除的可能（ruled_out）并说明依据；若确实无法排除任何一条，写空数组并在 summary 说明原因。
 5. 处置建议要区分风险等级（low/medium/high），高风险动作必须写明影响与回滚方式。
 6. 不要输出 Markdown 代码块围栏，只输出一个 JSON 对象。
+7. **节点侧/环境侧事实必须先观测，再断言。** 凡是以下这类"只有目标机器自己知道"的结论：
+   端口是否在监听、磁盘/CPU/内存水位、某进程是否存在、某文件/日志是否存在、服务是否在运行，
+   你必须先调用可用工具（如 node_status、log_search、mysql_query_readonly、shell_readonly(节点侧)）去观测：
+   - 观测到了 → 用工具返回的 ref 作为证据（例如 node:<uuid>），可以写成事实；
+   - 观测不到（工具不可用、节点不在线、权限不足）→ **不得**把它写成事实或写进 cause，
+     只能写进 assumptions 并标注"未验证"，同时写进 next_data_to_collect 说明需要在节点上确认什么。
+   注意：连接被拒绝（connection refused）只证明"连不上"，**不等于**"端口未监听"——
+   后者必须观测。宁可少说一句，不要多断言一句。
+   **这条规则同样约束 summary 与 cause 的措辞**（实测教训：把"需在节点确认"只写进
+   next_data_to_collect、却在 summary 里写死结论，读报告的人看到的仍是断言）：
+   - 可以说：「连接 127.0.0.1:13307 被拒绝，疑似目标实例未在该节点监听（需在节点确认）」；
+   - 不可以说：「目标 MySQL 未在 127.0.0.1:13307 监听」。
+   即：未观测的节点侧事实最多只能是"疑似 + 待确认"，且 evidence_sufficient 必须为 false。
 
 ## 输出 JSON 结构
 {
