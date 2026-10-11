@@ -86,9 +86,11 @@ export function listAgentTools(params = {}) {
  * 返回：草案字段 + next_triggers / next_trigger_text / trigger_echo
  *       + requires_confirmation（恒 true）/ confirmed（恒 false，本接口不落库）
  *
- * ⚠️ 真实后端的 data 是**多一层**的：{ draft: {...}, error?, session_id }，
+ * ⚠️ 真实后端的 data 是**多一层**的：{ draft: {...} }，
+ *    **session_id 就在 draft 内部**（2026-10-11 验收用例 AC-10 实测；
+ *    早期注释写成"外层 session_id"，照那个写会读到 undefined），
  *    而 Mock 与调用方按扁平结构读（draft.value.name / .spec / ...）。
- *    这里统一抹平：有 draft 就把它摊平，并保留外层 error/session_id；
+ *    这里统一抹平：有 draft 就把它摊平，并保留外层 error；
  *    draft 自己的同名字段优先（避免外层覆盖真实草案字段）。
  *    这个差异是 2026-10-11 真实联调（VITE_USE_MOCK=false）发现的：
  *    不抹平则向导页所有字段显示为空、确认按钮拿不到 session_id。

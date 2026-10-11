@@ -7,6 +7,7 @@ require (
 	github.com/fsnotify/fsnotify v1.5.4
 	github.com/gin-gonic/gin v1.8.1
 	github.com/go-gomail/gomail v0.0.0-20160411212932-81ebce5c23df
+	github.com/go-sql-driver/mysql v1.6.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.3.0
 	github.com/jakecoffman/cron v0.0.0-20190106200828-7e2009c226a5
@@ -34,7 +35,6 @@ require (
 	github.com/go-playground/locales v0.14.0 // indirect
 	github.com/go-playground/universal-translator v0.18.0 // indirect
 	github.com/go-playground/validator/v10 v10.10.0 // indirect
-	github.com/go-sql-driver/mysql v1.6.0 // indirect
 	github.com/goccy/go-json v0.9.7 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/protobuf v1.5.2 // indirect
