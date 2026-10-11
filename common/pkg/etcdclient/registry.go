@@ -46,6 +46,9 @@ func (s *ServerReg) setLease(ttl int64) error {
 	leaseRespChan, err := s.Client.KeepAlive(ctx, leaseResp.ID)
 
 	if err != nil {
+		// KeepAlive 失败时必须释放 context，否则每次重试都会泄漏一个
+		// 不会结束的 cancelable context（go vet 的 "possible context leak"）。
+		cancelFunc()
 		return err
 	}
 	s.leaseId = leaseResp.ID
@@ -57,7 +60,7 @@ func (s *ServerReg) Stop() {
 	s.stop <- nil
 }
 
-//Monitor the lease renewal
+// Monitor the lease renewal
 func (s *ServerReg) keepAlive() {
 	for {
 		select {

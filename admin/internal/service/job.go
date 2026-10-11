@@ -27,15 +27,16 @@ func (j *JobService) Search(s *request.ReqJobSearch) ([]models.Job, int64, error
 		db = db.Where("name like ?", s.Name+"%")
 	}
 	if len(s.RunOn) > 0 {
-		db.Where("run_on = ?", s.RunOn)
+		db = db.Where("run_on = ?", s.RunOn)
 	}
 	if s.Type > 0 {
-		db.Where("type = ?", s.Type)
+		db = db.Where("type = ?", s.Type)
 	}
 	if s.Status > 0 {
-		db.Where("status = ? ", s.Status)
+		db = db.Where("status = ? ", s.Status)
 	}
-	jobs := make([]models.Job, 2)
+	// make([]T, 0) 的原因同 node.go：非空切片会让 GORM 追加而不是覆盖。
+	jobs := make([]models.Job, 0)
 	var total int64
 	err := db.Count(&total).Error
 	if err != nil {
@@ -54,15 +55,15 @@ func (j *JobService) SearchJobLog(s *request.ReqJobLogSearch) ([]models.JobLog, 
 		db = db.Where("name like ?", s.Name+"%")
 	}
 	if s.JobId > 0 {
-		db.Where("job_id = ?", s.JobId)
+		db = db.Where("job_id = ?", s.JobId)
 	}
 	if len(s.NodeUUID) > 0 {
-		db.Where("node_uuid = ?", s.NodeUUID)
+		db = db.Where("node_uuid = ?", s.NodeUUID)
 	}
 	if s.Success != nil {
-		db.Where("success = ? ", *s.Success)
+		db = db.Where("success = ? ", *s.Success)
 	}
-	jobLogs := make([]models.JobLog, 2)
+	jobLogs := make([]models.JobLog, 0)
 	var total int64
 	err := db.Count(&total).Error
 	if err != nil {
@@ -76,7 +77,7 @@ func (j *JobService) SearchJobLog(s *request.ReqJobLogSearch) ([]models.JobLog, 
 	return jobLogs, total, nil
 }
 
-//Get the total number of tasks executed today 1 indicates success 0 indicates failure
+// Get the total number of tasks executed today 1 indicates success 0 indicates failure
 func (j *JobService) GetTodayJobExcCount(success int) (int64, error) {
 	db := dbclient.GetMysqlDB().Table(models.CronyJobLogTableName).Where("start_time > ? and end_time!=0 and success = ?", utils.GetTodayUnix(), success)
 	var total int64
@@ -87,7 +88,7 @@ func (j *JobService) GetTodayJobExcCount(success int) (int64, error) {
 	return total, nil
 }
 
-//The number of tasks per day in a certain period of time
+// The number of tasks per day in a certain period of time
 func (j *JobService) GetJobExcCount(start, end int64, success int) ([]resp.DateCount, error) {
 	var dateCount []resp.DateCount
 	db := dbclient.GetMysqlDB().Table(models.CronyJobLogTableName).Select("FROM_UNIXTIME( start_time, '%Y-%m-%d' ) AS date", "COUNT( * ) AS count ").Group("date").Order("date ASC").Where("start_time > ? and start_time<?  and end_time!=0 and success = ?", start, end, success)
@@ -114,7 +115,7 @@ func (j *JobService) GetRunningJobCount() (int64, error) {
 
 const MaxJobCount = 10000
 
-//Give priority to the node with the least number of tasks
+// Give priority to the node with the least number of tasks
 func (j *JobService) AutoAllocateNode() string {
 	//Get all the living nodes
 	nodeList := DefaultNodeWatcher.List2Array()

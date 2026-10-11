@@ -1,0 +1,118 @@
+# crony 一键启动：mysql + etcd + admin + node
+#
+# 前置：复制 .env.example 为 .env 并填入密钥（.env 已在 .gitignore 之外，请勿提交）。
+#      cp .env.example .env
+#      # 生成 JWT 密钥： openssl rand -hex 32
+# 启动：docker compose up -d --build
+# 日志：docker compose logs -f admin
+# 访问：http://127.0.0.1:8089/ping  （旧版前端位于 /，AI Agent 控制台在阶段 1 挂载 /console）
+#
+# 注意：生产模式下 admin 未配置 CRONY_AUTH_JWT_SECRET 会拒绝启动（fail-fast），
+# 这是有意的——旧版本把签名密钥硬编码在代码里，任何人都能伪造管理员令牌。
+
+name: crony
+
+services:
+  mysql:
+    image: mysql:8.0
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_general_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?请在 .env 中设置 MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: crony
+      MYSQL_USER: ${MYSQL_USER:-crony}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请在 .env 中设置 MYSQL_PASSWORD}
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$$MYSQL_ROOT_PASSWORD || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
+  etcd:
+    # clientv3 仍是已归档的 github.com/coreos/etcd v3.3.9，
+    # 与 etcd 3.5 服务端 v3 gRPC 接口兼容；升级到 go.etcd.io/etcd/client/v3 列入阶段 1。
+    image: quay.io/coreos/etcd:v3.5.16
+    command:
+      - /usr/local/bin/etcd
+      - --name=etcd
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd:2379
+    volumes:
+      - etcd-data:/etcd-data
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/etcdctl", "endpoint", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  admin:
+    build:
+      context: .
+    image: crony:local
+    command: ["/app/cronyadmin"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+      etcd:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: production
+      TZ: ${TZ:-Asia/Shanghai}
+      # 数据面：覆盖 admin/conf/production/main.json 里的本地回环地址。
+      # 键名映射规则：conf 的 a.b-c -> 环境变量 CRONY_A_B_C
+      CRONY_MYSQL_PATH: mysql
+      CRONY_MYSQL_PORT: "3306"
+      CRONY_MYSQL_DB_NAME: crony
+      CRONY_MYSQL_USERNAME: ${MYSQL_USER:-crony}
+      CRONY_MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请在 .env 中设置 MYSQL_PASSWORD}
+      CRONY_ETCD_ENDPOINTS: http://etcd:2379
+      # 安全面：密钥只从环境变量注入，不落配置文件
+      CRONY_AUTH_JWT_SECRET: ${CRONY_AUTH_JWT_SECRET:?请设置 CRONY_AUTH_JWT_SECRET（openssl rand -hex 32）}
+      CRONY_AUTH_TOKEN_EXPIRE_HOURS: ${CRONY_AUTH_TOKEN_EXPIRE_HOURS:-168}
+      CRONY_AUTH_BOOTSTRAP_ADMIN_USER: ${CRONY_AUTH_BOOTSTRAP_ADMIN_USER:-admin}
+      CRONY_AUTH_BOOTSTRAP_ADMIN_PASSWORD: ${CRONY_AUTH_BOOTSTRAP_ADMIN_PASSWORD:?请在 .env 中设置初始管理员口令（>= 8 位）}
+      CRONY_AUTH_BOOTSTRAP_ADMIN_EMAIL: ${CRONY_AUTH_BOOTSTRAP_ADMIN_EMAIL:-}
+      CRONY_AUTH_ALLOW_PUBLIC_REGISTER: "false"
+    ports:
+      - "${CRONY_ADMIN_PORT:-8089}:8089"
+    volumes:
+      - admin-logs:/app/admin/logs
+    restart: unless-stopped
+
+  node:
+    build:
+      context: .
+    image: crony:local
+    command: ["/app/cronynode"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+      etcd:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: production
+      TZ: ${TZ:-Asia/Shanghai}
+      CRONY_MYSQL_PATH: mysql
+      CRONY_MYSQL_PORT: "3306"
+      CRONY_MYSQL_DB_NAME: crony
+      CRONY_MYSQL_USERNAME: ${MYSQL_USER:-crony}
+      CRONY_MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请在 .env 中设置 MYSQL_PASSWORD}
+      CRONY_ETCD_ENDPOINTS: http://etcd:2379
+      # 执行侧无需 JWT 密钥（只有 admin 签发/校验令牌），保持最小注入
+    volumes:
+      - node-logs:/app/node/logs
+    restart: unless-stopped
+
+volumes:
+  mysql-data:
+  etcd-data:
+  admin-logs:
+  node-logs:

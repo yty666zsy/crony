@@ -6,12 +6,16 @@ import (
 	"github.com/tmnhs/crony/common/pkg/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"sync"
 	"time"
 
 	"os"
 )
 
-var _defaultLogger *zap.Logger
+var (
+	_defaultLogger *zap.Logger
+	loggerMu       sync.RWMutex
+)
 
 func Init(projectName string, level string, format, prefix, director string, showLine bool, encodeLevel string, stacktraceKey string, logInConsole bool) (logger *zap.Logger) {
 	if ok := utils.Exists(fmt.Sprintf("%s/%s", projectName, director)); !ok { // 判断是否有Director文件夹
@@ -52,7 +56,9 @@ func Init(projectName string, level string, format, prefix, director string, sho
 	if showLine {
 		logger = logger.WithOptions(zap.AddCaller())
 	}
+	loggerMu.Lock()
 	_defaultLogger = logger
+	loggerMu.Unlock()
 	return logger
 }
 
@@ -115,13 +121,41 @@ func getWriteSyncer(logInConsole bool, file string) zapcore.WriteSyncer {
 }
 
 func Sync() error {
-	return _defaultLogger.Sync()
+	return GetLogger().Sync()
 }
 
-//Shutdown 全局关闭
+// Shutdown 全局关闭
 func Shutdown() {
-	_defaultLogger.Sync()
+	_ = GetLogger().Sync()
 }
+
+// GetLogger 返回全局 logger。
+//
+// 旧实现直接返回包级变量：只要调用方忘记先执行 Init（单元测试、
+// 启动早期的失败分支、被复用的库函数），返回值就是 nil，
+// 紧接着的 Info/Error 调用会以空指针 panic 崩溃
+// （node/internal/handler 的既有测试就是因此崩掉的）。
+// 现在改为惰性创建"输出到 stderr"的兜底 logger，保证日志调用永不 panic。
 func GetLogger() *zap.Logger {
+	loggerMu.RLock()
+	current := _defaultLogger
+	loggerMu.RUnlock()
+	if current != nil {
+		return current
+	}
+
+	loggerMu.Lock()
+	defer loggerMu.Unlock()
+	if _defaultLogger == nil {
+		cfg := zap.NewProductionConfig()
+		cfg.OutputPaths = []string{"stderr"}
+		cfg.ErrorOutputPaths = []string{"stderr"}
+		fallback, err := cfg.Build()
+		if err != nil {
+			fallback = zap.NewNop()
+		}
+		fallback.Warn("logger 未初始化，已启用 stderr 兜底 logger（请检查 logger.Init 的调用时机）")
+		_defaultLogger = fallback
+	}
 	return _defaultLogger
 }

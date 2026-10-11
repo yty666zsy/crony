@@ -219,7 +219,7 @@ func (srv *NodeServer) addJob(j *handler.Job) {
 	}
 	taskFunc := handler.CreateJob(j)
 	if taskFunc == nil {
-		logger.GetLogger().Error(fmt.Sprintf("Failed to create a task to process the Job. The task protocol was not supported%s", j.Type))
+		logger.GetLogger().Error(fmt.Sprintf("Failed to create a task to process the Job. The task protocol was not supported:%v", j.Type))
 		return
 	}
 	err := goutil.PanicToError(func() {

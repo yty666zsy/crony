@@ -47,6 +47,19 @@
     "url": "url",
     "kind": ""
   },
+  "auth": {
+    "#jwt-secret": "开发环境留空即可：进程会生成随机会话密钥并打印告警（重启后登录态失效）。不要再使用任何硬编码密钥。",
+    "jwt-secret": "",
+    "#token-expire-hours": "登录令牌有效期（小时），默认 168 = 7 天",
+    "token-expire-hours": 168,
+    "#bootstrap-admin-user": "首次启动（user 表为空）时创建的初始管理员用户名",
+    "bootstrap-admin-user": "admin",
+    "#bootstrap-admin-password": "初始管理员口令。留空则允许首个管理员引导注册（POST /register），不会再有任何默认口令。",
+    "bootstrap-admin-password": "",
+    "bootstrap-admin-email": "",
+    "#allow-public-register": "默认 false：注册接口在非引导场景必须由管理员令牌调用",
+    "allow-public-register": false
+  },
   "log": {
     "level": "debug",
     "format": "console",

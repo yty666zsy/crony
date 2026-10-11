@@ -26,6 +26,11 @@ const (
 
 	ManualAllocation = 1
 	AutoAllocation   = 2
+
+	// MaxRetryTimes 单次任务失败后的最大重试次数上限。
+	// 旧实现只透传 retry_times，一个很大的值会造成重试风暴（每次失败都重试 N 次），
+	// 阶段 0 先在入口做上限约束。
+	MaxRetryTimes = 100
 )
 
 // register to  /crony/job/<node_uuid>/<job_id>
@@ -90,8 +95,19 @@ func (j *Job) Check() error {
 	if len(j.Name) == 0 {
 		return errors.ErrEmptyJobName
 	}
-	if j.RetryInterval == 0 {
-		j.RetryTimes = 1
+	// 旧实现写成 `if j.RetryInterval == 0 { j.RetryTimes = 1 }`：
+	// 只要没填重试间隔就把"不重试(0)"改成"重试 1 次"，属于静默改写用户意图。
+	// 现在只做输入合法化，不改变语义：
+	//   - RetryTimes < 0 → 0，过大 → 上限 100（防止一次失败触发长时间重试风暴）；
+	//   - RetryInterval < 0 → 0（0 表示"立即重试"，执行侧对 >0 才按秒休眠）。
+	if j.RetryTimes < 0 {
+		j.RetryTimes = 0
+	}
+	if j.RetryTimes > MaxRetryTimes {
+		j.RetryTimes = MaxRetryTimes
+	}
+	if j.RetryInterval < 0 {
+		j.RetryInterval = 0
 	}
 	if len(strings.TrimSpace(j.Command)) == 0 {
 		return errors.ErrEmptyJobCommand

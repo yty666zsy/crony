@@ -24,3 +24,10 @@
 
 *.sh linguist-language=shell
 *.go -text diff=golang
+
+# 容器与编排文件统一 LF：Windows 检出时 CRLF 会导致 Dockerfile 构建异常
+Dockerfile          text eol=lf
+docker-compose.yml  text eol=lf
+*.yml               text eol=lf
+*.yaml              text eol=lf
+*.json              text eol=lf

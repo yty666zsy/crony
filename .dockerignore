@@ -1,1 +1,18 @@
-
+# 构建上下文裁剪：不要把本地依赖缓存、密钥、二进制塞进镜像
+.git
+.gocache
+bin
+dist
+node_modules
+admin/web/node_modules
+admin/logs
+node/logs
+*.log
+.env
+.env.*
+!.env.example
+.tags
+.tags_sorted_by_file
+README*.md
+doc
+research

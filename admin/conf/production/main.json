@@ -12,7 +12,7 @@
     "log-zap": false
   },
   "system": {
-    "env": "testing",
+    "env": "production",
     "addr": 8089,
     "#node-timeout": "Node registration timeout, in seconds",
     "node-ttl": 5,
@@ -46,6 +46,20 @@
   "webhook": {
     "url": "url",
     "kind": ""
+  },
+  "auth": {
+    "#jwt-secret": "JWT 签名密钥，必须 >= 32 字节随机串。生产环境留空将拒绝启动（fail fast）；推荐用环境变量注入：CRONY_AUTH_JWT_SECRET=<openssl rand -hex 32>，不要写进本文件。",
+    "jwt-secret": "",
+    "#token-expire-hours": "登录令牌有效期（小时），默认 168 = 7 天",
+    "token-expire-hours": 168,
+    "#bootstrap-admin-user": "首次启动（user 表为空）时创建的初始管理员用户名",
+    "bootstrap-admin-user": "admin",
+    "#bootstrap-admin-password": "初始管理员口令，>= 8 位且不得为常见弱口令。留空则不创建任何账号（改为允许首个管理员引导注册）。推荐用环境变量注入：CRONY_AUTH_BOOTSTRAP_ADMIN_PASSWORD。",
+    "bootstrap-admin-password": "",
+    "#bootstrap-admin-email": "初始管理员邮箱，用于失败告警",
+    "bootstrap-admin-email": "",
+    "#allow-public-register": "已存在用户后是否仍开放公开注册。默认 false：注册接口非引导场景必须由管理员令牌调用",
+    "allow-public-register": false
   },
   "log": {
     "level": "warn",

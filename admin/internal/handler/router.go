@@ -1,9 +1,13 @@
 package handler
 
 import (
+	"net/http"
+	"os"
+
 	"github.com/gin-gonic/gin"
 	"github.com/tmnhs/crony/admin/internal/middlerware"
 	"github.com/tmnhs/crony/admin/internal/model/resp"
+	"github.com/tmnhs/crony/common/pkg/logger"
 )
 
 func RegisterRouters(r *gin.Engine) {
@@ -14,6 +18,13 @@ func RegisterRouters(r *gin.Engine) {
 	configNoRoute(r)
 }
 
+// configRoute 注册全部业务路由。
+//
+// 鉴权分层（阶段 0 引入 RBAC）：
+//   - 公开：/ping、/login、/register（register 内部再判定是否为"首个管理员引导"，
+//     非引导场景必须携带管理员令牌，详见 handler/user.go）；
+//   - 登录即可（普通用户）：任务、脚本查询、节点查询、统计、自身信息与改密；
+//   - 仅管理员：用户管理、节点删除、脚本增删（这些都是影响面最大的操作）。
 func configRoute(r *gin.Engine) {
 
 	hello := r.Group("/ping")
@@ -59,35 +70,68 @@ func configRoute(r *gin.Engine) {
 		job.POST("search", defaultJobRouter.Search)
 		job.POST("log", defaultJobRouter.SearchLog)
 		job.POST("once", defaultJobRouter.Once)
-		//job.POST("kill", defaultJobRouter.Kill)
+		//job.POST("kill", defaultJobRouter.Kill)  // 阶段 1 恢复：需先补齐取消传播（进程组/容器）
 	}
 
 	user := r.Group("/user")
 	user.Use(middlerware.JWTAuth())
 	{
-		user.POST("del", defaultUserRouter.Delete)
-		user.POST("update", defaultUserRouter.Update)
+		// 登录用户可操作自己的信息与口令
 		user.POST("change_pw", defaultUserRouter.ChangePassword)
 		user.GET("find", defaultUserRouter.FindById)
-		user.POST("search", defaultUserRouter.Search)
+
+		// 以下为用户管理动作，仅管理员
+		admin := user.Group("")
+		admin.Use(middlerware.RequireAdmin())
+		{
+			admin.POST("del", defaultUserRouter.Delete)
+			admin.POST("update", defaultUserRouter.Update)
+			admin.POST("search", defaultUserRouter.Search)
+		}
 	}
+
 	node := r.Group("/node")
 	node.Use(middlerware.JWTAuth())
 	{
 		node.POST("search", defaultNodeRouter.Search)
-		node.POST("del", defaultNodeRouter.Delete)
 	}
+	nodeAdmin := r.Group("/node")
+	nodeAdmin.Use(middlerware.JWTAuth(), middlerware.RequireAdmin())
+	{
+		nodeAdmin.POST("del", defaultNodeRouter.Delete)
+	}
+
 	script := r.Group("/script")
 	script.Use(middlerware.JWTAuth())
 	{
-		script.POST("add", defaultScriptRouter.CreateOrUpdate)
-		script.POST("del", defaultScriptRouter.Delete)
 		script.GET("find", defaultScriptRouter.FindById)
 		script.POST("search", defaultScriptRouter.Search)
 	}
+	scriptAdmin := r.Group("/script")
+	scriptAdmin.Use(middlerware.JWTAuth(), middlerware.RequireAdmin())
+	{
+		scriptAdmin.POST("add", defaultScriptRouter.CreateOrUpdate)
+		scriptAdmin.POST("del", defaultScriptRouter.Delete)
+	}
 }
 
+// configNoRoute 挂载旧版前端（Vue2 打包产物 ./dist）。
+//
+// 旧实现无条件执行 r.LoadHTMLGlob("./dist/*.html")：gin 的模板 glob 匹配不到任何文件时
+// 会直接 panic，因此在"只跑 API / 还没构建前端 / 容器里没有 dist"的环境里，
+// admin 服务会启动失败。现在先探测 dist，缺失时只注册探活接口并打印告警。
 func configNoRoute(r *gin.Engine) {
+	if _, err := os.Stat("./dist/index.html"); err != nil {
+		logger.GetLogger().Warn("未找到 ./dist/index.html：跳过旧版前端静态资源挂载，仅提供 API 服务。")
+		r.GET("/", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{
+				"service": "crony-admin",
+				"ui":      false,
+				"message": "旧版前端未构建（./dist 不存在）。AI Agent 控制台在阶段 1 交付后挂载到 /console。",
+			})
+		})
+		return
+	}
 	r.LoadHTMLGlob("./dist/*.html") // npm打包成dist的路径
 	r.StaticFile("favicon.ico", "./dist/favicon.ico")
 	r.Static("/css", "./dist/css")         // dist里面的静态资源

@@ -12,7 +12,7 @@
     "log-zap": false
   },
   "system": {
-    "env": "testing",
+    "env": "production",
     "addr": 8089,
     "#node-timeout": "Node registration timeout, in seconds",
     "node-ttl": 5,

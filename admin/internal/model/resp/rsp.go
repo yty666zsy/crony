@@ -27,6 +27,10 @@ const (
 	ErrorJobFormat        = 1002
 	ErrorTokenGenerate    = 1003
 	ErrorUserNameExist    = 1004
+	// ErrorForbidden 已登录但权限不足（阶段 0 新增 RBAC 后的返回码）
+	ErrorForbidden = 1005
+	// ErrorRegisterClosed 注册已关闭（非首个管理员引导场景必须由管理员操作）
+	ErrorRegisterClosed = 1006
 )
 
 func Result(code int, data interface{}, msg string, c *gin.Context) {

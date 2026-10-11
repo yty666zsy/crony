@@ -18,3 +18,11 @@ node/conf
 package-lock.json
 
 bin
+
+# 本机 Go 构建缓存（沙箱/CI 中重定向到工作区内时不要入库）
+.gocache
+
+# 部署密钥
+.env
+.env.local
+.env.production

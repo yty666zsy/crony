@@ -191,15 +191,17 @@ func (n *NodeWatcherService) Search(s *request.ReqNodeSearch) ([]models.Node, in
 		db = db.Where("uuid = ?", s.UUID)
 	}
 	if len(s.IP) > 0 {
-		db.Where("ip = ?", s.IP)
+		db = db.Where("ip = ?", s.IP)
 	}
 	if s.Status > 0 {
-		db.Where("status = ?", s.Status)
+		db = db.Where("status = ?", s.Status)
 	}
 	if s.UpTime > 0 {
-		db.Where("up > ?", s.UpTime)
+		db = db.Where("up > ?", s.UpTime)
 	}
-	nodes := make([]models.Node, 2)
+	// 必须是 make([]T, 0)：旧代码 make([]T, 2) 会让 GORM 在既有 2 个零值元素后再追加，
+	// 导致分页结果里混入空行、total 与列表长度不一致。
+	nodes := make([]models.Node, 0)
 	var total int64
 	err := db.Count(&total).Error
 	if err != nil {
@@ -308,7 +310,7 @@ func (n *NodeWatcherService) FailOver(nodeUUID string) (success Result, fail Res
 	return
 }
 
-//get all the job under a node
+// get all the job under a node
 func (n *NodeWatcherService) GetJobs(nodeUUID string) (jobs []models.Job, err error) {
 	resps, err := etcdclient.Get(fmt.Sprintf(etcdclient.KeyEtcdJobProfile, nodeUUID), clientv3.WithPrefix())
 	if err != nil {

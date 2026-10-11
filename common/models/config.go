@@ -63,6 +63,24 @@ type (
 		StacktraceKey string `mapstructure:"stacktrace-key" json:"stacktraceKey" yaml:"stacktrace-key" ini:"stacktrace-key"`
 		LogInConsole  bool   `mapstructure:"log-in-console" json:"logInConsole" yaml:"log-in-console" ini:"log-in-console"`
 	}
+	Auth struct {
+		// JwtSecret JWT 签名密钥。生产环境必须显式配置（>= 32 字节随机串），
+		// 可通过环境变量 CRONY_AUTH_JWT_SECRET 注入，禁止写死在代码里。
+		JwtSecret string `mapstructure:"jwt-secret" json:"jwtSecret" yaml:"jwt-secret" ini:"jwt-secret"`
+		// TokenExpireHours 登录令牌有效期（小时），默认 168（7 天）。
+		TokenExpireHours int64 `mapstructure:"token-expire-hours" json:"tokenExpireHours" yaml:"token-expire-hours" ini:"token-expire-hours"`
+		// BootstrapAdminUser 首次启动（用户表为空）时创建的初始管理员用户名。
+		BootstrapAdminUser string `mapstructure:"bootstrap-admin-user" json:"bootstrapAdminUser" yaml:"bootstrap-admin-user" ini:"bootstrap-admin-user"`
+		// BootstrapAdminPassword 首次启动时初始管理员口令。
+		// 未配置则不会创建任何账号，改为允许"首个管理员引导注册"（见 handler/user.go Register）。
+		// 该字段只应从环境变量注入，不要写进配置文件。
+		BootstrapAdminPassword string `mapstructure:"bootstrap-admin-password" json:"-" yaml:"bootstrap-admin-password" ini:"bootstrap-admin-password"`
+		// BootstrapAdminEmail 初始管理员邮箱（可选，用于失败告警通知）。
+		BootstrapAdminEmail string `mapstructure:"bootstrap-admin-email" json:"bootstrapAdminEmail" yaml:"bootstrap-admin-email" ini:"bootstrap-admin-email"`
+		// AllowPublicRegister 是否允许已存在用户后仍开放公开注册。
+		// 默认 false：注册接口在非"首个管理员引导"场景下必须由管理员令牌调用。
+		AllowPublicRegister bool `mapstructure:"allow-public-register" json:"allowPublicRegister" yaml:"allow-public-register" ini:"allow-public-register"`
+	}
 	Config struct {
 		WebHook WebHook `mapstructure:"webhook" json:"webhook" yaml:"webhook" ini:"webhook"`
 		Log     Log     `mapstructure:"log" json:"log" yaml:"log" ini:"log"`
@@ -70,6 +88,7 @@ type (
 		System  System  `mapstructure:"system" json:"system" yaml:"system" ini:"system"`
 		Mysql   Mysql   `mapstructure:"mysql" json:"mysql" yaml:"mysql" ini:"mysql"`
 		Etcd    Etcd    `mapstructure:"etcd" json:"etcd" yaml:"etcd" ini:"etcd"`
+		Auth    Auth    `mapstructure:"auth" json:"auth" yaml:"auth" ini:"auth"`
 	}
 )
 
