@@ -687,6 +687,20 @@ func TestNewReadonlyRegistryOnlyRegistersAvailableSources(t *testing.T) {
 	if len(r2.Names()) != 5 {
 		t.Fatalf("全部数据源接入后应注册 5 个工具: %v", r2.Names())
 	}
+	// 阶段 3：探测通道是**只读通道**，装配后工具数变 6；没装配则不出现
+	// （节点侧不装配，因此节点上永远不会出现 node_probe）。
+	r3, err := NewReadonlyRegistry(DefaultPolicy(), Sources{
+		Logs:       &fakeLogSource{},
+		NodeStatus: &fakeNodeSource{},
+		SQL:        &fakeSQLSource{},
+		Probe:      &fakeProbeSource{},
+	})
+	if err != nil {
+		t.Fatalf("构造失败: %v", err)
+	}
+	if names := r3.Names(); len(names) != 6 || !strings.Contains(strings.Join(names, ","), "node_probe") {
+		t.Fatalf("装配探测数据源后应注册 node_probe，实际: %v", names)
+	}
 	// 所有工具都必须只读（阶段 2 的硬约束）
 	for _, name := range r2.Names() {
 		tool, _ := r2.Get(name)
@@ -725,5 +739,151 @@ func TestResultTextIsModelFriendly(t *testing.T) {
 	}
 	if _, err := json.Marshal(res); err != nil {
 		t.Fatalf("Result 应可序列化: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// node_probe（阶段 3 第二段：admin→node 只读探测通道）
+// ---------------------------------------------------------------------------
+
+type fakeProbeSource struct {
+	res    ProbeResult
+	err    error
+	calls  int
+	lastRe ProbeRequest
+}
+
+func (f *fakeProbeSource) Probe(_ context.Context, req ProbeRequest) (ProbeResult, error) {
+	f.calls++
+	f.lastRe = req
+	return f.res, f.err
+}
+
+// TestNodeProbeToolRejectsNonWhitelistedCommandBeforeCallingNode
+// 白名单校验必须在**发请求之前**：错在入口比错在节点侧少一次审计垃圾，
+// 也避免"把危险命令写进共享库"这个动作本身。
+func TestNodeProbeToolRejectsNonWhitelistedCommandBeforeCallingNode(t *testing.T) {
+	src := &fakeProbeSource{}
+	tool := NewNodeProbeTool(src)
+	cases := []map[string]interface{}{
+		{"node": "node-1", "command": "rm", "args": []interface{}{"-rf", "/"}},
+		{"node": "node-1", "command": "sc", "args": []interface{}{"stop", "MySQL84"}},
+		{"node": "node-1", "command": "netstat", "args": []interface{}{"-ano", "|", "findstr", "80"}},
+	}
+	for _, args := range cases {
+		res, err := tool.Execute(context.Background(), args)
+		if err != nil {
+			t.Fatalf("工具不应返回 error（应转成 Result.Err）: %v", err)
+		}
+		if res.OK {
+			t.Fatalf("白名单外命令不得算成功: %+v", res)
+		}
+		if res.Err == "" {
+			t.Fatalf("必须给出拒绝原因: %+v", res)
+		}
+	}
+	if src.calls != 0 {
+		t.Fatalf("被拒命令不得写到节点请求表，实际调用数据源 %d 次", src.calls)
+	}
+}
+
+// TestNodeProbeToolRequiresNodeAndCommand 缺参数要立刻说清，不能默默探到"当前节点"。
+func TestNodeProbeToolRequiresNodeAndCommand(t *testing.T) {
+	src := &fakeProbeSource{}
+	tool := NewNodeProbeTool(src)
+	for _, args := range []map[string]interface{}{
+		{"command": "netstat"},               // 没有 node
+		{"node": "  ", "command": "netstat"}, // 空 node
+		{"node": "node-1"},                   // 没有 command
+	} {
+		res, err := tool.Execute(context.Background(), args)
+		if err != nil {
+			t.Fatalf("应转成 Result.Err: %v", err)
+		}
+		if res.OK || res.Err == "" {
+			t.Fatalf("缺参数必须失败并说明原因: %+v", res)
+		}
+	}
+	if src.calls != 0 {
+		t.Fatalf("参数不合法时不得发起探测，实际 %d 次", src.calls)
+	}
+}
+
+// TestNodeProbeToolSuccessCarriesNodeProbeEvidence
+// 证据 ref 必须能回溯到审计行（node_probe:<request_id>），Source 必须是 node_probe
+// ——结论句守卫靠这个前缀把"真观测过"与"猜的"区分开。
+func TestNodeProbeToolSuccessCarriesNodeProbeEvidence(t *testing.T) {
+	src := &fakeProbeSource{res: ProbeResult{
+		RequestID: "pnode-1-123-7",
+		Status:    "done",
+		Output:    "TCP 0.0.0.0:13307 LISTENING",
+		ExitCode:  0,
+		Hostname:  "win-live-host",
+	}}
+	tool := NewNodeProbeTool(src)
+	res, err := tool.Execute(context.Background(), map[string]interface{}{
+		"node": "node-1", "command": "netstat", "args": []interface{}{"-ano"}, "reason": "确认端口是否监听",
+	})
+	if err != nil {
+		t.Fatalf("执行失败: %v", err)
+	}
+	if !res.OK {
+		t.Fatalf("应成功: %+v", res)
+	}
+	if !strings.Contains(res.Output, "win-live-host") || !strings.Contains(res.Output, "13307") {
+		t.Fatalf("输出需含主机名与真实输出: %q", res.Output)
+	}
+	if len(res.Evidence) != 1 {
+		t.Fatalf("应产生 1 条证据: %+v", res.Evidence)
+	}
+	ev := res.Evidence[0]
+	if ev.Source != "node_probe" {
+		t.Fatalf("证据来源应为 node_probe（守卫据此判定观测）: %q", ev.Source)
+	}
+	if ev.Ref != "node_probe:pnode-1-123-7" {
+		t.Fatalf("证据 ref 应可回溯审计行: %q", ev.Ref)
+	}
+	if src.lastRe.NodeUUID != "node-1" || src.lastRe.Command != "netstat" || src.lastRe.Reason != "确认端口是否监听" {
+		t.Fatalf("数据源收到的请求不完整: %+v", src.lastRe)
+	}
+	// args 是 []interface{} 也必须被正确取到（模型给的就是这种类型）
+	if len(src.lastRe.Args) != 1 || src.lastRe.Args[0] != "-ano" {
+		t.Fatalf("参数解析错误: %+v", src.lastRe.Args)
+	}
+	if res.Meta["request_id"] != "pnode-1-123-7" {
+		t.Fatalf("Meta 应带 request_id: %+v", res.Meta)
+	}
+}
+
+// TestNodeProbeToolExpiredIsNotSuccess 没人领取（节点离线）必须**明确失败**，
+// 且文案不能让人误读成"命令执行失败/没有发现"。
+func TestNodeProbeToolExpiredIsNotSuccess(t *testing.T) {
+	src := &fakeProbeSource{res: ProbeResult{
+		RequestID: "p1", Status: "expired", ExitCode: -1,
+		Error: "节点 node-1 在 15s 内没有领取这条探测请求：该节点可能离线或探测通道未启用。**这不等于命令执行失败**。",
+	}}
+	tool := NewNodeProbeTool(src)
+	res, err := tool.Execute(context.Background(), map[string]interface{}{"node": "node-1", "command": "netstat"})
+	if err != nil {
+		t.Fatalf("执行失败: %v", err)
+	}
+	if res.OK {
+		t.Fatalf("expired 不是成功: %+v", res)
+	}
+	if !strings.Contains(res.Output, "不等于命令执行失败") {
+		t.Fatalf("输出必须保留这条澄清: %q", res.Output)
+	}
+}
+
+// TestNodeProbeToolWithoutSourceIsDenied 没装配数据源时必须显式拒绝，
+// 而不是返回"什么都没发现"（那会被模型当成"端口没监听"的证据）。
+func TestNodeProbeToolWithoutSourceIsDenied(t *testing.T) {
+	tool := NewNodeProbeTool(nil)
+	res, err := tool.Execute(context.Background(), map[string]interface{}{"node": "n", "command": "netstat"})
+	if err == nil {
+		t.Fatalf("未接入数据源应返回错误，实际结果 %+v", res)
+	}
+	if !errors.Is(err, ErrToolDenied) {
+		t.Fatalf("应为 ErrToolDenied: %v", err)
 	}
 }

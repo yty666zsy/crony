@@ -27,9 +27,12 @@ type NodeServer struct {
 }
 
 func NewNodeServer() (*NodeServer, error) {
-	uuid, err := utils.UUID()
-	if err != nil {
-		return nil, err
+	// 阶段 3 修正：节点身份必须**跨重启稳定**。
+	// 上游实现每次启动都生成随机 UUID，导致 job_run.node_uuid 无法归属、
+	// node_metric 断线、admin→node 探测请求发给一个永不存在的节点。
+	uuid, warning := LoadOrCreateNodeUUID(nodeIdentityDir())
+	if warning != "" {
+		logger.GetLogger().Warn("[node] " + warning)
 	}
 	ip, err := utils.LocalIP()
 	if err != nil {

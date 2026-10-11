@@ -40,6 +40,10 @@ func RegisterTables(db *gorm.DB) error {
 		// 阶段 3（观测闭环）：节点自报资源水位，供 admin 侧 node_status 工具读取。
 		// node_uuid 上有唯一索引：一个节点一行"最新值"，节点重启重报不会累积垃圾行。
 		models.NodeMetric{},
+		// 阶段 3（观测闭环）：admin→node 只读探测请求（审计 + 结果回传）。
+		// request_id 上有唯一索引：一次探测一条记录，可作为证据定位回溯
+		// （证据 ref 形如 node_probe:<request_id>）。
+		models.NodeProbeRequest{},
 	)
 	if err != nil {
 		return errors.Wrap(err, "register table failed")

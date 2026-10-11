@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tmnhs/crony/common/models"
 	"github.com/tmnhs/crony/common/pkg/jsonschema"
 	"github.com/tmnhs/crony/common/pkg/llm"
 )
@@ -434,6 +435,198 @@ func (t *NodeStatusTool) Execute(ctx context.Context, args map[string]interface{
 }
 
 // ---------------------------------------------------------------------------
+// node_probe
+// ---------------------------------------------------------------------------
+
+// stringSliceArg 从工具参数里取字符串数组。
+//
+// 模型可能给 []interface{}（JSON 反序列化的自然结果）、[]string（测试直接构造）
+// 或单个字符串。**不做宽松兜底**：类型不对就当空数组，让 guard 去拒绝，
+// 而不是"猜模型想传什么"——猜错就是把命令执行到错的地方。
+func stringSliceArg(args map[string]interface{}, key string) []string {
+	raw, ok := args[key]
+	if !ok || raw == nil {
+		return []string{}
+	}
+	switch v := raw.(type) {
+	case []string:
+		return v
+	case []interface{}:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			s, ok := item.(string)
+			if !ok {
+				return []string{}
+			}
+			out = append(out, s)
+		}
+		return out
+	default:
+		return []string{}
+	}
+}
+
+// stringsToAny 把命令名列表转成 WithEnum 需要的 []interface{}。
+func stringsToAny(in []string) []interface{} {
+	out := make([]interface{}, 0, len(in))
+	for _, s := range in {
+		out = append(out, s)
+	}
+	return out
+}
+
+// ProbeRequest 一次节点侧只读探测请求。
+type ProbeRequest struct {
+	NodeUUID string
+	// Command 只读命令名（必须在 shell 白名单内）
+	Command string
+	Args    []string
+	Timeout time.Duration
+	// Reason 为什么要探测（进审计与人话报告）
+	Reason string
+	// CreatedBy 发起人（admin 用户或 agent 会话）
+	CreatedBy string
+}
+
+// ProbeResult 探测结果。
+type ProbeResult struct {
+	// RequestID 探测请求 ID：证据用 `node_probe:<RequestID>` 定位，可回溯到审计行
+	RequestID string
+	// Status pending/running/done/failed/timeout/expired
+	Status   string
+	Output   string
+	ExitCode int
+	// Error 失败原因（白名单拒绝 / 超时 / 节点离线）
+	Error string
+	// Hostname 实际执行的节点主机名（证据归属）
+	Hostname string
+}
+
+// ProbeSource admin→node 只读探测通道。
+//
+// 为什么要有独立数据源接口：这条通道是"把请求写进共享库、由节点领取执行、
+// 再把结果写回"，与查询类数据源（读库）本质不同；抽成接口后
+// admin（写请求+等结果）与测试（假数据源）可以各自实现。
+type ProbeSource interface {
+	Probe(ctx context.Context, req ProbeRequest) (ProbeResult, error)
+}
+
+// NodeProbeTool 在指定节点上执行**只读**诊断命令。
+//
+// 与 shell_readonly 的区别：shell_readonly 只在**本进程所在机器**上执行
+// （admin 上是 admin 那台机器，节点上是那台节点），而 node_probe 是
+// admin 用来问**目标节点**的——这正是"端口到底有没有监听"这类问题的唯一来源。
+//
+// 安全边界（全部强制，不靠提示词）：
+//   - 命令必须在 tools.GuardShellCommand 白名单内（admin 侧先校验，节点侧**再校验一次**）；
+//   - 不用 shell 执行（argv 直传，没有管道/重定向/变量展开）；
+//   - 有超时上限与输出上限；
+//   - 每次探测在 node_probe_request 表留下一条审计（谁、为什么、跑了什么、结果）。
+type NodeProbeTool struct{ src ProbeSource }
+
+// NewNodeProbeTool 创建工具。
+func NewNodeProbeTool(src ProbeSource) *NodeProbeTool { return &NodeProbeTool{src: src} }
+
+// Name 实现 Tool。
+func (t *NodeProbeTool) Name() string { return "node_probe" }
+
+// Description 实现 Tool。
+func (t *NodeProbeTool) Description() string {
+	return "在**指定节点**上执行只读诊断命令（端口监听、进程、服务状态、网络配置）。" +
+		"admin 只能看到数据库，看不到节点本机事实；要断言\"端口未监听/服务未运行\"这类结论，" +
+		"必须先在这里实际探测拿到证据。允许的命令：" + strings.Join(AllowedShellCommands(), "、") +
+		"（Windows 常用 netstat -ano / tasklist /fi \"imagename eq xxx.exe\" / sc query <服务名>）。"
+}
+
+// Schema 实现 Tool。
+func (t *NodeProbeTool) Schema() *jsonschema.Schema {
+	return jsonschema.Object(map[string]*jsonschema.Schema{
+		"node":    jsonschema.String("目标节点 UUID（必填；admin 侧没有\"当前节点\"语义）"),
+		"command": jsonschema.String("只读命令名").WithEnum(stringsToAny(AllowedShellCommands())...),
+		"args":    jsonschema.Array(jsonschema.String("单个参数"), "参数列表，例如 [\"-ano\"] 或 [\"/fi\",\"imagename eq mysqld.exe\"]").WithItems(0, 8),
+		"reason":  jsonschema.String("为什么要探测（写进审计与人话报告）"),
+	}, "node", "command")
+}
+
+// ReadOnly 实现 Tool。
+func (t *NodeProbeTool) ReadOnly() bool { return true }
+
+// Timeout 实现 Tool：节点侧执行 + 轮询领取，给够时间但**不能无限**。
+func (t *NodeProbeTool) Timeout() time.Duration { return 20 * time.Second }
+
+// Execute 实现 Tool。
+func (t *NodeProbeTool) Execute(ctx context.Context, args map[string]interface{}) (Result, error) {
+	if t.src == nil {
+		return Result{}, fmt.Errorf("%w: node_probe 通道未接入（admin 侧未装配探测数据源）", ErrToolDenied)
+	}
+	node := strings.TrimSpace(llm.StringOr(args, "node", ""))
+	if node == "" {
+		return Result{OK: false, Summary: "缺少 node 参数", Err: "node_probe 必须指定 node（目标节点 UUID）"}, nil
+	}
+	command := strings.TrimSpace(llm.StringOr(args, "command", ""))
+	argv := stringSliceArg(args, "args")
+	// admin 侧先校验一次：错在入口比错在节点侧更快、更省一次往返。
+	// 节点侧**仍会再校验**（共享库可被写入，节点不信任库里的内容）。
+	if command == "" {
+		return Result{OK: false, Summary: "缺少 command 参数", Err: "node_probe 必须指定 command"}, nil
+	}
+	if err := GuardShellCommand(command, argv, DefaultPolicy()); err != nil {
+		return Result{OK: false, Summary: "命令未通过只读白名单", Err: err.Error()}, nil
+	}
+	reason := strings.TrimSpace(llm.StringOr(args, "reason", ""))
+	res, err := t.src.Probe(ctx, ProbeRequest{
+		NodeUUID:  node,
+		Command:   command,
+		Args:      argv,
+		Timeout:   t.Timeout(),
+		Reason:    reason,
+		CreatedBy: "agent",
+	})
+	if err != nil {
+		return Result{OK: false, Summary: "探测未能完成", Err: llm.Redact(err.Error())}, nil
+	}
+	head := fmt.Sprintf("node=%s command=%s %s status=%s exit_code=%d",
+		node, command, strings.Join(argv, " "), res.Status, res.ExitCode)
+	if res.Hostname != "" {
+		head = fmt.Sprintf("node=%s hostname=%s command=%s %s status=%s exit_code=%d",
+			node, res.Hostname, command, strings.Join(argv, " "), res.Status, res.ExitCode)
+	}
+	out := head + "\n" + res.Output
+	if res.Error != "" {
+		out += "\n[error] " + res.Error
+	}
+	ok := res.Status == models.NodeProbeDone
+	summary := fmt.Sprintf("在节点 %s 执行 %s %s：status=%s exit_code=%d",
+		firstNonEmpty(res.Hostname, node), command, strings.Join(argv, " "), res.Status, res.ExitCode)
+	quote := res.Output
+	if len(quote) > 400 {
+		quote = quote[:400] + "…（已截断）"
+	}
+	return Result{
+		OK:      ok,
+		Output:  out,
+		Summary: summary,
+		Err:     res.Error,
+		Meta: map[string]interface{}{
+			"request_id": res.RequestID,
+			"status":     res.Status,
+			"exit_code":  res.ExitCode,
+			"node_uuid":  node,
+			"hostname":   res.Hostname,
+			"command":    command,
+			"args":       argv,
+		},
+		// Source="node_probe"：结论句守卫按 `node` 前缀识别"节点侧观测"，
+		// 因此引用这条证据的结论就不会再被标为"未观测的节点侧断言"。
+		Evidence: []Evidence{{
+			Source: "node_probe",
+			Ref:    fmt.Sprintf("node_probe:%s", firstNonEmpty(res.RequestID, node)),
+			Quote:  fmt.Sprintf("%s %s -> %s", command, strings.Join(argv, " "), quote),
+		}},
+	}, nil
+}
+
+// ---------------------------------------------------------------------------
 // log_search
 // ---------------------------------------------------------------------------
 
@@ -630,6 +823,8 @@ type Sources struct {
 	NodeStatus NodeStatusSource
 	Logs       LogSource
 	SQL        SQLSource
+	// Probe admin→node 只读探测通道（只有 admin 侧装配：节点不能给自己发探测请求）。
+	Probe ProbeSource
 }
 
 // NewReadonlyRegistry 创建"只读工具集"注册表。
@@ -659,6 +854,13 @@ func NewReadonlyRegistry(policy Policy, src Sources, opts ...Option) (*Registry,
 	}
 	if src.SQL != nil {
 		if err := r.Register(NewSQLTool(src.SQL, policy.SQLMaxRows)); err != nil {
+			return nil, err
+		}
+	}
+	// 只有 admin 装配了探测数据源（节点侧为 nil，因此节点上不会出现 node_probe——
+	// 那条通道的方向是 admin→node，节点给自己发请求没有意义）。
+	if src.Probe != nil {
+		if err := r.Register(NewNodeProbeTool(src.Probe)); err != nil {
 			return nil, err
 		}
 	}

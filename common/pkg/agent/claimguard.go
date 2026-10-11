@@ -100,6 +100,13 @@ func CheckNodeSideClaims(text string, cited []string, observed []tools.Evidence)
 		if !isNodeObservedSource(e.Source) || strings.TrimSpace(e.Ref) == "" {
 			continue
 		}
+		// 关键：**失败/无观测的证据不算观测**。
+		// 否则会出现"跑一次工具 = 任意断言通行证"：模型调用 node_probe，
+		// 命令被白名单拒绝或节点超时没领取，它照样引用这条 ref 去断言
+		// "端口未监听"——守卫反而替这句没有依据的话背书。
+		if !isUsableNodeObservation(e) {
+			continue
+		}
 		res.NodeObserved = true
 		nodeRefs[strings.ToLower(strings.TrimSpace(e.Ref))] = true
 	}
@@ -136,6 +143,31 @@ func hasExemptWording(clause string) bool {
 		}
 	}
 	return false
+}
+
+// nodeObservationFailureMarkers 证据自身表明"这次探测没拿到任何观测"的标记。
+//
+// 覆盖三类：命令被拒（白名单）、执行超时、请求没人领取（节点离线/通道未启用）。
+// **保守取向**：命中即视为不可用——错判成"无观测"只会多显示一条告警，
+// 错判成"有观测"却会让一句没依据的结论通过，后者是不可接受的失败方向。
+var nodeObservationFailureMarkers = []string{
+	"[error]", "被节点侧白名单拒绝", "白名单拒绝", "执行超时", "调用被取消",
+	"status=expired", "expired", "没有领取", "探测未能完成",
+}
+
+// isUsableNodeObservation 这条节点侧证据是否真的包含观测内容。
+func isUsableNodeObservation(e tools.Evidence) bool {
+	q := strings.TrimSpace(e.Quote)
+	if q == "" {
+		return false
+	}
+	low := strings.ToLower(q)
+	for _, m := range nodeObservationFailureMarkers {
+		if strings.Contains(low, strings.ToLower(m)) {
+			return false
+		}
+	}
+	return true
 }
 
 func isNodeObservedSource(source string) bool {

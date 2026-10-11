@@ -324,3 +324,67 @@ func TestGuardErrorsAreClassifiable(t *testing.T) {
 		t.Fatalf("目录白名单外应报 ErrToolDenied: %v", err)
 	}
 }
+
+// TestGuardShellCommandProbeCommands 锁定阶段 3 新增的节点侧探测命令白名单。
+//
+// 这些命令是"admin 让节点跑东西"的唯一入口（node_probe 通道），所以这里
+// **既测放行也测拒绝**：只测放行的话，一个 `anyFlag: true` 写错就能把
+// `ipconfig /release`（写动作）或 `tasklist /s <远程主机>`（外发动作）放进来。
+func TestGuardShellCommandProbeCommands(t *testing.T) {
+	policy := DefaultPolicy().Normalize()
+	allowed := []struct {
+		cmd  string
+		args []string
+	}{
+		{cmd: "netstat", args: []string{"-ano"}},
+		{cmd: "netstat", args: []string{"-a", "-n", "-o"}},
+		{cmd: "netstat", args: []string{"-p", "tcp"}},
+		{cmd: "ss", args: []string{"-lntp"}},
+		{cmd: "tasklist", args: []string{"/fi", "imagename eq mysqld.exe"}},
+		{cmd: "tasklist", args: []string{"/fo", "list", "/nh"}},
+		{cmd: "sc", args: []string{"query", "MySQL84"}},
+		{cmd: "sc", args: []string{"qc", "MySQL84"}},
+		{cmd: "ipconfig", args: []string{"/all"}},
+	}
+	for _, tc := range allowed {
+		if err := GuardShellCommand(tc.cmd, tc.args, policy); err != nil {
+			t.Fatalf("%s %v 应放行: %v", tc.cmd, tc.args, err)
+		}
+	}
+
+	denied := []struct {
+		name string
+		cmd  string
+		args []string
+	}{
+		// 写动作：改服务状态、释放/续租 IP、刷新 DNS
+		{name: "sc stop", cmd: "sc", args: []string{"stop", "MySQL84"}},
+		{name: "sc config", cmd: "sc", args: []string{"config", "MySQL84"}},
+		{name: "sc delete", cmd: "sc", args: []string{"delete", "MySQL84"}},
+		{name: "ipconfig /release", cmd: "ipconfig", args: []string{"/release"}},
+		{name: "ipconfig /renew", cmd: "ipconfig", args: []string{"/renew"}},
+		{name: "ipconfig /flushdns", cmd: "ipconfig", args: []string{"/flushdns"}},
+		// 外发动作：/s 是对远程主机调用
+		{name: "tasklist /s 远程", cmd: "tasklist", args: []string{"/s", "other-host"}},
+		// 参数越界
+		{name: "netstat 未知开关", cmd: "netstat", args: []string{"-z"}},
+		{name: "netstat 协议名错", cmd: "netstat", args: []string{"-p", "icmp"}},
+		{name: "tasklist 未知开关", cmd: "tasklist", args: []string{"/x"}},
+		{name: "sc 没有子命令", cmd: "sc", args: []string{}},
+		// 元字符（即使将来有人改成走 shell 也不会立刻变 RCE）
+		{name: "管道", cmd: "netstat", args: []string{"-ano", "|", "findstr", "13307"}},
+		{name: "重定向", cmd: "netstat", args: []string{"-ano", ">", "out.txt"}},
+		{name: "命令替换", cmd: "tasklist", args: []string{"/fi", "imagename eq $(whoami)"}},
+	}
+	for _, tc := range denied {
+		t.Run(tc.name, func(t *testing.T) {
+			err := GuardShellCommand(tc.cmd, tc.args, policy)
+			if err == nil {
+				t.Fatalf("%s %v 必须被拒绝", tc.cmd, tc.args)
+			}
+			if !errors.Is(err, ErrToolDenied) && !errors.Is(err, ErrInvalidArgs) {
+				t.Fatalf("拒绝原因类型不符: %v", err)
+			}
+		})
+	}
+}

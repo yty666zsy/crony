@@ -62,6 +62,54 @@ func TestClaimGuardExemptsWhenNodeEvidenceCited(t *testing.T) {
 	}
 }
 
+// TestClaimGuardAcceptsNodeProbeEvidence 阶段 3 第二段的关键衔接：
+// node_probe 工具拿到的证据必须被认作"节点侧观测"。
+//
+// 两条增量必须拼得上：探测通道负责**真的去问节点**，结论句守卫负责
+// **拦住没问就断言的结论**。如果 node_probe 的证据不算节点侧观测，
+// 那模型即使老老实实探测了，结论仍会被标记为"未观测"——通道白建。
+func TestClaimGuardAcceptsNodeProbeEvidence(t *testing.T) {
+	observed := []tools.Evidence{
+		{Source: "job_run", Ref: "job_run:j910005-m1", Quote: "status=failed"},
+		{Source: "node_probe", Ref: "node_probe:pnode-it-01-1791721-1",
+			Quote: "netstat -ano -> TCP 0.0.0.0:13307 LISTENING\nTCP 127.0.0.1:13306 LISTENING"},
+	}
+	refs := []string{"job_run:j910005-m1", "node_probe:pnode-it-01-1791721-1"}
+	res := CheckNodeSideClaims(liveAssertiveSummary, refs, observed)
+	if res.Downgraded {
+		t.Fatalf("引用了 node_probe 观测证据的结论不应被标记: %+v", res)
+	}
+	if !res.NodeObserved {
+		t.Fatalf("node_probe 应被识别为节点侧观测: %+v", res)
+	}
+}
+
+// TestClaimGuardFlagsWhenProbeWasRunButNotCited 探测跑了但结论没引用它——
+// 依然算"未观测就断言"（也说明模型可能根本没看探测结果）。
+func TestClaimGuardFlagsWhenProbeWasRunButNotCited(t *testing.T) {
+	observed := []tools.Evidence{
+		{Source: "node_probe", Ref: "node_probe:p1", Quote: "netstat -ano -> TCP ..."},
+	}
+	res := CheckNodeSideClaims(liveAssertiveSummary, []string{"job:910005"}, observed)
+	if !res.Downgraded {
+		t.Fatalf("未引用探测证据的断言必须被标记: %+v", res)
+	}
+}
+
+// TestClaimGuardStillFlagsWhenProbeFoundNothing 探测执行了、但输出里没有监听信息——
+// 依然不能断言"未监听"：netstat 没看到可能是命令被拒、输出被截断或看错端口。
+// 只有**明确观测到否定事实**才算观测到（防止"跑一次工具就获得任意断言许可"）。
+func TestClaimGuardStillFlagsWhenProbeFoundNothing(t *testing.T) {
+	observed := []tools.Evidence{
+		{Source: "node_probe", Ref: "node_probe:p2",
+			Quote: "netstat -ano -> [error] 命令被节点侧白名单拒绝（未执行）"},
+	}
+	res := CheckNodeSideClaims(liveAssertiveSummary, []string{"node_probe:p2"}, observed)
+	if !res.Downgraded {
+		t.Fatalf("探测失败/无输出时不得据此断言: %+v", res)
+	}
+}
+
 // TestClaimGuardFlagsEvenWhenNodeObservedButNotCited 调了 node_status 却没用它支撑结论——
 // 结论依然没有依据，必须标记（"调了工具"不等于"结论有据"）。
 func TestClaimGuardFlagsEvenWhenNodeObservedButNotCited(t *testing.T) {

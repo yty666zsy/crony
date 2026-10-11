@@ -166,6 +166,12 @@ var shellRules = map[string]struct {
 	shortFlags      map[string]flagSpec
 	longFlags       map[string]flagSpec
 	positionalCheck func(string, Policy) error
+	// firstPositionalCheck 只校验**第一个**位置参数（子命令位）。
+	//
+	// 为什么需要它：`positionalCheck` 看不到位置，于是"第一个参数必须是 query"这种
+	// 硬要求只能靠参数正则近似——而近似是危险的：`sc stop MySQL84` 里的 `stop`
+	// 完全符合"服务名"正则，写动作就这样混过了只读白名单（这个漏洞是被单测抓住的）。
+	firstPositionalCheck func(string, Policy) error
 	// anyFlag 为 true 时，形如 `-ef` 的 token 也按 positionalCheck 校验
 	// （用于 ps 这类"选项风格不统一"的命令）。
 	anyFlag     bool
@@ -250,6 +256,81 @@ var shellRules = map[string]struct {
 		},
 		description: "查询 systemd 日志",
 	},
+	// ---------- Windows / 节点侧探测命令（阶段 3：node_probe 通道） ----------
+	//
+	// **为什么必须补这四条**：上面 df/ps/tail/journalctl 是 Linux 习惯。本项目的节点
+	// 绝大多数是 Windows，而"端口是否在监听 / 进程是否在跑 / 服务是否在运行"这三件事
+	// 在 Linux 命令里根本问不出来，admin 侧又观测不到——模型于是只能靠猜
+	// （这正是结论句守卫要拦的"未观测的节点侧断言"）。
+	//
+	// **为什么参数要单独收紧**：这些命令的开关里混着**写动作**和**外发动作**。
+	// 逐个列举而不是放通"任意 /xxx 开关"，否则：
+	//   - tasklist /s <host>   → 变成对远程主机的调用（外发，不是本地观测）
+	//   - ipconfig /release    → 释放 IP，是**写**动作，不是只读
+	//   - sc stop/start/config → 改服务状态，是**写**动作
+	// 只放开查询语义的开关，写语义的字面命令名（stop/start/renew/release…）不在白名单里。
+	"netstat": {
+		maxArgs: 4,
+		anyFlag: true,
+		positionalCheck: func(arg string, _ Policy) error {
+			return checkPatternArg("netstat", arg, `^(-[aeonp]+|tcp|udp|tcpv6|udpv6)$`)
+		},
+		description: "查看网络连接与监听端口（Windows：netstat -ano）",
+	},
+	"ss": {
+		maxArgs: 4,
+		anyFlag: true,
+		positionalCheck: func(arg string, _ Policy) error {
+			return checkPatternArg("ss", arg, `^(-[altunxeosp]+|tcp|udp|unix)$`)
+		},
+		description: "查看 socket 与监听端口（Linux：ss -lntp）",
+	},
+	"tasklist": {
+		maxArgs: 8,
+		anyFlag: true,
+		positionalCheck: func(arg string, _ Policy) error {
+			if strings.HasPrefix(arg, "/") {
+				// 只允许纯筛选/格式开关；**/s 被排除**（那是远程主机）
+				return checkPatternArg("tasklist", arg, `^/(fi|fo|nh|svc|v)$`)
+			}
+			// /fi 的筛选值（"imagename eq mysqld.exe"）作为**单个参数**传入
+			return checkPatternArg("tasklist", arg, `^[A-Za-z0-9_.= -]{1,120}$`)
+		},
+		description: "查看进程列表（Windows：tasklist /fi \"imagename eq xxx.exe\"）",
+	},
+	"sc": {
+		maxArgs:       3,
+		minPositional: 1,
+		// 子命令位必须显式限定：写出 stop/start/config/delete 一律拒绝。
+		// 只靠 positionalCheck 的正则是不够的（服务名与子命令长得一样）。
+		firstPositionalCheck: func(arg string, _ Policy) error {
+			return checkPatternArg("sc", arg, `^(query|qc)$`)
+		},
+		positionalCheck: func(arg string, _ Policy) error {
+			return checkPatternArg("sc", arg, `^[A-Za-z0-9_.-]{1,64}$`)
+		},
+		description: "查询 Windows 服务状态（sc query <服务名>）",
+	},
+	"ipconfig": {
+		maxArgs: 2,
+		anyFlag: true,
+		positionalCheck: func(arg string, _ Policy) error {
+			// 只允许 /all；/release /renew /flushdns 都是写动作
+			return checkPatternArg("ipconfig", arg, `^(/all|-all)$`)
+		},
+		description: "查看网络配置（Windows：ipconfig /all）",
+	},
+}
+
+// checkPatternArg 节点侧探测命令的通用参数校验：只放通明确列举的写法。
+//
+// 单独抽出来是因为这几条命令用 `/xx` 风格开关（不是 `-xx`），
+// 而 guard 的短/长选项解析只管 `-` 开头；统一走 positionalCheck 更直白。
+func checkPatternArg(cmd, arg, pattern string) error {
+	if regexp.MustCompile(pattern).MatchString(arg) {
+		return nil
+	}
+	return fmt.Errorf("%w: %s 参数 %q 不在允许写法内（%s）", ErrInvalidArgs, cmd, arg, pattern)
 }
 
 // AllowedShellCommands 返回允许的命令名（用于错误提示与文档）。
@@ -381,6 +462,11 @@ func GuardShellCommand(cmd string, args []string, policy Policy) error {
 		positional++
 		if rule.positionalCheck != nil {
 			if err := rule.positionalCheck(arg, policy); err != nil {
+				return err
+			}
+		}
+		if positional == 1 && rule.firstPositionalCheck != nil {
+			if err := rule.firstPositionalCheck(arg, policy); err != nil {
 				return err
 			}
 		}

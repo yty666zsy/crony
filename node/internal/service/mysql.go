@@ -22,5 +22,8 @@ func RegisterTables(db *gorm.DB) {
 		// 阶段 3（观测闭环）：node 自己上报的资源水位。
 		// 节点侧必须注册：节点往往是先启动的一方，且这张表由**节点**写入。
 		models.NodeMetric{},
+		// 阶段 3（观测闭环）：admin→node 的只读探测请求表。
+		// 节点侧必须注册：节点先启动时这张表还不存在，探测通道会整条不可用。
+		models.NodeProbeRequest{},
 	)
 }
