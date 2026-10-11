@@ -35,6 +35,12 @@ func main() {
 	if err != nil {
 		logger.GetLogger().Error(fmt.Sprintf("init db table error:%#v", err))
 	}
+	// 阶段 2（Agent 内核）：装配 Agent 运行时。
+	// 未配置 llm 时只告警、不影响启动（相关接口返回 1007/1011），
+	// 这样"没配模型"的部署仍是一个可用的传统运维平台。
+	if _, err := service.InitAgentRuntime(); err != nil {
+		logger.GetLogger().Error(fmt.Sprintf("init agent runtime error:%#v", err))
+	}
 	// Notify operation
 	go notify.Serve()
 	// log cleaner

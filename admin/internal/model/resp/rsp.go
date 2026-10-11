@@ -31,6 +31,21 @@ const (
 	ErrorForbidden = 1005
 	// ErrorRegisterClosed 注册已关闭（非首个管理员引导场景必须由管理员操作）
 	ErrorRegisterClosed = 1006
+
+	// 阶段 2（Agent 内核）业务码。约定：HTTP 恒为 200，业务结果看 code。
+	// ErrorAgentNotConfigured 本节点/本实例未配置模型（llm 段缺失或 provider 未知）。
+	ErrorAgentNotConfigured = 1007
+	// ErrorAgentSessionNotFound 会话不存在（session_id 无效或已被清理）。
+	ErrorAgentSessionNotFound = 1008
+	// ErrorAgentDraftInvalid 草案本地复验不通过（cron 非法、命令为空、数值越界等）。
+	// msg 必须给出"哪个字段为什么不过"，不能只说校验失败。
+	ErrorAgentDraftInvalid = 1009
+	// ErrorAgentRunNotFound 指定的运行记录不存在。
+	ErrorAgentRunNotFound = 1010
+	// ErrorAgentDisabled Agent 能力被配置显式关闭（llm.enabled=false）。
+	ErrorAgentDisabled = 1011
+	// ErrorAgentUnavailable 目标节点不存在/未注册，无法在其上执行或取节点侧上下文。
+	ErrorAgentUnavailable = 1012
 )
 
 func Result(code int, data interface{}, msg string, c *gin.Context) {

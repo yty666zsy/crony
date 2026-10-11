@@ -84,6 +84,24 @@ func configRoute(r *gin.Engine) {
 		}
 	}
 
+	// 阶段 2（Agent 内核）：会话/诊断/工具清单/自然语言建任务。
+	//
+	// 权限：注册到与其它业务接口相同的"登录即可"层级。
+	// 但注意：起草/确认会消耗模型额度并创建任务定义，因此：
+	//   - 起草不落 job（只落会话）；确认创建的任务一律 status=0（未分配），不会自动执行；
+	//   - 真正的执行放权仍由既有"分配节点"动作控制（RequireAdmin 的路径不变）。
+	agentGroup := r.Group("/agent")
+	agentGroup.Use(middlerware.JWTAuth())
+	{
+		agentGroup.POST("/session/search", defaultAgentRouter.SessionSearch)
+		agentGroup.POST("/session/find", defaultAgentRouter.SessionFind)
+		agentGroup.POST("/diagnosis/find", defaultAgentRouter.DiagnosisFind)
+		agentGroup.POST("/diagnosis/run", defaultAgentRouter.DiagnosisRun)
+		agentGroup.POST("/tool/list", defaultAgentRouter.ToolList)
+		agentGroup.POST("/nljob/draft", defaultAgentRouter.NLJobDraft)
+		agentGroup.POST("/nljob/confirm", defaultAgentRouter.NLJobConfirm)
+	}
+
 	user := r.Group("/user")
 	user.Use(middlerware.JWTAuth())
 	{

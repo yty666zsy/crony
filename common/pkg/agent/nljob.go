@@ -247,6 +247,128 @@ func DraftJob(ctx context.Context, a *Agent, req NLJobRequest) (JobDraft, error)
 	return draft, nil
 }
 
+// ValidateDraft 对**已存在的草案**做服务端复验与归一化（确认创建前的最后一道闸门）。
+//
+// 为什么不能只验一次：草案来自浏览器（可能被改过），且"确认"与"起草"之间可能隔了很久
+// （时区/时钟都变了）。因此确认时必须重新验：cron 可解析、命令非空、http 合法、
+// 数值在范围内，并由**代码**重算"接下来 5 次触发"——绝不采信前端回传的触发时间。
+func ValidateDraft(d JobDraft, now time.Time, timezone string) (JobDraft, error) {
+	tz := strings.TrimSpace(timezone)
+	if tz == "" {
+		// 确认阶段没传时区时沿用草案里的时区，避免"确认后触发时间整体偏移"。
+		tz = d.Timezone
+	}
+	loc, tzWarn := resolveLocation(tz)
+	out := d
+	out.Warnings = dedupeWarnings(out.Warnings, tzWarn)
+	out.Timezone = loc.String()
+	out.RequiresConfirmation = true
+	// 归一化时**永不**接受外部传入的 confirmed=true：确认动作由上层在复验通过后才落库。
+	out.Confirmed = false
+
+	out.Name = strings.TrimSpace(out.Name)
+	if out.Name == "" {
+		return out, fmt.Errorf("%w: 任务名为空", ErrDraftInvalid)
+	}
+	out.Spec = strings.TrimSpace(out.Spec)
+	if _, err := ValidateSpec(out.Spec, now, NextTriggerCount); err != nil {
+		return out, fmt.Errorf("%w: %s", ErrDraftInvalid, RepairCronHint(out.Spec, err))
+	}
+	if !strings.HasPrefix(out.Spec, "@") && len(strings.Fields(out.Spec)) == 5 {
+		out.Warnings = append(out.Warnings, fmt.Sprintf(
+			"表达式 %q 只有 5 段：本系统底层库把 5 段解释为「秒 分 时 日 月」，不是 Unix 的「分 时 日 月 周」；触发时间按本库真实语义计算，请核对。",
+			out.Spec))
+	}
+
+	switch out.JobType {
+	case "http":
+		if out.HTTP == nil || strings.TrimSpace(out.HTTP.URL) == "" {
+			return out, fmt.Errorf("%w: job_type 为 http 但缺少 http.url", ErrDraftInvalid)
+		}
+		url := strings.TrimSpace(out.HTTP.URL)
+		if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+			return out, fmt.Errorf("%w: http.url 必须是 http/https 地址: %q", ErrDraftInvalid, url)
+		}
+		method := strings.ToUpper(strings.TrimSpace(out.HTTP.Method))
+		if method == "" {
+			method = "GET"
+		}
+		if method != "GET" && method != "POST" {
+			return out, fmt.Errorf("%w: 不支持的 http 方法 %q（仅 GET/POST）", ErrDraftInvalid, method)
+		}
+		out.HTTP = &HTTPDraft{Method: method, URL: url}
+		out.Command = nil
+		out.RawArgv = false
+	case "cmd":
+		if len(out.Command) == 0 {
+			return out, fmt.Errorf("%w: 命令为空", ErrDraftInvalid)
+		}
+		for i, part := range out.Command {
+			// 只拦"真正为空"的参数：Job.Command 是字符串、执行前由 SplitCmd 切分，
+			// 空参数在这个模型里无法无损表达（会被静默丢弃）。
+			// 纯空白参数（" "）是可以表达的（落库时加引号），因此放行。
+			if part == "" {
+				return out, fmt.Errorf("%w: 命令第 %d 个参数为空字符串，任务模型无法无损表达（SplitCmd 会丢弃它）；请去掉该参数或改成显式占位符",
+					ErrDraftInvalid, i+1)
+			}
+		}
+		out.HTTP = nil
+		out.RawArgv = !needsShell(out.Command)
+	default:
+		return out, fmt.Errorf("%w: 未知 job_type %q（仅 cmd/http）", ErrDraftInvalid, out.JobType)
+	}
+
+	// 数值范围：越界直接**报错**而不是裁剪。
+	// 起草阶段裁剪 + 告警是合理的（模型可能给出略超的值），但人工确认阶段
+	// 静默裁剪会让"我看到的值"与"实际落库的值"不一致，这是不可接受的。
+	if out.TimeoutSeconds < MinTimeoutSeconds || out.TimeoutSeconds > MaxTimeoutSeconds {
+		return out, fmt.Errorf("%w: timeout_seconds 必须在 [%d, %d] 之间，收到 %d",
+			ErrDraftInvalid, MinTimeoutSeconds, MaxTimeoutSeconds, out.TimeoutSeconds)
+	}
+	if out.RetryTimes < 0 || out.RetryTimes > MaxRetryTimesAllowed {
+		return out, fmt.Errorf("%w: retry_times 必须在 [0, %d] 之间，收到 %d",
+			ErrDraftInvalid, MaxRetryTimesAllowed, out.RetryTimes)
+	}
+	if out.RetryInterval < 1 || int64(out.RetryInterval) > MaxTimeoutSeconds {
+		return out, fmt.Errorf("%w: retry_interval 必须在 [1, %d] 之间，收到 %d",
+			ErrDraftInvalid, MaxTimeoutSeconds, out.RetryInterval)
+	}
+	policy, ok := runpolicy.ParseConcurrencyPolicy(out.ConcurrencyPolicy)
+	if !ok {
+		return out, fmt.Errorf("%w: 并发策略 %q 不是合法取值", ErrDraftInvalid, out.ConcurrencyPolicy)
+	}
+	out.ConcurrencyPolicy = policy.String()
+	out.ConcurrencyValue = int(policy)
+
+	times, err := ValidateSpec(out.Spec, now.In(loc), NextTriggerCount)
+	if err != nil {
+		return out, fmt.Errorf("%w: %v", ErrDraftInvalid, err)
+	}
+	out.NextTriggers = times
+	out.NextTriggerText = FormatTriggers(times, loc)
+	out.TriggerEcho = TriggerEcho(out.Spec, times, loc)
+	return out, nil
+}
+
+// dedupeWarnings 去重并丢弃空告警（复验会追加同一条 5 段表达式告警）。
+func dedupeWarnings(in []string, extra string) []string {
+	seen := make(map[string]bool, len(in)+1)
+	out := make([]string, 0, len(in)+1)
+	add := func(w string) {
+		w = strings.TrimSpace(w)
+		if w == "" || seen[w] {
+			return
+		}
+		seen[w] = true
+		out = append(out, w)
+	}
+	for _, w := range in {
+		add(w)
+	}
+	add(extra)
+	return out
+}
+
 // fillDraft 把模型输出填进草稿并做**本地校验与裁剪**。
 //
 // 这里承担"最后一道防线"的角色：模型给的任何取值都要经过本地规则

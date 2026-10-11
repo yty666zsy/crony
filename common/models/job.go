@@ -143,6 +143,35 @@ func (j *Job) SplitCmd() {
 	j.Cmd = append(j.Cmd, utils.ParseCmdArguments(ps[1])...)
 }
 
+// SerializeArgv 把 argv 数组序列化成 Job.Command，保证 SplitCmd 能**无损还原**。
+//
+// 为什么需要它：阶段 2 的"自然语言建任务"拿到的是 argv 数组（`["find","/tmp","-mtime","+7"]`），
+// 而 Job 只有一个字符串字段 Command，执行时由 SplitCmd 重新切分。
+// 直接 strings.Join(argv, " ") 会在参数含空格/引号/反斜杠时改变语义
+// （例如 `-name "my file"` 会被切成两个参数）——这类错误不会报错，只会让命令跑错。
+// 因此含空白或转义字符的参数统一用双引号包裹，并按 parse.go 的规则转义。
+func SerializeArgv(argv []string) string {
+	parts := make([]string, 0, len(argv))
+	for _, a := range argv {
+		if needsQuoting(a) {
+			escaped := strings.ReplaceAll(a, `\`, `\\`)
+			escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+			parts = append(parts, `"`+escaped+`"`)
+			continue
+		}
+		parts = append(parts, a)
+	}
+	return strings.Join(parts, " ")
+}
+
+// needsQuoting 判断单个参数是否必须加引号。
+func needsQuoting(arg string) bool {
+	if arg == "" {
+		return true
+	}
+	return strings.ContainsAny(arg, " \t\n\r\"'\\")
+}
+
 func (j *Job) Val() string {
 	data, err := json.Marshal(j)
 	if err != nil {

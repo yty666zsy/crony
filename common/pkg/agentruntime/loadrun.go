@@ -11,6 +11,9 @@ import (
 	"github.com/tmnhs/crony/common/pkg/runpolicy"
 )
 
+// ErrRunNotFound 指定的运行记录不存在（供上层映射为业务码 1010）。
+var ErrRunNotFound = fmt.Errorf("运行记录不存在")
+
 // LoadRunContext 从数据库装配一次执行的诊断材料。
 //
 // 设计取舍：**宁可标注"未知"也不猜**。
@@ -27,7 +30,7 @@ func LoadRunContext(runID string) (agent.RunContext, error) {
 	run := &models.JobRun{RunID: runID}
 	if err := run.FindByRunID(); err != nil {
 		if models.IsRecordNotFound(err) {
-			return agent.RunContext{}, fmt.Errorf("运行记录 %s 不存在（可能已过清理周期）", runID)
+			return agent.RunContext{}, fmt.Errorf("%w: %s（可能已过清理周期或从未存在）", ErrRunNotFound, runID)
 		}
 		return agent.RunContext{}, err
 	}

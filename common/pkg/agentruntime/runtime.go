@@ -208,6 +208,78 @@ func (r *Runtime) RunInspect(ctx context.Context, req InspectRequest) (*Inspecti
 	return res, err
 }
 
+// DraftRequest 自然语言 → 任务草案请求。
+type DraftRequest struct {
+	Text     string
+	NodeUUID string
+	Timezone string
+	Context  []string
+	// Now 注入时钟（便于测试与"固定触发回显"）。
+	Now time.Time
+}
+
+// DraftResult 草案结果（含会话 ID，供确认接口使用）。
+type DraftResult struct {
+	Draft        agent.JobDraft `json:"draft"`
+	SessionID    string         `json:"session_id"`
+	Explain      string         `json:"explain"`
+	PersistError string         `json:"persist_error,omitempty"`
+}
+
+// RunDraftJob 起草任务定义。
+//
+// **只产出草案，不落 job、不进调度器**：确认动作由接口层在人工确认后执行。
+// 会话会落库（kind=nljob），这样"确认"能通过 session_id 找回草案原文，
+// 而不是信任浏览器回传的草案内容。
+func (r *Runtime) RunDraftJob(ctx context.Context, req DraftRequest) (*DraftResult, error) {
+	started := req.Now
+	if started.IsZero() {
+		started = time.Now()
+	}
+	draft, err := agent.DraftJob(ctx, r.agent, agent.NLJobRequest{
+		Text:     req.Text,
+		NodeUUID: req.NodeUUID,
+		Timezone: req.Timezone,
+		Now:      started,
+		Context:  req.Context,
+	})
+	res := &DraftResult{Draft: draft, Explain: draft.Explain()}
+	if draft.Trace != nil {
+		res.SessionID = draft.Trace.SessionID
+	}
+	if perr := r.persist(models.AgentKindNLJob, draft.Trace, draft, 0, "", "把自然语言描述翻译成定时任务定义",
+		agent.PromptVersionNLJobV1, started); perr != nil {
+		res.PersistError = perr.Error()
+	}
+	return res, err
+}
+
+// LoadDraft 从会话里读回草案（确认接口用：不信任浏览器回传的草案）。
+func (r *Runtime) LoadDraft(sessionID string) (*models.AgentSession, agent.JobDraft, error) {
+	session := &models.AgentSession{SessionID: strings.TrimSpace(sessionID)}
+	if err := session.FindBySessionID(); err != nil {
+		if models.IsRecordNotFound(err) {
+			return nil, agent.JobDraft{}, fmt.Errorf("%w: %s", ErrSessionNotFound, sessionID)
+		}
+		return nil, agent.JobDraft{}, err
+	}
+	if session.Kind != models.AgentKindNLJob {
+		return session, agent.JobDraft{}, fmt.Errorf("%w: 会话 %s 的类型是 %s，不是任务草案",
+			ErrSessionNotFound, session.SessionID, session.Kind)
+	}
+	var draft agent.JobDraft
+	if strings.TrimSpace(session.ResultJSON) == "" {
+		return session, draft, fmt.Errorf("%w: 会话 %s 没有草案内容", ErrSessionNotFound, session.SessionID)
+	}
+	if err := json.Unmarshal([]byte(session.ResultJSON), &draft); err != nil {
+		return session, draft, fmt.Errorf("解析会话 %s 的草案失败: %w", session.SessionID, err)
+	}
+	return session, draft, nil
+}
+
+// ErrSessionNotFound 会话不存在（供上层映射为业务码 1008）。
+var ErrSessionNotFound = fmt.Errorf("会话不存在")
+
 // AgentContext 组装 Agent 型任务的材料（任务定义 + 最近运行摘要）。
 func (r *Runtime) AgentContext(jobID int, jobName, spec, command, extra string) []string {
 	lines := []string{
