@@ -41,6 +41,9 @@ import {
   agentSessions,
   agentToolPolicy,
   approvalRequests,
+  // 阶段 4-A：经验库（记忆）
+  agentMemories,
+  memorySource,
   toolAuditRows,
   agentTools,
   rfc3339,
@@ -854,4 +857,180 @@ export function toolAuditSearch(params = {}) {
   if (params.tool) list = list.filter((r) => includes(r.tool, params.tool))
   if (params.decision) list = list.filter((r) => r.decision === params.decision)
   return { code: 200, data: paginate(list, { page, pageSize }), msg: 'operation success' }
+}
+
+/* ==========================================================================
+ * 阶段 4-A：Agent 经验库（记忆）—— Mock 处理器
+ *
+ * 与后端 agent_memory.go 逐条对齐的三件事，Mock 里也必须成立（否则切到真机会翻车）：
+ *  1. **没有编辑接口**：只有 disable/enable；
+ *  2. **停用必须写原因**：空原因返回 1001（参数错误），且状态不变；
+ *  3. **经验不是证据**：返回值里写死 advisory_only=true / usable_as_evidence=false，
+ *     并带 notice（前端照着渲染，不自己拼中文）。
+ * ========================================================================== */
+
+/** 后端 source 元信息块（machine-readable 的约束）。 */
+function memorySourceBlock() {
+  return { ...memorySource }
+}
+
+/** POST /agent/memory/search */
+export function memorySearch(params = {}) {
+  const { page, pageSize } = normalizePage(params)
+  let list = agentMemories.map((m) => ({ ...m }))
+  if (params.outcome) list = list.filter((m) => m.outcome === params.outcome)
+  if (params.action_kind) list = list.filter((m) => m.action_kind === params.action_kind)
+  if (params.tool) list = list.filter((m) => includes(m.tool, params.tool))
+  if (params.target_node) list = list.filter((m) => includes(m.target_node, params.target_node))
+  if (params.session_id) list = list.filter((m) => includes(m.session_id, params.session_id))
+  // enabled：undefined/null → 全部；true/false → 精确匹配（与后端 *bool 三态一致）。
+  if (params.enabled === true || params.enabled === false) {
+    list = list.filter((m) => m.enabled === params.enabled)
+  }
+  if (params.keyword) {
+    const kw = String(params.keyword)
+    list = list.filter((m) => includes(m.symptom, kw) || includes(m.action_text, kw) || includes(m.result_text, kw))
+  }
+  // 最近出现靠前：经验库里"最近被反复撞见"的条目最值得看。
+  list.sort((a, b) => b.last_seen - a.last_seen)
+  const pageData = paginate(list, { page, pageSize })
+  return { code: 200, data: { ...pageData, source: memorySourceBlock() }, msg: 'operation success' }
+}
+
+/** POST /agent/memory/find */
+export function memoryFind({ memory_id: memoryId } = {}) {
+  const row = agentMemories.find((m) => m.memory_id === memoryId)
+  if (!row) return bizErr(1019, '经验条目不存在（Mock）')
+  return { code: 200, data: { found: true, memory: { ...row }, source: memorySourceBlock() }, msg: 'operation success' }
+}
+
+/**
+ * POST /agent/memory/recall —— 以症状试召回。
+ *
+ * Mock 用**与后端同思路**的粗打分：按症状的字符二元组覆盖率算相似度，
+ * 不做花哨算法，但保证"相似的高、不相似的不出现"。空结果是合法结果。
+ */
+function bigrams(text) {
+  const s = String(text || '').replace(/\s+/g, '')
+  const set = new Set()
+  if (s.length === 1) set.add(s)
+  for (let i = 0; i + 2 <= s.length; i += 1) set.add(s.slice(i, i + 2))
+  return set
+}
+
+export function memoryRecall({ symptom, agent_kind: agentKind, target_node: targetNode, top_k: topK, min_score: minScore } = {}) {
+  const q = bigrams(symptom)
+  if (q.size === 0) return bizErr(1001, '症状不能为空（没有症状就无从召回）')
+  const min = Number(minScore) > 0 ? Number(minScore) : 0.34
+  const k = Number(topK) > 0 ? Number(topK) : 3
+  const hits = []
+  for (const m of agentMemories) {
+    if (!m.enabled) continue // 被停用的**绝不**参与召回
+    const t = bigrams(m.symptom)
+    let inter = 0
+    for (const g of q) if (t.has(g)) inter += 1
+    const score = inter / q.size
+    if (score < min) continue
+    hits.push({
+      memory_id: m.memory_id,
+      score: Number(score.toFixed(4)),
+      matched: [...q].filter((g) => t.has(g)).slice(0, 8),
+      reasons: [agentKind && m.agent_kind === agentKind ? '同类任务（diagnose）' : '', targetNode && m.target_node === targetNode ? '同一目标节点' : ''].filter(Boolean),
+      symptom: m.symptom,
+      action_kind: m.action_kind,
+      action_text: m.action_text,
+      target_node: m.target_node,
+      outcome: m.outcome,
+      outcome_text: m.outcome_text,
+      occurrence_count: m.occurrence_count,
+      success_count: m.success_count,
+      fail_count: m.fail_count,
+      blocked_count: m.blocked_count,
+      denied_count: m.denied_count,
+      advised_count: m.advised_count,
+      success_rate: m.success_rate,
+      success_rate_known: m.success_rate_known,
+      same_kind: Boolean(agentKind) && m.agent_kind === agentKind,
+      same_target: Boolean(targetNode) && m.target_node === targetNode,
+      is_failed: m.outcome !== 'success',
+      last_seen: m.last_seen,
+    })
+  }
+  hits.sort((a, b) => b.score - a.score)
+  return {
+    code: 200,
+    data: {
+      hits: hits.slice(0, k),
+      considered: agentMemories.filter((m) => m.enabled).length,
+      query_tokens: [...q].slice(0, 20),
+      min_score: min,
+      top_k: k,
+      // 恒真：召回结果只是线索。前端**必须**把这句话渲染出来。
+      advisory_only: memorySource.advisory_only,
+      usable_as_evidence: memorySource.usable_as_evidence,
+      notice: memorySource.notice,
+    },
+    msg: 'operation success',
+  }
+}
+
+/** POST /agent/memory/stats */
+export function memoryStats() {
+  const byOutcome = {}
+  for (const m of agentMemories) byOutcome[m.outcome] = (byOutcome[m.outcome] || 0) + 1
+  let successSum = 0
+  let failSum = 0
+  for (const m of agentMemories) {
+    successSum += m.success_count
+    failSum += m.fail_count
+  }
+  const known = successSum + failSum > 0
+  return {
+    code: 200,
+    data: {
+      total: agentMemories.length,
+      enabled: agentMemories.filter((m) => m.enabled).length,
+      disabled: agentMemories.filter((m) => !m.enabled).length,
+      by_outcome: byOutcome,
+      success_sum: successSum,
+      fail_sum: failSum,
+      success_rate: known ? Number((successSum / (successSum + failSum)).toFixed(6)) : 0,
+      success_rate_known: known,
+      success_rate_text: known
+        ? `${((successSum / (successSum + failSum)) * 100).toFixed(1)}%（成功 ${successSum} / 失败 ${failSum}）`
+        : '无执行样本（被拒/未执行不计入成功率）',
+      definition: {
+        success_rate: '成功 /（成功 + 失败）；分母只含**真正执行过**的动作',
+        excluded: ['blocked（转人工/复核未通过，未执行）', 'denied（被闸门拒绝，未执行）', 'advised（只给建议，没有动作）'],
+        advisory_only: '经验只作排查线索，不计入本次证据',
+      },
+      source: memorySourceBlock(),
+    },
+    msg: 'operation success',
+  }
+}
+
+/** POST /agent/memory/disable|enable —— 共用处理器（enabled 决定方向） */
+export function memorySetEnabled({ memory_id: memoryId, enabled, reason } = {}) {
+  const row = agentMemories.find((m) => m.memory_id === memoryId)
+  if (!row) return bizErr(1019, '经验条目不存在（Mock）')
+  if (enabled === false) {
+    // 复刻后端：停用必须写原因（没原因的停用事后无人能复盘）。
+    if (!String(reason || '').trim()) {
+      return bizErr(1001, '停用经验必须填写原因（治理要求：撤下动作要可复盘）')
+    }
+    if (!row.enabled) return bizErr(1020, '该经验已处于停用状态（状态已变更，请刷新）')
+    row.enabled = false
+    row.disabled_by = 'admin'
+    row.disabled_reason = String(reason).trim()
+    row.disabled_at = new Date().toISOString()
+    return { code: 200, data: { memory: { ...row }, source: memorySourceBlock() }, msg: '已停用（条目保留，仅不再参与召回）' }
+  }
+  if (row.enabled) return bizErr(1020, '该经验已处于启用状态（状态已变更，请刷新）')
+  row.enabled = true
+  // 重新启用必须清空停用审计（否则页面上会显示"已启用但还带着上次的停用理由"）。
+  row.disabled_by = ''
+  row.disabled_reason = ''
+  row.disabled_at = ''
+  return { code: 200, data: { memory: { ...row }, source: memorySourceBlock() }, msg: '已启用' }
 }

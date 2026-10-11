@@ -50,6 +50,7 @@ export const navGroups = [
       { label: 'Knowledge Base', to: '/knowledge', icon: 'Notebook' },
       { label: 'Audit Trail', to: '/audit', icon: 'Files' },
       { label: 'Approvals', to: '/approvals', icon: 'CircleCheck' },
+      { label: 'Memory', to: '/memory', icon: 'Collection' },
     ],
   },
   {

@@ -131,7 +131,7 @@ func TestDiagnoseHappyPathWithGroundedEvidence(t *testing.T) {
 	if src.calls != 1 {
 		t.Fatalf("应调用一次日志查询: %d", src.calls)
 	}
-	if diag.ToolCalls != 1 || diag.Provider != "fake" || diag.PromptVersion != PromptVersionDiagnoseV4 {
+	if diag.ToolCalls != 1 || diag.Provider != "fake" || diag.PromptVersion != PromptVersionDiagnoseV5 {
 		t.Fatalf("运行元信息不符: %+v", diag)
 	}
 	if diag.Trace == nil || diag.Trace.ModelCalls != 2 {
@@ -159,6 +159,9 @@ func TestDiagnoseHappyPathWithGroundedEvidence(t *testing.T) {
 func TestDiagnosePromptRequiresObservingNodeSideFacts(t *testing.T) {
 	if PromptVersionDiagnoseV4 == PromptVersionDiagnoseV2 || PromptVersionDiagnoseV4 == PromptVersionDiagnoseV3 {
 		t.Fatal("v4 必须是新版本号，否则历史会话无法归因")
+	}
+	if PromptVersionDiagnoseV5 == PromptVersionDiagnoseV4 {
+		t.Fatal("v5（注入历史经验）必须是新版本号，否则无法区分'结论是否受了历史提示影响'")
 	}
 	for _, want := range []string{
 		"节点侧/环境侧事实必须先观测",

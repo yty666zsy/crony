@@ -116,6 +116,19 @@ func configRoute(r *gin.Engine) {
 		agentGroup.POST("/approval/reject", defaultAgentRouter.ApprovalReject)
 		agentGroup.POST("/approval/cancel", defaultAgentRouter.ApprovalCancel)
 		agentGroup.POST("/audit/search", defaultAgentRouter.AuditSearch)
+
+		// 阶段 4-A（Agent 记忆/经验库）。
+		//
+		// 权限说明：查询类接口"登录即可"；**停用/启用**也只要登录——理由是
+		// "发现一条会误导模型的坏经验就立刻撤下来"是值班动作，等管理员授权反而危险；
+		// 且这里只有"撤下"没有"编辑"，最坏情况只是少了一条线索（保守方向）。
+		// 若部署方要求只有管理员能改经验库状态，把最后两条挪进 RequireAdmin 组即可。
+		agentGroup.POST("/memory/search", defaultAgentRouter.MemorySearch)
+		agentGroup.POST("/memory/find", defaultAgentRouter.MemoryFind)
+		agentGroup.POST("/memory/recall", defaultAgentRouter.MemoryRecall)
+		agentGroup.POST("/memory/stats", defaultAgentRouter.MemoryStats)
+		agentGroup.POST("/memory/disable", defaultAgentRouter.MemoryDisable)
+		agentGroup.POST("/memory/enable", defaultAgentRouter.MemoryEnable)
 	}
 
 	user := r.Group("/user")

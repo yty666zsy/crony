@@ -16,15 +16,38 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
 	"github.com/tmnhs/crony/common/models"
 	"github.com/tmnhs/crony/common/pkg/agent"
 	"github.com/tmnhs/crony/common/pkg/agentconfig"
+	"github.com/tmnhs/crony/common/pkg/agentmemory"
 	"github.com/tmnhs/crony/common/pkg/llm"
 	"github.com/tmnhs/crony/common/pkg/tools"
 )
+
+// MemoryRecorder 经验沉淀钩子（阶段 4-A「Agent 记忆/经验库」）。
+//
+// 为什么放在装配层而不是"会话落库时顺手做"：
+//   - 沉淀需要**审计事实**（哪次工具调用被放行/拒绝/转审批）与会话结论两份输入，
+//     而它们分别由工具网关与会话内核产生；装配层是唯一同时看得到这两者的地方；
+//   - node 侧本地也会跑 Agent 会话，通过这个接口可以让两边共用同一套沉淀逻辑。
+//
+// 实现方（*agentmemory.Recorder）**不返回 error**：经验沉淀是旁路，
+// 失败只能进日志与 RecordResult.Errors，绝不能反过来让会话落库/接口返回失败。
+type MemoryRecorder interface {
+	Record(session *models.AgentSession, audits []models.AgentToolAudit) agentmemory.RecordResult
+}
+
+// MemoryRecaller 历史经验召回（阶段 4-A，可选）。
+//
+// 为什么召回也放在装配层：召回要读经验库（数据库），而 agent 包是无数据库依赖的纯逻辑层；
+// 运行时是"能读库"与"要调模型"两条链路的交汇点，由它把召回到的线索塞进 RunContext。
+type MemoryRecaller interface {
+	RecallForDiagnose(symptom, agentKind, targetNode string, topK int) agentmemory.RecallResult
+}
 
 // Options 装配参数。
 type Options struct {
@@ -44,6 +67,12 @@ type Options struct {
 	Approver tools.Approver
 	// NodeUUID 本进程所属节点（用于把会话关联到节点）；admin 侧可留空。
 	NodeUUID string
+	// MemoryRecorder 经验沉淀钩子（可选）。为 nil 时**不沉淀**经验：
+	// 控制台业务接口不因为"经验库没接线"而报错，只是经验库为空（可观测的降级）。
+	MemoryRecorder MemoryRecorder
+	// MemoryRecaller 历史经验召回（可选）。为 nil 时诊断**不注入历史经验**，
+	// 行为与阶段 3 完全一致（提示词版本仍为 v5，但材料里没有经验块）。
+	MemoryRecaller MemoryRecaller
 }
 
 // Runtime 装配好的 Agent 运行时。
@@ -53,6 +82,9 @@ type Runtime struct {
 	registry *tools.Registry
 	agent    *agent.Agent
 	nodeUUID string
+	memory   MemoryRecorder
+	recaller MemoryRecaller
+	memTopK  int
 }
 
 // New 装配运行时。配置缺失返回 llm.ErrNotConfigured（调用方转 1007）。
@@ -77,7 +109,82 @@ func New(opts Options) (*Runtime, error) {
 		registry: registry,
 		agent:    a,
 		nodeUUID: opts.NodeUUID,
+		memory:   opts.MemoryRecorder,
 	}, nil
+}
+
+// SetMemoryRecorder 后置接线经验沉淀钩子（admin 装配层在数据库就绪后调用）。
+//
+// 为什么允许后置：经验库要写 MySQL，而运行时装配发生在数据库初始化之前的那段装配里；
+// 允许后置接线可以让"运行时可用"不被"经验库可用"阻塞（两者是相互独立的失败域）。
+func (r *Runtime) SetMemoryRecorder(rec MemoryRecorder) {
+	if r == nil {
+		return
+	}
+	r.memory = rec
+}
+
+// MemoryEnabled 经验沉淀是否已接线（控制台/验收用例如实展示用）。
+func (r *Runtime) MemoryEnabled() bool {
+	if r == nil {
+		return false
+	}
+	return r.memory != nil
+}
+
+// SetMemoryRecaller 后置接线经验召回（admin 装配层在数据库就绪后调用）。
+//
+// topK <= 0 时用 agentmemory 的默认值（3）：注入的上下文很贵，而且给得越多，
+// 模型越容易拿"上次是这么修的"替代"这次去观测"。
+func (r *Runtime) SetMemoryRecaller(rec MemoryRecaller, topK int) {
+	if r == nil {
+		return
+	}
+	r.recaller = rec
+	r.memTopK = topK
+}
+
+// RecallEnabled 经验召回是否已接线。
+func (r *Runtime) RecallEnabled() bool {
+	if r == nil {
+		return false
+	}
+	return r.recaller != nil
+}
+
+// attachMemoryHints 把历史经验线索塞进 RunContext（只影响材料，不影响 Given 证据）。
+//
+// 这里刻意**只填 MemoryHints / MemoryHintIDs**，绝不碰 Given：
+// Given 是"本次可用证据"的登记表，任何历史内容一旦进去就会让 grounding 校验
+// 认为"它被观测过"。这是本阶段最容易犯、后果最严重的错误。
+//
+// 召回查询用"当前症状"构造：任务目标（与历史沉淀的 symptom 同源，保证可比）
+// + 本次状态 + stderr 尾部（携带具体错误信息，是提高相似度最有效的一段）。
+// 全部走 llm.Redact：经验库是另一张表，不能假设"库里的东西一定不含密钥"。
+func (r *Runtime) attachMemoryHints(rc *agent.RunContext) {
+	if r == nil || r.recaller == nil || rc == nil {
+		return
+	}
+	query := strings.Join([]string{
+		fmt.Sprintf("诊断任务 %d（%s）本次失败的原因", rc.JobID, rc.JobName),
+		rc.Status,
+		llm.Truncate(llm.Redact(rc.StderrTail), 300),
+	}, " ")
+	res := r.recaller.RecallForDiagnose(query, models.AgentKindDiagnose, rc.NodeUUID, r.memTopK)
+	if len(res.Hits) == 0 {
+		return
+	}
+	hints := agentmemory.RenderHintLines(res)
+	if len(hints) == 0 {
+		return
+	}
+	rc.MemoryHints = hints
+	rc.MemoryHintIDs = make([]string, 0, len(res.Hits))
+	for _, h := range res.Hits {
+		rc.MemoryHintIDs = append(rc.MemoryHintIDs, h.MemoryID)
+	}
+	log.Printf("[agent-memory] 诊断前召回 %d 条历史经验（比较 %d 条，最低相似度 %.2f）：%s",
+		len(res.Hits), res.Considered, res.MinScore, strings.Join(rc.MemoryHintIDs, ","))
 }
 
 // ProviderName 实际生效的 provider 名（UI 必须如实展示）。
@@ -217,6 +324,8 @@ func (r *Runtime) RunDiagnosis(ctx context.Context, req DiagnosisRequest) (*Diag
 	if len(req.Extra) > 0 {
 		rc.Extra = append(rc.Extra, req.Extra...)
 	}
+	// 阶段 4-A：诊断前先召回历史相似经验（只作为线索注入材料，不进证据表）。
+	r.attachMemoryHints(&rc)
 
 	// 会话 id：默认用确定性 id；force 重诊断时换一个唯一 id。
 	// 否则第二次 Insert 会撞 session_id 唯一索引（Error 1062），
@@ -238,7 +347,7 @@ func (r *Runtime) RunDiagnosis(ctx context.Context, req DiagnosisRequest) (*Diag
 	goalText := fmt.Sprintf("诊断任务[%s]（id=%d）第 %s 次运行失败的原因", orDash(rc.JobName), rc.JobID, orDash(rc.RunID))
 	// 第 7 个参数是**系统提示词全文**（存 system_prompt）；prompt_version 由 trace 提供。
 	if err := r.persist(models.AgentKindDiagnose, out.Trace, out, rc.JobID, rc.RunID, goalText,
-		agent.PromptDiagnoseV1, started); err != nil {
+		agent.PromptDiagnoseV2, started); err != nil {
 		res.PersistError = err.Error()
 	}
 	// 结论与错误同时可能：拿到结构化结论但 Agent 循环以 error 结束（例如修复失败），
@@ -487,7 +596,42 @@ func (r *Runtime) persist(kind string, trace *agent.Trace, result interface{}, j
 			return fmt.Errorf("轨迹步骤[%d]落库失败: %w", st.Index, err)
 		}
 	}
+	// 经验沉淀（阶段 4-A）：**只在这里**、**在会话与步骤都落库之后**做。
+	//
+	// 三个刻意的选择：
+	//  1. 位置在末尾：经验抽取要读会话结论与会话状态，先落库才能保证"沉淀的经验
+	//     指向的是一条真实存在的会话"（而不是内存里一个可能落库失败的临时对象）；
+	//  2. 失败只记日志：沉淀属于旁路，任何失败都不允许让对话结论"存不下来"；
+	//  3. 每次会话都沉淀（含失败/取消的会话）：**失败的会话同样是有价值的经验**
+	//     （"这条路试过、不通"），只沉淀成功经验会让经验库系统性乐观。
+	r.recordMemory(session)
 	return nil
+}
+
+// recordMemory 把一次会话沉淀进经验库（不返回值：失败只进日志）。
+//
+// 审计事实按 session_id 从库里读回来，而不是在内存里攒：
+// 工具观察者（tools.ToolAuditObserver）在**每次调用时同步**写入审计行，persist 在其之后，
+// 所以按 session_id 查询能拿到完整的事实集；这样也天然覆盖"会话中途进程重启"后
+// 由另一个进程补落库的场景（内存攒法会丢）。
+func (r *Runtime) recordMemory(session *models.AgentSession) {
+	if r == nil || r.memory == nil || session == nil {
+		return
+	}
+	if err := ensureDB(); err != nil {
+		log.Printf("[agent-memory] 经验沉淀跳过（数据库不可用）：%v", err)
+		return
+	}
+	audits, _, err := models.ListAgentToolAudits(db(), session.SessionID, "", "", 1, 200)
+	if err != nil {
+		// 读不到审计事实不阻断沉淀：退化为"只沉淀会话结论经验"（少一条比全丢好），
+		// 但必须让这件事在日志里看得见——否则会变成"经验库悄悄变少"。
+		log.Printf("[agent-memory] 读取会话 %s 的工具审计失败（将只沉淀会话结论经验）：%v", session.SessionID, err)
+	}
+	res := r.memory.Record(session, audits)
+	for _, e := range res.Errors {
+		log.Printf("[agent-memory] %s", e)
+	}
 }
 
 // sessionStatus 由轨迹推导会话状态。

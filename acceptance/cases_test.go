@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/tmnhs/crony/common/models"
 )
 
 // caseCtx 给每个用例一个"可写证据"的地方：跳过时也必须留下原因（SKIP ≠ 通过）。
@@ -1189,5 +1191,307 @@ func TestAcceptanceSuite(t *testing.T) {
 		}
 		cc.note("total=%d，本页 %d 行全部字段自洽；其中带审批单号的行 %d 行（审批→执行可回溯）",
 			total, len(list), approvalLinked)
+	})
+
+	// ---------- 阶段 4-A：Agent 记忆 / 经验库（AC-26…AC-29） ----------
+	//
+	// 这一段的取证策略与前四阶段不同：经验库的数据来源是"会话结束后由旁路沉淀"，
+	// 而"模型这次调了哪些工具"是随机的。如果只靠跑一次真诊断来等数据，用例会时红时绿
+	// （既可能因为没有工具调用而查不到行，也可能因为模型心情不同而条数不同）。
+	//
+	// 因此把"库里有行"和"这些行怎么被用"分开取证：
+	//   - AC-26 看**真实沉淀**是否发生（数据来自真实会话，允许 SKIP 并写明原因）；
+	//   - AC-27/28/29 用夹具（直接写库）+ 真实接口取证，保证可复跑、结果稳定。
+	// 夹具只写 agent_memory 一张表，跑完按 memory_id 自删。
+
+	// AC-26：真实诊断会话结束后，经验库里必须出现指向该会话的行。
+	run("AC-26", "经验沉淀：真实诊断会话结束后产出「症状→动作→结果」条目", func(cc *caseCtx) {
+		if db == nil {
+			cc.skip("未配置 CRONY_TEST_MYSQL_DSN：无法核对经验行是否真的落库")
+		}
+		if lastSession == "" {
+			cc.skip("本次套件没有成功的诊断会话（AC-07 未产出）：没有可核对的沉淀来源")
+		}
+		var cnt int
+		if err := db.QueryRow("select count(*) from "+models.CronyAgentMemoryTableName+
+			" where session_id = ?", lastSession).Scan(&cnt); err != nil {
+			cc.t.Fatalf("按 session_id 统计经验行失败: %v", err)
+		}
+		if cnt == 0 {
+			// 不判失败：诊断会话是否沉淀取决于它有没有产出结构化结论，
+			// 而"模型这次没给结构化 JSON"属于模型行为。但这必须**说清楚**，
+			// 否则"经验库一直空着"会被当成"功能正常"。
+			cc.skip("会话 %s 没有沉淀任何经验行（可能该次结论未产出可解析的 JSON 结论）", lastSession)
+		}
+		// 行本身必须满足契约：症状非空、动作有类型、结果取值在册、计数至少 1。
+		rows, err := db.Query("select memory_id, symptom, action_kind, outcome, occurrence_count, "+
+			"success_count, fail_count, blocked_count, denied_count, advised_count, enabled "+
+			"from "+models.CronyAgentMemoryTableName+" where session_id = ?", lastSession)
+		if err != nil {
+			cc.t.Fatalf("读取经验行失败: %v", err)
+		}
+		defer rows.Close()
+		kindOK := map[string]bool{"tool": true, "advice": true}
+		outcomeOK := map[string]bool{"success": true, "failed": true, "blocked": true, "denied": true, "advised": true}
+		checked := 0
+		for rows.Next() {
+			var (
+				id, symptom, kind, outcome string
+				occ, sc, fc, bc, dc, ac    int
+				enabled                    bool
+			)
+			if err := rows.Scan(&id, &symptom, &kind, &outcome, &occ, &sc, &fc, &bc, &dc, &ac, &enabled); err != nil {
+				cc.t.Fatalf("扫描经验行失败: %v", err)
+			}
+			if strings.TrimSpace(id) == "" || !strings.HasPrefix(id, "mem-") {
+				cc.t.Fatalf("经验行缺少可回溯的单号: %q", id)
+			}
+			if strings.TrimSpace(symptom) == "" {
+				cc.t.Fatalf("经验行的症状为空（无法用于相似召回）: %s", id)
+			}
+			if !kindOK[kind] {
+				cc.t.Fatalf("未知动作类型 %q（%s）", kind, id)
+			}
+			if !outcomeOK[outcome] {
+				cc.t.Fatalf("未知结果取值 %q（%s）", outcome, id)
+			}
+			if occ != sc+fc+bc+dc+ac {
+				cc.t.Fatalf("出现次数必须等于各结果计数之和: %s occ=%d s=%d f=%d b=%d d=%d a=%d",
+					id, occ, sc, fc, bc, dc, ac)
+			}
+			if occ < 1 {
+				cc.t.Fatalf("新沉淀的行出现次数至少为 1: %s", id)
+			}
+			if !enabled {
+				cc.t.Fatalf("新沉淀的经验默认必须是启用状态（否则沉淀了却不参与召回）: %s", id)
+			}
+			checked++
+		}
+		if err := rows.Err(); err != nil {
+			cc.t.Fatalf("遍历经验行失败: %v", err)
+		}
+		// 控制面也必须能看到同一批数据（接口与库不能是两套事实）。
+		apiData, err := c.postOK("/agent/memory/search", map[string]any{"session_id": lastSession, "page": 1, "page_size": 20})
+		if err != nil {
+			cc.t.Fatalf("按会话查经验失败: %v", err)
+		}
+		if got := int(asNum(apiData["total"])); got != cnt {
+			cc.t.Fatalf("接口与库口径不一致：库 %d 行 / 接口 %d 行", cnt, got)
+		}
+		src := asMap(apiData["source"])
+		if !asBool(src["advisory_only"]) || asBool(src["usable_as_evidence"]) || asBool(src["editable"]) {
+			cc.t.Fatalf("经验来源必须自述「仅线索、不可编辑」: %+v", src)
+		}
+		cc.note("会话 %s 沉淀 %d 条经验，逐行核对症状/动作类型/结果取值/计数自洽，接口与库口径一致",
+			lastSession, checked)
+	})
+
+	// AC-27：召回命中相关经验；停用后必须**不再**出现在召回结果里。
+	run("AC-27", "召回与停用：相似症状能命中，被停用的经验立刻退出召回", func(cc *caseCtx) {
+		if db == nil {
+			cc.skip("未配置 CRONY_TEST_MYSQL_DSN：无法造召回夹具")
+		}
+		fx := provisionMemoryFixture(t, db, memoryFixture{
+			// 症状里带唯一标记，保证命中一定来自本夹具而不是历史数据。
+			Symptom:    "验收夹具症状 端口 13309 未监听 服务未启动",
+			ActionText: "node_probe port=13309",
+			Tool:       "node_probe",
+			Outcome:    "failed",
+			Fail:       2,
+			TargetNode: nodeUUID,
+		})
+		query := "验收夹具症状 端口 13309 未监听"
+
+		hit := func() map[string]any {
+			data, err := c.postOK("/agent/memory/recall", map[string]any{
+				"symptom": query, "agent_kind": "diagnose", "target_node": nodeUUID, "top_k": 5,
+			})
+			if err != nil {
+				cc.t.Fatalf("召回请求失败: %v", err)
+			}
+			// 接口契约：召回结果只能当线索。
+			if !asBool(data["advisory_only"]) || asBool(data["usable_as_evidence"]) || asStr(data["notice"]) == "" {
+				cc.t.Fatalf("召回接口必须自述「仅线索、不可作证据」: advisory=%v usable=%v notice=%q",
+					data["advisory_only"], data["usable_as_evidence"], asStr(data["notice"]))
+			}
+			if tokens := asSlice(data["query_tokens"]); len(tokens) == 0 {
+				cc.t.Fatalf("召回必须回报查询词元（否则「为什么没召回」无法排查）: %+v", data)
+			}
+			for _, it := range asSlice(data["hits"]) {
+				if asStr(asMap(it)["memory_id"]) == fx.MemoryID {
+					return asMap(it)
+				}
+			}
+			return nil
+		}
+
+		h := hit()
+		if h == nil {
+			cc.t.Fatalf("相关经验未被召回（memory_id=%s）：症状=%q", fx.MemoryID, query)
+		}
+		if asStr(h["outcome_text"]) == "" {
+			cc.t.Fatalf("命中必须带中文结果解释: %+v", h)
+		}
+		if len(asSlice(h["reasons"])) == 0 || len(asSlice(h["matched"])) == 0 {
+			cc.t.Fatalf("命中必须可解释（matched/reasons 均非空）: %+v", h)
+		}
+		if !asBool(h["is_failed"]) {
+			cc.t.Fatalf("这条经验的结果是 failed，is_failed 必须为 true（否则前端会把它渲染成成功）: %+v", h)
+		}
+
+		// 停用必须写原因：空原因被拒，且状态不变。
+		status, env, err := c.do(http.MethodPost, "/agent/memory/disable",
+			map[string]any{"memory_id": fx.MemoryID, "reason": "   "}, true)
+		if err != nil {
+			cc.t.Fatalf("停用请求失败: %v", err)
+		}
+		if status != http.StatusOK || env.Code == 200 {
+			cc.t.Fatalf("无原因的停用必须被拒（HTTP %d/code %d）", status, env.Code)
+		}
+		if !fx.EnabledNow(t, db) {
+			cc.t.Fatal("被拒的停用竟然改动了状态")
+		}
+
+		// 正常停用 → 立刻退出召回。
+		_, err = c.postOK("/agent/memory/disable", map[string]any{
+			"memory_id": fx.MemoryID, "reason": "验收：验证停用后不再影响模型",
+		})
+		if err != nil {
+			cc.t.Fatalf("停用失败: %v", err)
+		}
+		if h2 := hit(); h2 != nil {
+			cc.t.Fatalf("被停用的经验仍然被召回（撤下动作是假的）: %+v", h2)
+		}
+		// 停用审计三件事必须落库（谁/为什么/何时）。
+		var by, reason string
+		var at int64
+		if err := db.QueryRow("select disabled_by, disabled_reason, disabled_at from "+
+			models.CronyAgentMemoryTableName+" where memory_id = ?", fx.MemoryID).Scan(&by, &reason, &at); err != nil {
+			cc.t.Fatalf("读停用审计失败: %v", err)
+		}
+		if strings.TrimSpace(by) == "" || strings.TrimSpace(reason) == "" || at <= 0 {
+			cc.t.Fatalf("停用必须记录 谁/为什么/何时：by=%q reason=%q at=%d", by, reason, at)
+		}
+
+		// 重新启用 → 恢复召回，且停用审计字段被清空。
+		if _, err := c.postOK("/agent/memory/enable", map[string]any{"memory_id": fx.MemoryID}); err != nil {
+			cc.t.Fatalf("启用失败: %v", err)
+		}
+		if hit() == nil {
+			cc.t.Fatal("重新启用后应恢复召回")
+		}
+		if err := db.QueryRow("select disabled_by, disabled_reason, disabled_at from "+
+			models.CronyAgentMemoryTableName+" where memory_id = ?", fx.MemoryID).Scan(&by, &reason, &at); err != nil {
+			cc.t.Fatalf("读启用后的状态失败: %v", err)
+		}
+		if by != "" || reason != "" || at != 0 {
+			cc.t.Fatalf("重新启用必须清空停用审计字段: by=%q reason=%q at=%d", by, reason, at)
+		}
+		cc.note("夹具 %s：召回命中且可解释 → 无原因停用被拒 → 停用后退出召回（审计三件事落库）→ 启用后恢复召回",
+			fx.MemoryID)
+	})
+
+	// AC-28：经验绝不能变成"本次证据"。
+	run("AC-28", "经验不是证据：接口声明不可作证据，会话注入的是「历史提示」而非观测", func(cc *caseCtx) {
+		// (1) 接口层：召回与列表都必须把这条约束写在返回值里，而不是只写在文档里。
+		recallData, err := c.postOK("/agent/memory/recall", map[string]any{
+			"symptom": "验收：经验是否会被当成证据", "top_k": 1,
+		})
+		if err != nil {
+			cc.t.Fatalf("召回请求失败: %v", err)
+		}
+		if !asBool(recallData["advisory_only"]) || asBool(recallData["usable_as_evidence"]) {
+			cc.t.Fatalf("召回接口未声明「仅线索」: %+v", recallData)
+		}
+		listData, err := c.postOK("/agent/memory/search", map[string]any{"page": 1, "page_size": 5})
+		if err != nil {
+			cc.t.Fatalf("经验列表请求失败: %v", err)
+		}
+		src := asMap(listData["source"])
+		if !asBool(src["advisory_only"]) || asBool(src["usable_as_evidence"]) {
+			cc.t.Fatalf("经验列表来源块未声明「仅线索」: %+v", src)
+		}
+		if !asBool(src["disable_requires_reason"]) {
+			cc.t.Fatalf("经验库必须声明「停用需写原因」（治理口径）: %+v", src)
+		}
+
+		// (2) 运行时层：真的被注入过经验的那次会话，必须是「注入条款 + 明确的免责声明」，
+		//     且其证据里不能出现经验条目号（出现即说明经验被当成了观测）。
+		if db == nil {
+			cc.skip("接口层已核对通过；未配置 CRONY_TEST_MYSQL_DSN，无法核对运行时注入的那一侧")
+		}
+		var sessionID, promptVersion, warningsJSON, traceJSON, resultJSON string
+		err = db.QueryRow("select session_id, prompt_version, warnings_json, trace_json, result_json from "+
+			models.CronyAgentSessionTableName+
+			" where kind = 'diagnose' and result_json like '%\"memory_used\"%'"+
+			" order by created desc limit 1").Scan(&sessionID, &promptVersion, &warningsJSON, &traceJSON, &resultJSON)
+		if err != nil {
+			cc.skip("接口层已核对通过；库里还没有「用过历史经验」的诊断会话（模型是否召回取决于症状相似度），" +
+				"运行时注入这一侧本次没有观测到（单测 diagnose_memory_test.go 覆盖了守门逻辑）")
+		}
+		if promptVersion != "diagnose-v5" {
+			cc.t.Fatalf("注入经验的会话必须记录为 diagnose-v5（提示词版本是复盘依据），实际 %q", promptVersion)
+		}
+		if !strings.Contains(warningsJSON, "历史经验") {
+			cc.t.Fatalf("注入经验时必须留下「历史经验不是本次证据」的警示，实际 warnings=%s", truncate(warningsJSON, 300))
+		}
+		if strings.Contains(traceJSON, "mem-") && !strings.Contains(warningsJSON, "未观测") {
+			cc.t.Fatalf("轨迹里出现经验条目号却没有「未观测」警示（经验可能被当成了证据）: trace 片段=%s",
+				truncate(traceJSON, 300))
+		}
+		cc.note("接口层：recall/list 均声明 advisory_only=true & usable_as_evidence=false；"+
+			"运行时：会话 %s 记为 %s 且带「历史经验不是证据」警示", sessionID, promptVersion)
+	})
+
+	// AC-29：统计口径自洽（成功率的分母只含真正执行过的动作）。
+	run("AC-29", "经验统计：分组与总数自洽，成功率分母只含执行过的动作", func(cc *caseCtx) {
+		data, err := c.postOK("/agent/memory/stats", map[string]any{})
+		if err != nil {
+			cc.t.Fatalf("统计请求失败: %v", err)
+		}
+		total := int(asNum(data["total"]))
+		enabled := int(asNum(data["enabled"]))
+		disabled := int(asNum(data["disabled"]))
+		if enabled+disabled != total {
+			cc.t.Fatalf("enabled(%d)+disabled(%d) 应等于 total(%d)", enabled, disabled, total)
+		}
+		byOutcome := asMap(data["by_outcome"])
+		sum := 0
+		for _, v := range byOutcome {
+			sum += int(asNum(v))
+		}
+		if sum != total {
+			cc.t.Fatalf("by_outcome 之和 %d 应等于 total %d", sum, total)
+		}
+		successSum := int(asNum(data["success_sum"]))
+		failSum := int(asNum(data["fail_sum"]))
+		if successSum+int(asNum(byOutcome["success"])) < successSum {
+			cc.t.Fatalf("成功率分子与分组计数不自洽: %+v", data)
+		}
+		if asBool(data["success_rate_known"]) {
+			want := float64(successSum) / float64(successSum+failSum)
+			if got := asNum(data["success_rate"]); got < want-1e-9 || got > want+1e-9 {
+				cc.t.Fatalf("成功率应等于 成功/(成功+失败)=%.6f，实际 %.6f", want, got)
+			}
+			if successSum+failSum == 0 {
+				cc.t.Fatalf("声明成功率已知时，分母不能是 0: %+v", data)
+			}
+		}
+		def := asMap(data["definition"])
+		if asStr(def["success_rate"]) == "" || len(asSlice(def["excluded"])) == 0 {
+			cc.t.Fatalf("统计必须自述口径（否则「成功率」只是个数字）: %+v", data)
+		}
+		// 与库对账：总量必须一致（接口与库不能是两套事实）。
+		if db != nil {
+			var dbTotal int
+			if err := db.QueryRow("select count(*) from " + models.CronyAgentMemoryTableName).Scan(&dbTotal); err != nil {
+				cc.t.Fatalf("按库统计经验总数失败: %v", err)
+			}
+			if dbTotal != total {
+				cc.t.Fatalf("统计接口 total=%d 与库实际 %d 不一致", total, dbTotal)
+			}
+		}
+		cc.note("total=%d（enabled %d / disabled %d），by_outcome 分组和=%d，成功 %d / 失败 %d，口径自述齐全",
+			total, enabled, disabled, sum, successSum, failSum)
 	})
 }

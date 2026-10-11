@@ -1,6 +1,9 @@
 package agent
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // 提示词版本号。
 //
@@ -38,9 +41,52 @@ const (
 	//   - 若最可能原因属于该类事实，summary 必须用"疑似/需在节点确认"的措辞；
 	//   - 并给出了"连不上 ≠ 端口未监听"的对照写法。
 	PromptVersionDiagnoseV4 = "diagnose-v4"
+	// PromptVersionDiagnoseV5 故障诊断提示词 v5（阶段 4-A：注入历史经验）。
+	//
+	// 为什么必须升版本而不是"悄悄多塞一段材料"：提示词版本是**结论可比性的前提**。
+	// 从 v5 起，同样的失败可能出现不同的结论（因为模型看到了历史经验），
+	// 回放评测时必须能把"v4 结论"与"v5 结论"分开统计，否则会把提示词变更
+	// 误判成"模型变聪明/变笨了"。
+	PromptVersionDiagnoseV5 = "diagnose-v5"
 	// PromptVersionNLJobV1 自然语言建任务提示词 v1。
 	PromptVersionNLJobV1 = "nljob-v1"
 )
+
+// memoryRuleDiagnose 历史经验条款（追加进 v2 系统提示词，插入在输出结构之前）。
+//
+// 为什么把这段单独抽出来：它是阶段 4-A 对模型行为的**唯一**新增约束，
+// 独立成常量后可以在单测里直接断言"这段约束确实进了最终提示词"，
+// 而不是靠人去比对两段长字符串的差异。
+const memoryRuleDiagnose = `
+8. **历史相似经验只能当线索，不能当证据。** 材料里可能出现「历史相似经验」区块
+   （由系统从过去的会话自动沉淀）。它可能存在三种问题：已经过时、当时环境不同、
+   当时的结论本身就是错的。因此：
+   - 它**不是本次观测**：绝对不能把历史条目当证据（例如写 ref = mem-xxx），
+     那会被判为捏造证据并让本次结论降级为"需人工复核"；
+   - 它可以用来决定"先查什么"（例如历史上这个任务的失败常与磁盘水位有关 → 先观测磁盘水位）；
+   - 若你采纳了历史经验的排查方向，仍**必须**用本次工具观测来支撑结论；
+   - 若历史经验与本次观测冲突，**以本次观测为准**，并把这个冲突写进 summary 或 assumptions。
+`
+
+// PromptDiagnoseV2 故障诊断的系统提示词 v2 = v1 + 历史经验条款。
+//
+// 用"在 v1 基础上插入一段"而不是复制整段，是为了避免两份长提示词各自漂移：
+// v1 的任何修订（实测踩过的坑都写在那里）必须自动进入 v2。
+// 插入点锚在 "## 输出 JSON 结构"，锚点失效会被单测立刻抓住
+// （TestDiagnosePromptV2InsertsMemoryRule）。
+var PromptDiagnoseV2 = insertBeforeSchema(PromptDiagnoseV1, memoryRuleDiagnose)
+
+// insertBeforeSchema 把 extra 插到"## 输出 JSON 结构"之前；锚点不存在时**原样返回**。
+//
+// 原样返回（而不是 panic）是为了不让提示词修订把服务打挂；
+// 代价是"锚点失效 → 条款静默丢失"，所以必须由单测兜住这一点。
+func insertBeforeSchema(base, extra string) string {
+	const anchor = "\n## 输出 JSON 结构"
+	if !strings.Contains(base, anchor) {
+		return base
+	}
+	return strings.Replace(base, anchor, extra+anchor, 1)
+}
 
 // PromptDiagnoseV1 故障诊断的系统提示词。
 //

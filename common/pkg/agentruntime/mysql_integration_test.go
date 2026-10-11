@@ -84,18 +84,20 @@ func TestIntegrationAgentSessionStore(t *testing.T) {
 	bigTrace := `{"version":1,"session_id":"` + tag + `","steps":[{"seq":1,"kind":"model","content":"` +
 		strings.Repeat("长文本观测 ", 12000) + `"}]}`
 	session := &models.AgentSession{
-		SessionID:     tag,
-		Kind:          models.AgentKindDiagnose,
-		JobID:         900002,
-		RunID:         runID,
-		NodeUUID:      "it-node",
-		Goal:          "集成测试：验证会话持久化",
-		Status:        models.AgentStatusCompleted,
-		StopReason:    string(agent.StopCompleted),
-		Provider:      "offline",
-		Model:         "offline-model",
-		PromptVersion: agent.PromptVersionDiagnoseV4,
-		SystemPrompt:  agent.PromptDiagnoseV1,
+		SessionID:  tag,
+		Kind:       models.AgentKindDiagnose,
+		JobID:      900002,
+		RunID:      runID,
+		NodeUUID:   "it-node",
+		Goal:       "集成测试：验证会话持久化",
+		Status:     models.AgentStatusCompleted,
+		StopReason: string(agent.StopCompleted),
+		Provider:   "offline",
+		Model:      "offline-model",
+		// 阶段 4-A 起，诊断会话落库的版本号/系统提示词都取最新一代
+		// （v5 = v1 + 历史经验条款；系统提示词存 v2 全文，便于事后复盘"当时模型看到的是什么"）。
+		PromptVersion: agent.PromptVersionDiagnoseV5,
+		SystemPrompt:  agent.PromptDiagnoseV2,
 		ModelCalls:    2,
 		ToolCalls:     3,
 		TotalTokens:   1234,

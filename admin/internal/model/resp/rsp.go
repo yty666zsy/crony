@@ -61,6 +61,15 @@ const (
 	ErrorAgentApprovalBlocked = 1017
 	// ErrorAgentApprovalExecFailed 已执行但失败（含业务失败 Result.OK=false）。
 	ErrorAgentApprovalExecFailed = 1018
+
+	// 阶段 4-A（Agent 记忆/经验库）业务码。
+	//
+	// 为什么"经验条目不存在"需要单独的码而不是复用 1010：1010 是"运行记录不存在"
+	// （诊断入口），而经验条目是另一类对象；前端据此决定"是回列表还是提示单号失效"。
+	// ErrorAgentMemoryNotFound 经验条目不存在（单号无效或已被清理）。
+	ErrorAgentMemoryNotFound = 1019
+	// ErrorAgentMemoryConflict 经验条目状态已变更（重复停用/启用，CAS 未生效）。
+	ErrorAgentMemoryConflict = 1020
 )
 
 func Result(code int, data interface{}, msg string, c *gin.Context) {

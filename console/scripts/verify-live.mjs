@@ -97,6 +97,8 @@ try {
     stream: await server.ssrLoadModule('/src/api/stream.js'),
     // 阶段 4.2：写动作审批台走的是 api/approval.js，与页面同一条链路。
     approval: await server.ssrLoadModule('/src/api/approval.js'),
+    // 阶段 4-A：Agent 经验库走的是 api/memory.js。
+    memory: await server.ssrLoadModule('/src/api/memory.js'),
   }
 } catch (err) {
   console.error('加载控制台 API 模块失败:', err?.message || err)
@@ -385,6 +387,128 @@ if (!SKIP_MODEL_WRITE) {
       Array.isArray(r.list) && typeof r.total === 'number' && bad.length === 0,
       `total=${r.total} 本页=${r.list?.length} 决策=[${[...new Set((r.list || []).map((x) => x.decision))].join(',')}]`,
     )
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 阶段 4-A) Agent 经验库（记忆）：走控制台自己的 api/memory.js（真链路）
+//
+// 这一节**只读 + 只碰自己造的夹具**：
+//   - search/find/stats 是只读接口，直接验契约与口径；
+//   - recall 用一段"故意不像任何真实症状"的文本，验的是"空结果是正确答案"
+//     以及 advisory_only/usable_as_evidence 这两条硬约束；
+//   - **停用/启用不在这里做**：那是写治理动作，需要真实条目且要写原因，
+//     由 Go 侧验收用例 AC-27 在真实库上做（本节只验前端能拿到的契约）。
+// 另外必须验一条"经验不是证据"的运行时痕迹：只要历史上有过一次注入，
+// 那条会话必须记为 diagnose-v5，且带"历史经验不是证据"的警示。
+// ---------------------------------------------------------------------------
+{
+  const memSearch = await step('POST /agent/memory/search', () =>
+    mods.memory.searchMemories({ page: 1, page_size: 10 }),
+  )
+  if (memSearch.ok) {
+    const r = memSearch.value || {}
+    const src = r.source || {}
+    // 结果取值必须都在已知集合内：前端按 outcome 上色，出现未知值会渲染成灰色"未知"。
+    const known = new Set(['success', 'failed', 'blocked', 'denied', 'advised'])
+    const bad = (r.list || []).filter(
+      (m) =>
+        !m.memory_id ||
+        !m.outcome_text ||
+        !known.has(m.outcome) ||
+        m.occurrence_count !==
+          m.success_count + m.fail_count + m.blocked_count + m.denied_count + m.advised_count,
+    )
+    check(
+      'POST /agent/memory/search 返回经验列表（结果可解释、计数自洽）',
+      Array.isArray(r.list) && typeof r.total === 'number' && bad.length === 0,
+      `total=${r.total} 本页=${r.list?.length} 结果=[${[...new Set((r.list || []).map((m) => m.outcome))].join(',')}] 计数不自洽=${bad.length}`,
+    )
+    check(
+      'POST /agent/memory/search 自述治理约束（仅线索/不可编辑/停用需原因）',
+      src.advisory_only === true && src.usable_as_evidence === false && src.editable === false && src.disable_requires_reason === true,
+      `advisory_only=${src.advisory_only} usable_as_evidence=${src.usable_as_evidence} editable=${src.editable} disable_requires_reason=${src.disable_requires_reason}`,
+    )
+  }
+
+  const memStats = await step('POST /agent/memory/stats', () => mods.memory.memoryStats())
+  if (memStats.ok) {
+    const d = memStats.value || {}
+    const bySum = Object.values(d.by_outcome || {}).reduce((a, b) => a + Number(b), 0)
+    check(
+      'POST /agent/memory/stats 口径自洽（分组和=总数，成功率分母只含执行过的动作）',
+      d.enabled + d.disabled === d.total &&
+        bySum === d.total &&
+        d.definition?.success_rate &&
+        Array.isArray(d.definition?.excluded) &&
+        d.definition.excluded.length >= 3,
+      `total=${d.total} enabled=${d.enabled} disabled=${d.disabled} 分组和=${bySum} 成功=${d.success_sum} 失败=${d.fail_sum} known=${d.success_rate_known} 口径=${summary(d.definition?.success_rate, 60)}`,
+    )
+  }
+
+  const memRecall = await step('POST /agent/memory/recall', () =>
+    mods.memory.recallMemories({
+      symptom: '联调自检：一段故意不像任何真实症状的文本（应召回到空）',
+      agent_kind: 'diagnose',
+      top_k: 3,
+    }),
+  )
+  if (memRecall.ok) {
+    const r = memRecall.value || {}
+    check(
+      'POST /agent/memory/recall 空结果是正确答案，且结果自述"不作证据"',
+      Array.isArray(r.hits) &&
+        r.hits.length === 0 &&
+        r.advisory_only === true &&
+        r.usable_as_evidence === false &&
+        typeof r.notice === 'string' &&
+        r.notice.length > 0 &&
+        Array.isArray(r.query_tokens) &&
+        r.query_tokens.length > 0,
+      `hits=${r.hits?.length} advisory_only=${r.advisory_only} usable_as_evidence=${r.usable_as_evidence} 比较=${r.considered} 词元=${r.query_tokens?.length} notice=${summary(r.notice, 40)}`,
+    )
+  }
+
+  // 单条详情：拿列表里第一条（没有则为空库，跳过一次断言而不是伪造）。
+  const memList = memSearch.ok ? memSearch.value?.list || [] : []
+  if (memList.length) {
+    const memFind = await step('POST /agent/memory/find', () => mods.memory.findMemory(memList[0].memory_id))
+    if (memFind.ok) {
+      const m = memFind.value?.memory || {}
+      check(
+        'POST /agent/memory/find 返回单条详情（含分词与结果原文，可复盘"为什么算相似"）',
+        m.memory_id === memList[0].memory_id && typeof m.symptom === 'string' && 'symptom_tokens' in m,
+        `memory=${m.memory_id} 症状=${summary(m.symptom, 40)} 计数=${m.occurrence_count}`,
+      )
+    }
+  }
+
+  // "经验不是证据"的运行时痕迹：历史上有过注入的会话必须记为 diagnose-v5 且带警示。
+  const injectCheck = await step('POST /agent/session/find（抽查会话找注入痕迹）', async () => {
+    const list = (await mods.agent.searchAgentSessions({ page: 1, page_size: 50 }))?.list || []
+    for (const s of list) {
+      if (s.kind !== 'diagnose') continue
+      const d = await mods.agent.findAgentSession(s.session_id)
+      // 注意：会话详情把结构化结论放在 result 里（/agent/diagnosis/find 才叫 diagnosis）。
+      const diag = d?.result || {}
+      if (Array.isArray(diag.memory_used) && diag.memory_used.length > 0) return { session: s.session_id, diag }
+    }
+    return null
+  })
+  if (injectCheck.ok) {
+    const found = injectCheck.value
+    if (!found) {
+      console.log('  - 未找到"注入过历史经验"的会话（模型是否召回取决于症状相似度）：本条跳过，已由 Go 验收用例 AC-28 覆盖')
+    } else {
+      const { session, diag } = found
+      check(
+        '注入过历史经验的会话：记为 diagnose-v5 且带"经验不是证据"的警示',
+        diag.prompt_version === 'diagnose-v5' &&
+          (diag.memory_note || '').includes('不计入证据') &&
+          (diag.warnings || []).some((w) => w.includes('历史经验')),
+        `session=${session} prompt_version=${diag.prompt_version} memory_used=${diag.memory_used?.length} note=${summary(diag.memory_note, 40)}`,
+      )
+    }
   }
 }
 

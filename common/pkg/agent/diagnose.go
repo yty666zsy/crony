@@ -43,6 +43,18 @@ type RunContext struct {
 	RecentRuns []RunSummary `json:"recent_runs"`
 	// Extra 其他可用材料（调用方自行组装，如节点状态、告警记录）。
 	Extra []string `json:"extra"`
+
+	// MemoryHints 历史相似经验的展示行（阶段 4-A，**由调用方先召回再填入**）。
+	//
+	// 为什么要"行"而不是整段文本：**声明历史经验不可当证据的那句话由本包写死**
+	// （见 memoryHintHeader），调用方只能提供条目内容。这样"注入历史经验"
+	// 就永远带着这条约束，不依赖每个调用方记得自己加免责声明。
+	//
+	// 本包的职责边界：这里**只做提示词注入与审计记录**，不做召回——
+	// 召回要读数据库，而 agent 包是无数据库依赖的纯逻辑层。
+	MemoryHints []string `json:"memory_hints"`
+	// MemoryHintIDs 被注入的历史经验条目号（用于结论归因：这次结论受过哪些历史提示影响）。
+	MemoryHintIDs []string `json:"memory_hint_ids"`
 }
 
 // RunSummary 历史运行摘要。
@@ -95,6 +107,12 @@ type Diagnosis struct {
 
 	// AdvisoryOnly 恒为 true：诊断结论永远不直接触发变更。
 	AdvisoryOnly bool `json:"advisory_only"`
+
+	// MemoryUsed 本次结论在提示词里注入过的历史经验条目号（阶段 4-A）。
+	//
+	// 为什么必须记下来：如果事后发现某次结论是错的，第一个要回答的问题是
+	// "它是不是被历史经验带偏了"。没有这个字段就只能在提示词全文里翻。
+	MemoryUsed []string `json:"memory_used,omitempty"`
 
 	// UnverifiedRefs 模型引用了但本次运行**并未观测到**的证据定位。
 	// 非空意味着这条结论里存在"看起来有据、其实没据"的成分，必须显式告警。
@@ -246,7 +264,7 @@ func DiagnoseWithSession(ctx context.Context, a *Agent, rc RunContext, sessionID
 		JobID:         rc.JobID,
 		RunID:         rc.RunID,
 		AdvisoryOnly:  true,
-		PromptVersion: PromptVersionDiagnoseV4,
+		PromptVersion: PromptVersionDiagnoseV5,
 		Category:      "unknown",
 	}
 	if a == nil {
@@ -256,18 +274,37 @@ func DiagnoseWithSession(ctx context.Context, a *Agent, rc RunContext, sessionID
 		sessionID = DiagnoseSessionID(rc.JobID, rc.RunID)
 	}
 
+	material := []string{renderRunContext(rc)}
+	// 历史经验块：材料里**增一块**，而不是混进客观事实里——
+	// 这是"线索"与"事实"在输入侧的物理隔离。声明文字由本包写死（见 memoryHintHeader）。
+	memWarning := ""
+	if block := renderMemoryHints(rc.MemoryHints); block != "" {
+		material = append(material, block)
+		diag.MemoryUsed = append([]string{}, rc.MemoryHintIDs...)
+		memWarning = fmt.Sprintf(
+			"本次提示词注入了 %d 条历史经验（%s）：它们只是排查线索，不计入证据；若模型引用它们会被判为未观测",
+			len(rc.MemoryHints), strings.Join(dedupe(rc.MemoryHintIDs), ", "))
+		diag.Warnings = append(diag.Warnings, memWarning)
+	}
+
 	in := Input{
 		SessionID:     sessionID,
 		Goal:          fmt.Sprintf("诊断任务 %d（%s）本次失败的原因", rc.JobID, rc.JobName),
-		System:        PromptDiagnoseV1,
-		Context:       []string{renderRunContext(rc)},
+		System:        PromptDiagnoseV2,
+		Context:       material,
 		Given:         givenEvidence(rc),
-		PromptVersion: PromptVersionDiagnoseV4,
+		PromptVersion: PromptVersionDiagnoseV5,
 	}
 	out, err := a.Run(ctx, in, DiagnosisSchema())
 	diag.Trace = out.Trace
 	diag.StopReason = out.StopReason
 	diag.Warnings = append(diag.Warnings, out.Warnings...)
+	// 同一句免责声明也要进**会话级**告警（trace.Warnings → agent_session.warnings_json）：
+	// 只写在结论里的话，人从会话列表一眼看不出"这次结论参考过历史经验"，
+	// 而这恰恰是复盘时要先知道的事（结论是模型自己编的，还是被旧经验带过去的）。
+	if memWarning != "" {
+		diag.Trace.addWarning(memWarning)
+	}
 	diag.DurationMS = time.Since(start).Milliseconds()
 	if out.Trace != nil {
 		diag.ToolCalls = out.Trace.ToolCalls
@@ -317,6 +354,15 @@ func DiagnoseWithSession(ctx context.Context, a *Agent, rc RunContext, sessionID
 	if out.Trace != nil {
 		applyNodeClaimGuard(&diag, out.Trace.EvidenceList())
 	}
+	// ---- 历史经验守卫（阶段 4-A）：经验条目**永远不能**充当本次证据 ----
+	//
+	// 常规 grounding 校验（上面的 refObserved）本来就会把 "mem-xxx" 判为未观测，
+	// 但这里额外做一次**指名道姓**的判定，原因有两个：
+	//  1. 告警文字要能直接说明"它引用的是历史经验"，而不是笼统的"未观测到的 ref"——
+	//     前者能让人一眼看出是提示词注入的副作用，后者会让人以为是模型编造；
+	//  2. 这条规则是本阶段的**核心不变量**，需要一个独立的、可单独测试的守门点，
+	//     不能只依赖另一条通用校验顺带覆盖。
+	applyMemoryEvidenceGuard(&diag, rc)
 	// 证据不足时必须有"还需要什么"的清单，否则这条结论没法推进
 	if !diag.EvidenceSufficient && len(diag.NextDataToCollect) == 0 {
 		diag.Warnings = append(diag.Warnings, "结论为证据不足但未给出待收集数据清单")
@@ -359,6 +405,75 @@ func givenEvidence(rc RunContext) []tools.Evidence {
 		add("job_run", refRun(r.RunID), fmt.Sprintf("%s 状态=%s 退出码=%d %s", r.RunID, r.Status, r.ExitCode, r.Note))
 	}
 	return out
+}
+
+// memoryHintHeader 注入历史经验块时**由本包写死**的声明。
+//
+// 这段文字是"历史提示 ≠ 本次证据"这条纪律在输入侧的唯一落点，所以不能由调用方提供：
+// 一旦允许调用方自定义标题，就会出现"某条调用路径把历史经验当事实材料塞进去"的漏洞，
+// 而这种漏洞在测试里很难被发现（模型照样能给出看起来合理的结论）。
+const memoryHintHeader = `### 历史相似经验（线索，不是证据）
+以下条目由系统从**过去**的会话自动沉淀：可能与当前情况不同、可能已经过时，也可能当时就是错的。
+它们只能提示"先查什么"；**引用它们不算本次证据**——本次结论必须挂在本次工具观测的 ref 上。
+如果历史经验与本次观测冲突，以本次观测为准。`
+
+// renderMemoryHints 把历史经验行渲染成一个材料块；无内容时返回空字符串。
+//
+// 返回空字符串而不是"带标题的空块"：材料里出现一个空标题会让模型以为
+// "有历史但没有内容"，进而写出"历史数据缺失"这类无意义的结论。
+func renderMemoryHints(lines []string) string {
+	kept := make([]string, 0, len(lines))
+	for _, l := range lines {
+		if strings.TrimSpace(l) != "" {
+			kept = append(kept, strings.TrimSpace(l))
+		}
+	}
+	if len(kept) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(memoryHintHeader)
+	b.WriteString("\n")
+	for _, l := range kept {
+		b.WriteString("- " + llm.Truncate(l, 800) + "\n")
+	}
+	return b.String()
+}
+
+// looksLikeMemoryRef 判断一个证据 ref 是不是"历史经验条目号"。
+//
+// 判定放在**前缀**上（mem- 是 models.NewMemoryID 的固定前缀）：
+// 用"包含 memory 字样"之类模糊规则会把 tool 名（memory_search 之类）误判。
+func looksLikeMemoryRef(ref string) bool {
+	return strings.HasPrefix(strings.TrimSpace(strings.ToLower(ref)), "mem-")
+}
+
+// applyMemoryEvidenceGuard 把"拿历史经验当证据"的引用单独标出来并降级结论。
+//
+// 与通用 grounding 的关系：通用校验把未观测的 ref 一律记为 UnverifiedRefs（本守卫也依赖它），
+// 这里额外给出**指名道姓的原因**，并保证即使 ref 恰好被写进了注入过的经验号
+// （即"ref 确实存在"）也照样降级——因为"这条经验存在"与"本次观测到了"是两件事。
+func applyMemoryEvidenceGuard(diag *Diagnosis, rc RunContext) {
+	if diag == nil {
+		return
+	}
+	used := map[string]bool{}
+	for _, id := range rc.MemoryHintIDs {
+		used[strings.TrimSpace(id)] = true
+	}
+	var bad []string
+	for _, e := range diag.Evidence {
+		if looksLikeMemoryRef(e.Ref) || used[strings.TrimSpace(e.Ref)] {
+			bad = append(bad, e.Ref)
+		}
+	}
+	if len(bad) == 0 {
+		return
+	}
+	diag.EvidenceSufficient = false
+	diag.Warnings = append(diag.Warnings, fmt.Sprintf(
+		"模型把 %d 条历史经验当成本次证据（%s）：历史经验不是观测，已降级为需人工复核",
+		len(bad), strings.Join(dedupe(bad), ", ")))
 }
 
 // renderRunContext 把客观事实渲染成模型可读材料。

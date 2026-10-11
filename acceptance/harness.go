@@ -27,6 +27,8 @@ import (
 	"unicode/utf8"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/tmnhs/crony/common/models"
+	"github.com/tmnhs/crony/common/pkg/agentmemory"
 	"github.com/tmnhs/crony/common/pkg/tools"
 )
 
@@ -534,6 +536,135 @@ func loadApprovalRow(t *testing.T, db *sql.DB, approvalID string) approvalRow {
 		t.Fatalf("读审批单 %s 失败: %v", approvalID, err)
 	}
 	return out
+}
+
+// ---------- 经验库夹具（阶段 4-A） ----------
+
+// memoryFixture 经验条目的夹具描述。
+//
+// 为什么允许直接写库（与审批单夹具同样的理由）：经验的正常来源是"诊断会话结束后
+// 由旁路沉淀"，而**会不会沉淀、沉淀几条取决于模型这次说了什么**。要让
+// "召回命中 / 停用后退出召回 / 统计口径"这些契约可复跑，夹具必须自备前置条件；
+// 否则验收会变成"看模型今天心情"。
+type memoryFixture struct {
+	MemoryID   string
+	Symptom    string
+	ActionText string
+	ActionKind string
+	Tool       string
+	TargetNode string
+	AgentKind  string
+	Outcome    string
+	// Success/Fail/Blocked/Denied/Advised 各结果计数；0 时按 Outcome 记 1 次。
+	Success int
+	Fail    int
+	Blocked int
+	Denied  int
+	Advised int
+	// Enabled 传 false 时造一条**已停用**的条目（用于验证"停用的不进召回"）。
+	Enabled bool
+	// EnabledSet 为 true 时按 Enabled 落库，否则一律落"启用"。
+	EnabledSet bool
+}
+
+// EnabledNow 读回夹具当前是否启用（断言"被拒的停用没有改动状态"用）。
+func (f memoryFixture) EnabledNow(t *testing.T, db *sql.DB) bool {
+	t.Helper()
+	var enabled bool
+	if err := db.QueryRow("select enabled from "+models.CronyAgentMemoryTableName+
+		" where memory_id = ?", f.MemoryID).Scan(&enabled); err != nil {
+		t.Fatalf("读经验夹具状态失败: %v", err)
+	}
+	return enabled
+}
+
+// provisionMemoryFixture 写入一条经验夹具并注册自清理（返回夹具描述）。
+//
+// 落库用的词元串（symptom_tokens）直接由**被测代码**的 agentmemory.TokenizeString 生成：
+// 夹具必须是"格式合法、口径一致"的记录，否则用例测到的会是"夹具写坏了"。
+func provisionMemoryFixture(t *testing.T, db *sql.DB, spec memoryFixture) memoryFixture {
+	t.Helper()
+	now := time.Now()
+	if spec.MemoryID == "" {
+		spec.MemoryID = "mem-acc-" + strconv.FormatInt(now.UnixNano(), 10)
+	}
+	if spec.AgentKind == "" {
+		spec.AgentKind = "diagnose"
+	}
+	if spec.ActionKind == "" {
+		spec.ActionKind = "tool"
+	}
+	if spec.Outcome == "" {
+		spec.Outcome = "failed"
+	}
+	if spec.TargetNode == "" {
+		spec.TargetNode = envOr("CRONY_ACC_NODE_UUID", "node-it-01")
+	}
+	// 计数：调用方没给具体分布时，按 outcome 记 1 次（保证 occurrence == 各计数之和，
+	// 这正是 AC-26 断言的库内自洽条件）。
+	if spec.Success+spec.Fail+spec.Blocked+spec.Denied+spec.Advised == 0 {
+		switch spec.Outcome {
+		case "success":
+			spec.Success = 1
+		case "failed":
+			spec.Fail = 1
+		case "blocked":
+			spec.Blocked = 1
+		case "denied":
+			spec.Denied = 1
+		case "advised":
+			spec.Advised = 1
+		}
+	}
+	occ := spec.Success + spec.Fail + spec.Blocked + spec.Denied + spec.Advised
+	enabled := true
+	if spec.EnabledSet {
+		enabled = spec.Enabled
+	}
+	dedupeKey := models.MemoryDedupeKey(spec.Symptom, spec.ActionKind, spec.ActionText, spec.TargetNode)
+	_, err := db.Exec("insert into "+models.CronyAgentMemoryTableName+` (
+		memory_id, dedupe_key, session_id, run_id, job_id, agent_kind, symptom, symptom_tokens,
+		action_kind, action_text, tool, target_node, risk, outcome, result_text, result_detail,
+		occurrence_count, success_count, fail_count, blocked_count, denied_count, advised_count,
+		enabled, disabled_by, disabled_reason, disabled_at,
+		created, created_ms, updated, updated_ms, last_seen, last_seen_ms)
+		values (?, ?, ?, ?, 910007, ?, ?, ?, ?, ?, ?, ?, 'read', ?, ?, '',
+		?, ?, ?, ?, ?, ?, ?, '', '', 0, ?, ?, ?, ?, ?, ?)`,
+		spec.MemoryID, dedupeKey, spec.SessionIDOr(), spec.MemoryID+"-run", spec.AgentKind,
+		spec.Symptom, agentmemory.TokenizeString(spec.Symptom),
+		spec.ActionKind, spec.ActionText, spec.Tool, spec.TargetNode, spec.Outcome,
+		spec.OutcomeResultText(), occ, spec.Success, spec.Fail, spec.Blocked, spec.Denied, spec.Advised,
+		enabled, now.Unix(), now.UnixMilli(), now.Unix(), now.UnixMilli(), now.Unix(), now.UnixMilli())
+	if err != nil {
+		t.Fatalf("造经验夹具失败（验收库需要 INSERT 权限）: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := db.Exec("delete from "+models.CronyAgentMemoryTableName+" where memory_id = ?", spec.MemoryID); err != nil {
+			t.Errorf("清理经验夹具失败（验收库可能残留 %s）: %v", spec.MemoryID, err)
+		}
+	})
+	return spec
+}
+
+// SessionIDOr 夹具会话号（唯一，避免与真实会话混在一起被按会话查询命中）。
+func (f memoryFixture) SessionIDOr() string {
+	return "acceptance-memory:" + f.MemoryID
+}
+
+// OutcomeResultText 结果摘要：把"动作到底发生没发生"写清楚（与沉淀路径同口径）。
+func (f memoryFixture) OutcomeResultText() string {
+	switch f.Outcome {
+	case "success":
+		return "验收夹具：该处置本次执行成功"
+	case "failed":
+		return "验收夹具：该处置执行了但失败"
+	case "blocked":
+		return "验收夹具：被拦下转人工，本次**没有执行**"
+	case "denied":
+		return "验收夹具：被闸门拒绝，本次**没有执行**"
+	default:
+		return "验收夹具：只给了建议，本次没有动作"
+	}
 }
 
 // ---------- 三态报告 ----------

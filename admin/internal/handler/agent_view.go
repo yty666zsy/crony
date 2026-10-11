@@ -211,20 +211,26 @@ type agentDiagnosisView struct {
 	// 与 unverified_refs 并列但不相同：后者是引用了假 ref，前者是 ref 全真但结论越界
 	// （例如断言"端口未监听"，而本次运行没有任何节点侧观测）。前端应同样高亮展示。
 	UnverifiedNodeClaims []string `json:"unverified_node_claims"`
-	Warnings             []string `json:"warnings"`
-	AdvisoryOnly         bool     `json:"advisory_only"`
-	Provider             string   `json:"provider"`
-	Model                string   `json:"model"`
-	PromptVersion        string   `json:"prompt_version"`
-	StopReason           string   `json:"stop_reason"`
-	StopReasonText       string   `json:"stop_reason_text"`
-	DurationMS           int64    `json:"duration_ms"`
-	ToolCalls            int      `json:"tool_calls"`
-	TotalTokens          int      `json:"total_tokens"`
-	SessionID            string   `json:"session_id"`
-	RunID                string   `json:"run_id"`
-	Created              string   `json:"created"`
-	Explain              string   `json:"explain"`
+	// MemoryUsed 本次诊断**注入过**的历史经验条目号（阶段 4-A）。
+	// 必须单独暴露：它们是提示词的输入，人复盘时必须能一眼看到"模型当时看过哪些旧经验"；
+	// 同时它们**不在** evidence 里——这个字段与 evidence 的分离本身就是"经验不是证据"的体现。
+	MemoryUsed []string `json:"memory_used"`
+	// MemoryNote 固定文案（不由前端自行编写）：出现 memory_used 时说明其性质。
+	MemoryNote     string   `json:"memory_note"`
+	Warnings       []string `json:"warnings"`
+	AdvisoryOnly   bool     `json:"advisory_only"`
+	Provider       string   `json:"provider"`
+	Model          string   `json:"model"`
+	PromptVersion  string   `json:"prompt_version"`
+	StopReason     string   `json:"stop_reason"`
+	StopReasonText string   `json:"stop_reason_text"`
+	DurationMS     int64    `json:"duration_ms"`
+	ToolCalls      int      `json:"tool_calls"`
+	TotalTokens    int      `json:"total_tokens"`
+	SessionID      string   `json:"session_id"`
+	RunID          string   `json:"run_id"`
+	Created        string   `json:"created"`
+	Explain        string   `json:"explain"`
 }
 
 type diagnosisEvidenceView struct {
@@ -264,6 +270,7 @@ func diagnosisView(d agent.Diagnosis, session *models.AgentSession) agentDiagnos
 		NextDataToCollect:    orEmpty(d.NextDataToCollect),
 		UnverifiedRefs:       orEmpty(d.UnverifiedRefs),
 		UnverifiedNodeClaims: orEmpty(d.UnverifiedNodeClaims),
+		MemoryUsed:           orEmpty(d.MemoryUsed),
 		Warnings:             orEmpty(d.Warnings),
 		AdvisoryOnly:         true, // 恒定：诊断不执行任何动作（契约 §7.2）
 		Provider:             d.Provider,
@@ -287,6 +294,9 @@ func diagnosisView(d agent.Diagnosis, session *models.AgentSession) agentDiagnos
 		out.SuggestedActions = append(out.SuggestedActions, suggestedActionView{
 			Title: a.Title, Detail: a.Detail, Risk: a.Risk, RiskText: riskText(a.Risk), Rollback: a.Rollback,
 		})
+	}
+	if len(out.MemoryUsed) > 0 {
+		out.MemoryNote = "本次注入了历史相似经验：它们只是排查线索，不计入证据；模型引用它们会被判为未观测。"
 	}
 	if session != nil {
 		out.SessionID = session.SessionID

@@ -29,6 +29,9 @@ var (
 	// approvalService 审批控制面单例（未启用 Agent 能力时为 nil）。
 	approvalMu      sync.RWMutex
 	approvalService *ApprovalService
+	// memoryService 经验库控制面单例（未启用 Agent 能力时为 nil）。
+	memoryMu      sync.RWMutex
+	memoryService *MemoryService
 )
 
 // InitAgentRuntime 按配置装配 Agent 运行时（幂等；未配置/未启用时返回 nil 且不报错）。
@@ -127,7 +130,33 @@ func InitAgentRuntime() (*agentruntime.Runtime, error) {
 		toolsPolicy.Autonomy, toolsPolicy.AllowWrite, toolsPolicy.AllowDestructive,
 		toolsPolicy.MaxCallsPerSession, toolsPolicy.MaxCallsPerMinute, toolsPolicy.MaxConcurrentCalls,
 		toolsPolicy.MaxWriteActionsPerSession, toolsPolicy.MaxAffectedHostsPerSession, toolsPolicy.AutoApprove))
+	// 阶段 4-A：经验库（沉淀 + 召回）接线。
+	//
+	// 为什么在同一处接线：沉淀要读会话与审计（运行时产生），召回要写进 RunContext（运行时消费），
+	// 而两者都要访问 MySQL——只有装配层同时具备"运行时实例"与"数据库"。
+	// 经验库接线失败**不影响** Agent 主能力：诊断照常，只是不带历史经验。
+	memoryService := NewMemoryService(NewGormMemoryStore())
+	SetMemoryService(memoryService)
+	rt.SetMemoryRecorder(memoryService)
+	rt.SetMemoryRecaller(memoryService, 0)
+	logger.GetLogger().Info(fmt.Sprintf(
+		"[agent] 经验库已接线：沉淀=%v 召回=%v（召回只是线索，注入提示词时会显式标注「不是证据」）",
+		rt.MemoryEnabled(), rt.RecallEnabled()))
 	return rt, nil
+}
+
+// SetMemoryService 注入经验库控制面（启动流程与测试用）。
+func SetMemoryService(s *MemoryService) {
+	memoryMu.Lock()
+	defer memoryMu.Unlock()
+	memoryService = s
+}
+
+// DefaultMemoryService 返回经验库控制面（可能为 nil，调用方必须处理）。
+func DefaultMemoryService() *MemoryService {
+	memoryMu.RLock()
+	defer memoryMu.RUnlock()
+	return memoryService
 }
 
 // SetAgentRuntime 注入运行时（供测试与启动流程使用）。

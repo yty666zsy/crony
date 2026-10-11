@@ -181,6 +181,10 @@ var (
 // 凭据形态（保守但线性）：
 //   - `Bearer <token>`：token 至少 8 个 [A-Za-z0-9._-]
 //   - `sk-<token>`：**要求词边界**，否则 "task-list"、"disk-space" 这类正常英文会被误伤
+//   - 显式键值对：`password=...`、`client_secret: "..."`（**必须有 `=` 或 `:` 分隔符**）
+//   - 长选项空格形式：`--password <口令>`
+//   - 连接串里的用户口令：`scheme://user:pass@host`
+//   - mysql 命令行简写 `-p<口令>`：**只在口令含数字或大写字母时**才抹（见下）
 //
 // 阈值（8 个字符）是刻意的：宁可漏掉一个超短假 key，也不要把
 // "task-runner failed" 这类诊断文本涂成 "task-*** failed"，
@@ -188,6 +192,43 @@ var (
 var (
 	bearerPattern = regexp.MustCompile(`(?i)(Bearer\s+)[A-Za-z0-9._\-]{8,}`)
 	apiKeyPattern = regexp.MustCompile(`\b(sk-)[A-Za-z0-9_\-]{8,}`)
+	// 显式键值对：键名必须完整出现，分隔符必须是 `=` 或 `:`。
+	//
+	// 为什么**不用**"键名 + 空格"这种更宽的形式（曾经试过，被自己的测试否掉了）：
+	// `token expired`、`secret rotation completed`、`password policy updated`
+	// 都是极常见的运维文本，宽松匹配会把它们涂成 `token ***`——
+	// 证据里最关键的"到底发生了什么"就此消失。要求显式分隔符后，
+	// 误伤面几乎归零，代价是 `--password xxx` 这种空格形式要靠下面的长选项分支兜。
+	//
+	// 前缀用 `(^|[^A-Za-z0-9])` 而不是 `\b`：`AWS_SECRET_ACCESS_KEY=` 这类
+	// 全大写+下划线的键名里，`_` 与字母之间**没有**词边界，`\b` 会漏掉它。
+	keyEqPattern = regexp.MustCompile(`(?i)(^|[^A-Za-z0-9])(password|passwd|pwd|token|secret|api[_-]?key|access[_-]?key|client[_-]?secret|credential)(\s*[:=]\s*)(["']?)([^\s"']{3,})(["']?)`)
+	// 长选项 + 空格：`--password xxx`。要求 `--` 前缀，避免把普通英文里的
+	// "password policy" 擦掉（对照上面 keyEq 的取舍）。
+	longFlagPattern = regexp.MustCompile(`(?i)(--(?:password|passwd|pwd|token|secret|api[_-]?key|access[_-]?key|client[_-]?secret|credential)\s+)(["']?)([^\s"']{3,})(["']?)`)
+	// `Authorization: token <值>` / `Authorization: Basic <base64>`。
+	//
+	// 为什么要单列：HTTP 头里的键是 `Authorization`，真正的口令在 scheme 词
+	// （Bearer/token/Basic…）之后，keyEq 的"键 + 分隔符"形式覆盖不到。
+	// 凭据被整段回显到错误信息里是常见事故，单独一条高精度规则比放宽 keyEq 安全得多。
+	//
+	// 为什么用 ReplaceAllStringFunc 而不是普通替换：要么保留 scheme 词（人一眼能看出
+	// 这是哪种认证），要么没有 scheme 词直接抹值——两种情形的替换模板不同，
+	// 而把 scheme 词并进"值"里就会把它当口令抹掉（这会毁掉"这是 Bearer 还是 Basic"这条线索）。
+	authHeaderPattern = regexp.MustCompile(`(?i)(authorization\s*:\s*)(?:(bearer|basic|token|digest|apikey)\s+([^\s"']{3,})|([^\s"']{6,}))`)
+	// 连接串口令：`mysql://user:pass@host` / `redis://:pass@host`。
+	// 要求 @ 之前是"冒号 + 至少 3 个非空白字符"，避免把 `http://host:8080/path` 的端口误当口令。
+	dsnPattern = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.\-]*://[^\s:@/]*:)([^\s@/]{3,})(@)`)
+	// mysql 简写 `-p<口令>`：**刻意收紧**为"口令必须含数字或大写字母且长度 ≥6"。
+	//
+	// 诚实边界：`-pmysecret`（纯小写、无数字）**不会**被抹。原因是它与
+	// `-path=/etc`、`-print` 这类正常参数在文本上无法区分，放宽就会把运维命令涂花。
+	// 所以约定是：命令行里请写 `--password=...`（那种形式一定会被抹）。
+	//
+	// Go 的 regexp 是 RE2，**不支持环视**（`(?=` 会 panic），所以这里用两个分支
+	// 表达"口令里必须有数字或大写字母、且总长 ≥6"：
+	// 要么数字/大写之前已有 ≥5 个字符，要么之后还有 ≥5 个字符。
+	mysqlShortPattern = regexp.MustCompile(`(^|\s)(-p)([^\s\-]{5,}[0-9A-Z][^\s\-]*|[^\s\-]*[0-9A-Z][^\s\-]{5,})(\s|$)`)
 )
 
 // Redact 把可能出现的凭据从文本里抹掉（用于错误信息与日志）。
@@ -203,8 +244,27 @@ func Redact(s string) string {
 	if s == "" {
 		return s
 	}
+	s = authHeaderPattern.ReplaceAllStringFunc(s, func(m string) string {
+		sub := authHeaderPattern.FindStringSubmatch(m)
+		if len(sub) < 5 {
+			return m
+		}
+		if strings.TrimSpace(sub[2]) != "" {
+			// 保留 scheme 词：`Authorization: Bearer ***`
+			return sub[1] + sub[2] + " ***"
+		}
+		return sub[1] + "***"
+	})
 	s = bearerPattern.ReplaceAllString(s, "${1}***")
-	return apiKeyPattern.ReplaceAllString(s, "${1}***")
+	s = apiKeyPattern.ReplaceAllString(s, "${1}***")
+	// 顺序有讲究：先抹连接串里的口令（`user:pass@`），再抹键值对。
+	// 反过来的话，`--password=xxx` 先变成 `--password=***`，连接串分支就看不到原文了
+	// ——结果一样，但连接串形如 `mysql://u:p@h`（没有键名）只能靠前者兜住。
+	s = dsnPattern.ReplaceAllString(s, "${1}***${3}")
+	s = keyEqPattern.ReplaceAllString(s, "${1}${2}${3}${4}***${6}")
+	s = longFlagPattern.ReplaceAllString(s, "${1}${2}***${4}")
+	s = mysqlShortPattern.ReplaceAllString(s, "${1}${2}***${4}")
+	return s
 }
 
 // Truncate 截断长文本（提示词/响应可能很大，落库前统一收口）。

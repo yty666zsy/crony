@@ -189,6 +189,17 @@ const routes = [
       icon: 'CircleCheck',
     },
   },
+  {
+    path: '/memory',
+    name: 'memory',
+    component: () => import('@/views/MemoryView.vue'),
+    meta: {
+      title: 'Memory',
+      subtitle: 'Agent 经验库 · 症状/动作/结果沉淀，只作线索不作证据；坏经验只能停用',
+      group: 'AI Agent',
+      icon: 'Collection',
+    },
+  },
 
   /* ----------------------------- System ------------------------- */
   {

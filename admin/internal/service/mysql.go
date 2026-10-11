@@ -50,6 +50,10 @@ func RegisterTables(db *gorm.DB) error {
 		// "一个审批单至多执行一次"依赖状态机的原子迁移而不是应用层判断。
 		models.AgentToolAudit{},
 		models.ApprovalRequest{},
+		// 阶段 4-A（Agent 记忆/经验库）：症状→动作→结果 的沉淀行。
+		// dedupe_key 上有唯一索引：同一"症状+动作+目标"只留一行并累加计数，
+		// 否则经验库会退化成"每次诊断多一条重复行"，召回时全是同一件事的碎片。
+		models.AgentMemory{},
 	)
 	if err != nil {
 		return errors.Wrap(err, "register table failed")

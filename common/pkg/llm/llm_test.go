@@ -654,6 +654,57 @@ func TestRedactDoesNotHangOrOverRedact(t *testing.T) {
 	}
 }
 
+// TestRedactCoversOpsCommandCredentials 运维命令行里的口令必须被抹掉。
+//
+// 为什么这条测试的动机很具体（阶段 4-A）：任务命令与 stderr 现在会走三条路——
+//  1. 落 job_run / agent_step；
+//  2. 被经验库蒸馏成 result_detail（长期留存）；
+//  3. 作为"历史经验"注入**下一次**诊断的提示词。
+//
+// 只认 `Bearer`/`sk-` 两种形态时，`mysql -ubackup --password=xxx` 会原封不动地
+// 走完这三条路。红不是目的——这里同时钉住**不能误伤**的那一侧：
+// `-path=/etc`、`port=8080`、`http://host:8080/api` 这些正常内容必须原样保留。
+func TestRedactCoversOpsCommandCredentials(t *testing.T) {
+	mustRedact := []struct{ in, secret string }{
+		{`mysql -ubackup --password=Sup3rSecret -e "show databases"`, "Sup3rSecret"},
+		{`mysql -ubackup --password Sup3rSecret -e "show databases"`, "Sup3rSecret"},
+		{"curl -H 'Authorization: token abcdef123456' https://api/x", "abcdef123456"},
+		{`export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI0K7MDENG`, "wJalrXUtnFEMI0K7MDENG"},
+		{`mysql -h 10.0.0.9 -u backup --password P@ssw0rd123`, "P@ssw0rd123"},
+		{`mysqldump mysql://backup:Sup3rSecret@10.0.0.9:3306/db`, "Sup3rSecret"},
+		{`mysql -ubackup -pSup3rSecret -e "select 1"`, "Sup3rSecret"},
+		{`client_secret: "Abcd1234Efgh"`, "Abcd1234Efgh"},
+	}
+	for _, c := range mustRedact {
+		got := Redact(c.in)
+		if strings.Contains(got, c.secret) {
+			t.Fatalf("口令未抹除: %q -> %q", c.in, got)
+		}
+	}
+	// 不能误伤：这些看着像"键值对"，但键名不是凭据，或值不是口令。
+	mustKeep := []string{
+		`df -h /data --path=/etc/nginx`,
+		`curl http://127.0.0.1:8080/api/health`,
+		`timeout=30 retries=3 port=8080`,
+		`disk-space low on /var`,
+		`-print -path=/tmp`,
+		// 这三条是"宽松匹配会毁掉证据"的活样本：键名后面跟的是普通英文，不是口令。
+		`token expired, please re-login`,
+		`secret rotation completed`,
+		`password policy updated at 03:00`,
+	}
+	for _, in := range mustKeep {
+		if got := Redact(in); got != in {
+			t.Fatalf("正常运维文本被误伤: %q -> %q", in, got)
+		}
+	}
+	// 诚实边界（不是缺陷，是被记录下来的取舍）：纯小写无数字的 mysql 简写认不出来，
+	// 因为它与 `-path`/`-print` 之类正常参数在文本上无法区分。
+	if got := Redact(`mysql -ubackup -pmysecret -e "select 1"`); got != `mysql -ubackup -pmysecret -e "select 1"` {
+		t.Fatalf("该形式按设计不抹（若将来放宽，请同步更新这条断言与注释）: %q", got)
+	}
+}
+
 func TestUsageHelpers(t *testing.T) {
 	u := Usage{PromptTokens: 1, CompletionTokens: 2}.Normalize()
 	if u.TotalTokens != 3 {
