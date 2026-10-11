@@ -493,6 +493,27 @@ action → `api/auth.js` → `api/client.js` 的 axios 拦截器（真的往 loc
 > `unverified_refs=2` 不是控制台的缺陷，而是**后端如实上报了模型的编造行为**；
 > 前端诊断面板会把它渲染成告警块（浏览器内是否渲染正确仍未验证）。
 
+**第三次复跑（"进程级预算"缺陷修复之后，2026-10-11 23:03；同一脚本、同一后端）**
+
+修复的是后端 `common/pkg/llm` 的预算记账归属（详见根目录
+`AI-AGENT-改造方案.md` 3.4e）：此前预算挂在进程级 Gateway 上，
+`max-duration-seconds=300` 实际表示"admin 运行超过 5 分钟后 Agent 永久不可用"。
+本次复跑刻意在 **admin 已运行 ~440 秒**时执行，结果 **17/17 通过**：
+
+| 复跑项 | 实测值 |
+| --- | --- |
+| 整体 | **17/17 通过，失败 0** |
+| `POST /agent/tool/list` | 6 个工具不变；`max_calls_per_session=12` |
+| `POST /agent/session/search` | `total=26`（诊断/巡检/草案累积） |
+| `POST /agent/session/find` | `#r84`、`steps=6`、`evidence=9`、`warnings=0` |
+| `POST /agent/diagnosis/find(A)` | `#r84`、`qwen-plus`、置信度 95、证据 3、未验证引用 0 |
+| `POST /agent/diagnosis/find(B)` | 置信度 95、证据 2、未验证引用 0 |
+| `POST /agent/nljob/draft` | ✅ 通过——**这一条是关键**：它要真的调模型，旧实现此刻必然失败 |
+| `POST /agent/nljob/confirm` | `job_id=15`、`spec=0 0 3 * * *`、`status=0`、`requires_assign=true` |
+
+> 结论口径：这份 17/17 只能证明"控制台 API 层 ↔ 真实后端"这条链路在长运行进程下依然可用；
+> **不能**证明浏览器里的渲染/交互正确（仍未点验）。
+
 **仍未验证（如实保留）**
 
 1. **视觉与交互没有人工点验**：本机没有可用浏览器/无头内核，`verify:live` 走的是
