@@ -58,9 +58,14 @@ type Job struct {
 	NotifyToArray []int  `json:"notify_to" gorm:"-"`
 	Spec          string `json:"spec" gorm:"size:64;column:spec;not null"`
 	RunOn         string `json:"run_on" gorm:"size:128;column:run_on;index:idx_job_run_on;"`
-	Note          string `json:"note" gorm:"size:512;column:note;default:''"`
-	Created       int64  `json:"created" gorm:"column:created;not null"`
-	Updated       int64  `json:"updated" gorm:"column:updated;default:0"`
+	// ConcurrencyPolicy 同一任务的并发策略（阶段 1 引入）：
+	// 0=skip（默认，与旧行为最接近：上一次没跑完就跳过本次）
+	// 1=buffer_one / 2=buffer_all / 3=cancel_other / 4=terminate_other
+	// 取值见 common/pkg/runpolicy。老数据默认为 0，升级后行为可预期。
+	ConcurrencyPolicy int    `json:"concurrency_policy" gorm:"size:1;column:concurrency_policy;not null;default:0"`
+	Note              string `json:"note" gorm:"size:512;column:note;default:''"`
+	Created           int64  `json:"created" gorm:"column:created;not null"`
+	Updated           int64  `json:"updated" gorm:"column:updated;default:0"`
 
 	Hostname string   `json:"host_name" gorm:"-"`
 	Ip       string   `json:"ip" gorm:"-"`

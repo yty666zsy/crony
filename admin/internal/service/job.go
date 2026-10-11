@@ -172,5 +172,10 @@ func RunLogCleaner(cleanPeriod time.Duration, expiration int64) (close chan stru
 
 func cleanupLogs(expirationTime int64) error {
 	sql := fmt.Sprintf("delete from %s where start_time < ?", models.CronyJobLogTableName)
-	return dbclient.GetMysqlDB().Exec(sql, time.Now().Unix()-expirationTime).Error
+	if err := dbclient.GetMysqlDB().Exec(sql, time.Now().Unix()-expirationTime).Error; err != nil {
+		return err
+	}
+	// 阶段 1：新模型（job_run / job_run_step）跟随同一过期策略清理，
+	// 否则新表会无上限增长（旧表有清理、新表没有，是最典型的数据膨胀事故）。
+	return CleanupRuns(expirationTime)
 }

@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-//Preset Script
+// Preset Script
 type Script struct {
 	ID      int    `json:"id" gorm:"column:id;primary_key;auto_increment"`
 	Name    string `json:"name" gorm:"size:256;column:name;not null;index:idx_script_name" binding:"required"`

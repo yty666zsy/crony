@@ -40,6 +40,11 @@ func (r *ReqJobUpdate) Valid() error {
 	if r.Allocation == 0 {
 		r.Allocation = models.AutoAllocation
 	}
+	// 阶段 1：并发策略必须在枚举范围内（节点侧对非法值会静默回退成 skip，
+	// 在入口拦下可以避免"配置了但没生效"的困惑）
+	if err := ValidConcurrencyPolicy(r.ConcurrencyPolicy); err != nil {
+		return err
+	}
 	notifyTo, _ := json.Marshal(r.NotifyToArray)
 	r.NotifyTo = notifyTo
 	scriptID, _ := json.Marshal(r.ScriptIDArray)

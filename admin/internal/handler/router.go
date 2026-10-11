@@ -70,7 +70,18 @@ func configRoute(r *gin.Engine) {
 		job.POST("search", defaultJobRouter.Search)
 		job.POST("log", defaultJobRouter.SearchLog)
 		job.POST("once", defaultJobRouter.Once)
-		//job.POST("kill", defaultJobRouter.Kill)  // 阶段 1 恢复：需先补齐取消传播（进程组/容器）
+		// 阶段 1 恢复：节点侧已实现基于 context + 进程树终止的取消传播
+		job.POST("kill", defaultJobRouter.Kill)
+
+		// 阶段 1（任务模型 2.0）执行记录读取面：
+		// job_run 带幂等键、触发来源、状态机、策略快照与步骤明细
+		run := job.Group("/run")
+		{
+			run.POST("search", defaultJobRunRouter.Search)
+			run.GET("find", defaultJobRunRouter.Find)
+			run.POST("steps", defaultJobRunRouter.Steps)
+			run.GET("overview", defaultJobRunRouter.Overview)
+		}
 	}
 
 	user := r.Group("/user")

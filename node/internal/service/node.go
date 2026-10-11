@@ -159,7 +159,8 @@ func (srv *NodeServer) Run() (err error) {
 	//start cron
 	srv.Cron.Start()
 	go srv.watchJobs()
-	//go srv.watchKilledProc()
+	// 阶段 1 恢复：/job/kill 现在通过 context 取消 + 进程树终止实现（见 watcher.go）
+	go srv.watchKilledProc()
 	go srv.watchOnce()
 	go srv.watchSystemInfo()
 	return

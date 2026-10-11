@@ -28,6 +28,10 @@ func RegisterTables(db *gorm.DB) error {
 		models.Job{},
 		models.JobLog{},
 		models.Script{},
+		// 阶段 1（任务模型 2.0）：一次执行 + 执行步骤。
+		// job_run.run_id 上有唯一索引，是幂等"至多执行一次"的最后一道闸门。
+		models.JobRun{},
+		models.JobRunStep{},
 	)
 	if err != nil {
 		return errors.Wrap(err, "register table failed")
