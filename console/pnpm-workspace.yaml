@@ -1,0 +1,38 @@
+# pnpm 11 配置（pnpm 10+ 不再读取 package.json 的 "pnpm" 字段，设置统一放在这里）。
+#
+# 两个依赖的构建脚本被**显式声明为不执行**，原因有两条：
+#
+# 1. 功能上不需要（已逐项核对）：
+#    - vue-demi：postinstall 只负责把入口切到 Vue 3；本工程装到的
+#      node_modules/.pnpm/vue-demi@0.14.10_vue@3.5.43/.../lib/index.mjs 已经是
+#      Vue 3 版本（isVue3 = true / export * from 'vue'），无需再切。
+#    - esbuild：postinstall 只做平台二进制校验；实际二进制由可选依赖
+#      @esbuild/win32-x64（0.25.0）提供，运行时直接解析该包，无需 postinstall。
+#
+# 2. 在本机 DSH 沙箱（workspace-write）里这两个脚本必然失败：
+#    pnpm 用 child_process.spawn 且 stdio 为 pipe 去跑生命周期脚本，
+#    沙箱禁止打开命名管道，报 `Error: spawn EPERM`（errno -4048）。
+#    显式写 false 后 pnpm 认为"有意跳过"，install 正常以 exit 0 结束；
+#    若删除本文件，pnpm 会重新生成占位值并以 ERR_PNPM_IGNORED_BUILDS 结束（exit 1）。
+#
+# 本文件不含 packages 字段，因此 console 是单一独立项目，不是 monorepo。
+allowBuilds:
+  esbuild: false
+  vue-demi: false
+
+# 使用 hoisted（npm 式扁平）node_modules 布局。
+#
+# 原因（已实测）：本机环境下 fs.realpathSync 不会解开 pnpm 创建的 junction，
+# 于是 Node 解析 vite 内部的传递依赖（如 picomatch）时，会从
+# node_modules/vite/dist/node/ 逐级向上找到项目根的 node_modules，
+# 那里只有直接依赖，于是报：
+#   ERR_MODULE_NOT_FOUND: Cannot find package 'picomatch'
+#   imported from .../node_modules/vite/dist/node/cli.js
+# hoisted 布局下所有包都是真实目录，不依赖 realpath，解析正常。
+#
+# 注意：pnpm 11 的该设置写在 .npmrc 里不会生效（实测 node-linker=hoisted 被忽略），
+# 必须放在本文件的 nodeLinker 字段。
+#
+# 代价：node_modules 失去严格隔离（可能"意外"引用了未声明的依赖）。
+# 这是让构建在受限环境下可复现的取舍，已在 README「未验证项/风险」中记录。
+nodeLinker: hoisted
