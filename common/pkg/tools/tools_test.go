@@ -525,13 +525,15 @@ func TestNodeStatusTool(t *testing.T) {
 	src := &fakeNodeSource{status: NodeStatus{
 		NodeUUID: "n1", Hostname: "node-1", Online: true, LastHeartbeat: time.Now().Add(-30 * time.Second),
 		RunningJobs: 2, CPUPercent: 12.5, MemPercent: 63.2, DiskPercent: 95.4, LoadAvg: "1.20", Version: "1.0.0",
+		// CollectedAt 非零 = 水位已上报；零值时必须输出"未上报"（见 TestNodeStatusToolWithoutMetrics）
+		CollectedAt: time.Now().Add(-10 * time.Second),
 	}}
 	tool := NewNodeStatusTool(src)
 	res, err := tool.Execute(context.Background(), map[string]interface{}{})
 	if err != nil {
 		t.Fatalf("期望成功: %v", err)
 	}
-	if !strings.Contains(res.Output, "online=在线") || !strings.Contains(res.Output, "disk_percent=95.4") {
+	if !strings.Contains(res.Output, "online=在线") || !strings.Contains(res.Output, "disk=95.4%") {
 		t.Fatalf("输出不符: %s", res.Output)
 	}
 	if !strings.Contains(res.Summary, "95.4%") || !strings.Contains(res.Summary, "运行中任务 2") {
@@ -542,6 +544,34 @@ func TestNodeStatusTool(t *testing.T) {
 	}
 	if _, err := NewNodeStatusTool(nil).Execute(context.Background(), map[string]interface{}{}); err == nil {
 		t.Fatal("未接入数据源应报错")
+	}
+}
+
+// TestNodeStatusToolWithoutMetrics 水位未上报时**不得**渲染成 0%。
+//
+// 这是本项目的核心纪律：0% 会被模型读成"节点资源空闲"，是凭空的证据捏造；
+// 必须显式说"未上报"，模型才知道这条事实不存在。
+func TestNodeStatusToolWithoutMetrics(t *testing.T) {
+	src := &fakeNodeSource{status: NodeStatus{
+		NodeUUID: "n2", Hostname: "node-2", Online: true, RunningJobs: 0, Version: "1.0.0",
+	}}
+	res, err := NewNodeStatusTool(src).Execute(context.Background(), map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("期望成功: %v", err)
+	}
+	if !strings.Contains(res.Output, "未上报") {
+		t.Fatalf("水位未上报时必须显式说明，实际输出: %s", res.Output)
+	}
+	for _, bad := range []string{"cpu=0.0%", "mem=0.0%", "disk=0.0%"} {
+		if strings.Contains(res.Output, bad) {
+			t.Fatalf("未上报不得渲染成 0（发现 %q）: %s", bad, res.Output)
+		}
+	}
+	if !strings.Contains(res.Summary, "未上报") {
+		t.Fatalf("摘要也必须说明未上报: %s", res.Summary)
+	}
+	if reported, ok := res.Meta["metrics_reported"].(bool); !ok || reported {
+		t.Fatalf("meta.metrics_reported 应为 false，实际 %+v", res.Meta)
 	}
 }
 

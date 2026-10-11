@@ -19,5 +19,8 @@ func RegisterTables(db *gorm.DB) {
 		// 否则"节点侧跑了什么"在控制台上看不到。
 		models.AgentSession{},
 		models.AgentStep{},
+		// 阶段 3（观测闭环）：node 自己上报的资源水位。
+		// 节点侧必须注册：节点往往是先启动的一方，且这张表由**节点**写入。
+		models.NodeMetric{},
 	)
 }

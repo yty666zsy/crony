@@ -346,6 +346,13 @@ type NodeStatus struct {
 	DiskPercent   float64   `json:"disk_percent"`
 	LoadAvg       string    `json:"load_avg"`
 	Version       string    `json:"version"`
+	// CollectedAt 是资源水位的**采集时间**；零值表示该节点尚未上报采集数据。
+	//
+	// 为什么必须有这个字段：CPUPercent/MemPercent/DiskPercent 是 float64，
+	// 没有"未知"取值。若把"未上报"当 0 渲染，模型会读到 `cpu_percent=0.0`
+	// 并据此得出"节点资源空闲"——这是**编造事实**，正是本项目 grounding 要防的事。
+	// 所以未上报时工具必须显式输出"未上报"，而不是 0。
+	CollectedAt time.Time `json:"collected_at"`
 }
 
 // NodeStatusSource 节点状态数据源。
@@ -394,27 +401,33 @@ func (t *NodeStatusTool) Execute(ctx context.Context, args map[string]interface{
 	if st.Online {
 		online = "在线"
 	}
+	// 水位要么给出真实数值，要么明确写"未上报"——绝不用 0 冒充。
+	metrics := "资源水位=未上报（该节点还没有采集数据，**不得**把它当作 0%/空闲）"
+	metricsShort := "未上报"
+	if !st.CollectedAt.IsZero() {
+		metrics = fmt.Sprintf("资源水位：cpu=%.1f%% mem=%.1f%% disk=%.1f%% load=%s（采集于 %s）",
+			st.CPUPercent, st.MemPercent, st.DiskPercent, firstNonEmpty(st.LoadAvg, "—"), formatTime(st.CollectedAt))
+		metricsShort = fmt.Sprintf("cpu=%.1f%% mem=%.1f%% disk=%.1f%%", st.CPUPercent, st.MemPercent, st.DiskPercent)
+	}
 	output := strings.Join([]string{
 		fmt.Sprintf("node_uuid=%s", st.NodeUUID),
 		fmt.Sprintf("hostname=%s", st.Hostname),
 		fmt.Sprintf("online=%s", online),
 		fmt.Sprintf("last_heartbeat=%s", formatTime(st.LastHeartbeat)),
 		fmt.Sprintf("running_jobs=%d", st.RunningJobs),
-		fmt.Sprintf("cpu_percent=%.1f", st.CPUPercent),
-		fmt.Sprintf("mem_percent=%.1f", st.MemPercent),
-		fmt.Sprintf("disk_percent=%.1f", st.DiskPercent),
-		fmt.Sprintf("load_avg=%s", st.LoadAvg),
+		metrics,
 		fmt.Sprintf("version=%s", st.Version),
 	}, "\n")
 	res := Result{
 		OK:      true,
 		Output:  output,
-		Summary: fmt.Sprintf("节点 %s %s，运行中任务 %d，磁盘 %.1f%%", firstNonEmpty(st.Hostname, st.NodeUUID), online, st.RunningJobs, st.DiskPercent),
-		Meta:    map[string]interface{}{"online": st.Online, "running_jobs": st.RunningJobs},
+		Summary: fmt.Sprintf("节点 %s %s，运行中任务 %d，%s", firstNonEmpty(st.Hostname, st.NodeUUID), online, st.RunningJobs, metricsShort),
+		Meta:    map[string]interface{}{"online": st.Online, "running_jobs": st.RunningJobs, "metrics_reported": !st.CollectedAt.IsZero()},
 		Evidence: []Evidence{{
 			Source: "node",
 			Ref:    firstNonEmpty(st.NodeUUID, node, "local"),
-			Quote:  fmt.Sprintf("online=%s last_heartbeat=%s running_jobs=%d disk=%.1f%%", online, formatTime(st.LastHeartbeat), st.RunningJobs, st.DiskPercent),
+			Quote: fmt.Sprintf("online=%s last_heartbeat=%s running_jobs=%d metrics=%s",
+				online, formatTime(st.LastHeartbeat), st.RunningJobs, metricsShort),
 		}},
 	}
 	return res, nil

@@ -37,6 +37,9 @@ func RegisterTables(db *gorm.DB) error {
 		// 轨迹步骤按 (session_id, seq) 建联合索引，控制台按会话回放轨迹。
 		models.AgentSession{},
 		models.AgentStep{},
+		// 阶段 3（观测闭环）：节点自报资源水位，供 admin 侧 node_status 工具读取。
+		// node_uuid 上有唯一索引：一个节点一行"最新值"，节点重启重报不会累积垃圾行。
+		models.NodeMetric{},
 	)
 	if err != nil {
 		return errors.Wrap(err, "register table failed")

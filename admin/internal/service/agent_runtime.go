@@ -51,6 +51,10 @@ func InitAgentRuntime() (*agentruntime.Runtime, error) {
 		Sources: tools.Sources{
 			Logs: &agentruntime.DBLogSource{},
 			SQL:  &agentruntime.ReadonlySQLSource{},
+			// 阶段 3 第一段：admin→node 证据通道。
+			// 节点存活/心跳/主机名/在跑任务数读共享库即有；CPU/内存/磁盘/load 由
+			// node 侧写入 node_metric 后才有（未上报时工具显式输出"未上报"，不编造 0%）。
+			NodeStatus: &NodeStatusSource{},
 		},
 	})
 	if err != nil {
@@ -58,7 +62,7 @@ func InitAgentRuntime() (*agentruntime.Runtime, error) {
 	}
 	SetAgentRuntime(rt)
 	logger.GetLogger().Info(fmt.Sprintf(
-		"[agent] Agent 运行时已就绪：provider=%s offline=%v model=%s 工具=%s（诊断证据来源：数据库；节点本机日志仅节点侧可用）",
+		"[agent] Agent 运行时已就绪：provider=%s offline=%v model=%s 工具=%s（诊断证据来源：数据库 + 节点水位；节点本机文件日志仍不可读）",
 		rt.ProviderName(), rt.Offline(), rt.Model(), strings.Join(rt.ToolNames(), ",")))
 	return rt, nil
 }
