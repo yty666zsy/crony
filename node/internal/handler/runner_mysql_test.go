@@ -4,6 +4,7 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"runtime"
 	"strings"
@@ -53,6 +54,27 @@ func cleanupNodeRun(t *testing.T, runIDs ...string) {
 		if err := db.Exec("delete from "+models.CronyJobRunTableName+" where run_id = ?", runID).Error; err != nil {
 			t.Logf("清理执行记录失败: %v", err)
 		}
+	}
+}
+
+// cleanupNodeRunJob 清理某个**测试专用 job_id** 下的全部执行记录。
+//
+// 为什么需要它：并发用例里只有 1 个 worker 真正执行（run_id = RunIDForSlot），
+// 其余 worker 走"同槽位已被占用"分支，会写一条 run_id 形如
+// `j<jobID>-m<纳秒>-skip` 的记录——它的 run_id **不是** RunIDForSlot 推导出来的，
+// 所以 cleanupNodeRun(runID) 永远删不到它。实测每跑一轮留 7 行，
+// 35 行残留在库里（job_id=910004 在 job 表中并不存在，纯测试脏数据）。
+//
+// 只按测试专用 job_id 清理，不碰其他任何数据。
+func cleanupNodeRunJob(t *testing.T, jobID int) {
+	t.Helper()
+	prefix := fmt.Sprintf("j%d-%%", jobID)
+	db := dbclient.GetMysqlDB()
+	if err := db.Exec("delete from "+models.CronyJobRunStepTableName+" where run_id like ?", prefix).Error; err != nil {
+		t.Logf("清理步骤失败: %v", err)
+	}
+	if err := db.Exec("delete from "+models.CronyJobRunTableName+" where run_id like ?", prefix).Error; err != nil {
+		t.Logf("清理执行记录失败: %v", err)
 	}
 }
 
@@ -295,6 +317,9 @@ func TestMySQLRunCoordinatorConcurrentSameSlotOnRealDB(t *testing.T) {
 	runID := models.RunIDForSlot(job.ID, slot)
 	cleanupNodeRun(t, runID)
 	defer cleanupNodeRun(t, runID)
+	// 被跳过的 worker 写的是 `…-skip` 记录（run_id 与 slot 无关），必须按 job_id 清
+	cleanupNodeRunJob(t, job.ID)
+	defer cleanupNodeRunJob(t, job.ID)
 
 	type result struct {
 		executed bool

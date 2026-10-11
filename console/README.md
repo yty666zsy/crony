@@ -291,7 +291,7 @@ Mock 的行为约束（与真实后端一致，便于无感切换）：
 | §2 | 8 份完整轨迹 | model / tool / notice 三类步骤都有；tool 步骤带 `tool_args` + `observation`；边界样本含 `tool_budget` 与 schema 修复的 notice |
 | §3.1 | 3 份诊断样本 | ①证据充分（confidence 72，3 条证据）②证据不足（`evidence_sufficient=false`，列出还要采集什么）③**引用了未观测到的证据定位**（`unverified_refs=['syslog:999']` + 醒目警告） |
 | §3.2 | 即时诊断 | 未诊断过的 run 返回"证据不足"模板（confidence 35，标注 Mock），不复用已有诊断；`force=false` 幂等、`force=true` 新增会话 |
-| §4 | 5 个真实只读工具 | 名称/说明照抄 `common/pkg/tools/builtin.go`：`shell_readonly` / `http_get` / `node_status` / `log_search` / `mysql_query_readonly` |
+| §4 | 6 个真实只读工具 | 名称/说明照抄 `common/pkg/tools/builtin.go`：`shell_readonly` / `http_get` / `node_status` / `node_probe` / `log_search` / `mysql_query_readonly`（`node_probe` 为阶段 3 第二段新增，提交 `0fcc81a`） |
 | §5.1 | 3 份草案 | cmd（每天 2 点清理）、http（健康检查探活）、**5 段表达式**（`0 2 * * *`，带"不是每天 2 点"的醒目警告） |
 | §5.2 | 确认创建 | 真的往 `jobs` 里插入一条 `status:0`（未分配节点）的任务，任务列表页立即可见；非法 spec / 越界 timeout / `confirmed=false` 一律 1009 |
 
@@ -410,6 +410,16 @@ Mock 里**可达**的业务错误分支（不是装饰）：`1008`（未知 sess
 >
 > 阶段 3 改动（`node_status` 工具 + `unverified_node_claims` 契约字段 + 诊断面板告警块）
 > 之后复跑：**17/17 通过**（同一后端，用例数随断言增加；`pnpm build` 亦通过）。
+> 阶段 3 第二段（`node_probe` 节点侧只读探测通道，提交 `0fcc81a`）之后**再次复跑：17/17 通过**，
+> 且 `tool/list` 实测已是 **6 个工具**（含 `node_probe`）；`node_probe` 的真联调证据
+> 见 `PHASE2-接口契约.md` §4.1（通道可用 → 结论引用真 `netstat`/`tasklist` 输出）。
+>
+> ⚠️ **复跑前务必确认 `CRONY_LIVE_RUN_A`/`CRONY_LIVE_RUN_B` 是库里真实存在的 run_id**：
+> 本次复跑第一次写成 `j910005-m1791721595539400-1`（库里没有这条），
+> 结果 `diagnosis/find(B)` 与 `diagnosis/run(B)` 两项失败、报告 15/17——
+> **看起来像回归，其实是用例参数写错**。正确写法只能在库里核对：
+> `select run_id from job_run where job_id=<job>`。
+>
 > 注意 `verify:live` 是**控制台代码路径 + 真实 API**的联调，**不是浏览器 E2E**：
 > 诊断面板新增的告警块是否在浏览器里渲染正确，仍未验证（需要真实浏览器）。
 
@@ -454,6 +464,24 @@ action → `api/auth.js` → `api/client.js` 的 axios 拦截器（真的往 loc
 「秒 分 时 日 月」，6 段才是"每天 03:00:00"。该告警逻辑与后端 `nljob.go` 的
 `len(strings.Fields(spec)) == 5` 判断一致。
 
+**第二次复跑（阶段 3 第二段之后，2026-10-11；同一脚本、同一后端、真模型）**
+
+上表是阶段 2 的原始记录（当时 4 个工具、`total=7`）。引入 `node_probe` 与两个结论
+字段后的实测值如下（**17/17 通过**）：
+
+| 复跑项 | 实测值 |
+| --- | --- |
+| `POST /agent/tool/list` | **6 个工具**：`http_get, log_search, mysql_query_readonly, node_probe, node_status, shell_readonly`；配额 `max_calls_per_session=12` |
+| `POST /agent/session/search` | `total=19`，首条 `kind=nljob` |
+| `POST /agent/diagnosis/find(A)` | `provider=openai`、`model=qwen-plus`、置信度 95、证据 3、**未验证引用=2**（r55 那次模型编造了 2 条 `shell_readonly` 引用） |
+| `POST /agent/diagnosis/find(B)` | `found=true`、证据 2、**未验证引用=0**（负向对照：该次没有伪造引用） |
+| `POST /agent/diagnosis/run(force=false)` ×2 | `replayed=true`、`persist_error` 为空 |
+| SSE 长连接 | 存活 32.0s，心跳 @7.0s/14.5s/22.0s/29.5s |
+| `POST /agent/nljob/draft` / `confirm` | `spec=0 0 3 * * *`；`confirm` 落库 `job_id=12`、`status=0`、`requires_assign=true` |
+
+> `unverified_refs=2` 不是控制台的缺陷，而是**后端如实上报了模型的编造行为**；
+> 前端诊断面板会把它渲染成告警块（浏览器内是否渲染正确仍未验证）。
+
 **仍未验证（如实保留）**
 
 1. **视觉与交互没有人工点验**：本机没有可用浏览器/无头内核，`verify:live` 走的是
@@ -476,9 +504,12 @@ action → `api/auth.js` → `api/client.js` 的 axios 拦截器（真的往 loc
    阶段 2 也没有前端触发工具调用的入口（工具由内核调度）。
 8. **`trigger_echo` / `next_trigger_text` 的边界情形未验证**：真实内核用 `cronnext` 库计算，
    月末、闰年、时区夏令时等边界**未验证**（本次只看到近 5 次正常结果）。
-9. **admin 缺节点侧证据通道**：`tool/list` 实测只有 4 个工具、**没有 `node_status`**，
-   所以 admin 侧诊断拿不到节点本机事实——这也是诊断 A 出现 `evidence_sufficient=false`
-   的根因（结论仍然正确，但模型自己声明证据不足）。属于阶段 3 待补。
+9. ~~**admin 缺节点侧证据通道**~~ **已在阶段 3 补上**：`tool/list` 实测 **6 个工具**，
+   含 `node_status`（节点存活/心跳/水位）与 `node_probe`（在指定节点上跑只读诊断命令）。
+   实测闭合：通道在服务时模型引用真 `netstat`/`tasklist` 输出、`unverified_node_claims=[]`；
+   通道不可用时模型退回编造、守卫如实标记（见 `PHASE2-接口契约.md` §4.1）。
+   **仍缺**的部分：节点水位发布器未实现（`node_metric` 真机上恒为"未上报"）；
+   探测通道要求节点能连到同一个 MySQL，跨网段拓扑未支持。
 10. **`pnpm smoke` 不受本期改动影响的部分**：`scripts/smoke-mock.mjs` 本期**不允许修改**，
     它仍断言旧的 `agentChat` / `agentDispatch`，因此这两个垫片只能保留（见第 5.1 节末尾）。
 11. **无 lint 可跑**：`package.json` 没有 `lint` 脚本、也没有 eslint 依赖，本期未执行任何 lint，
