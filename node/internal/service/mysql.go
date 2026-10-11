@@ -25,5 +25,8 @@ func RegisterTables(db *gorm.DB) {
 		// 阶段 3（观测闭环）：admin→node 的只读探测请求表。
 		// 节点侧必须注册：节点先启动时这张表还不存在，探测通道会整条不可用。
 		models.NodeProbeRequest{},
+		// 阶段 4：工具调用审计表。节点侧也要注册——节点侧 Agent 型任务同样调用工具，
+		// 且节点常常先于 admin 启动（表不存在时审计会整段丢失）。
+		models.AgentToolAudit{},
 	)
 }

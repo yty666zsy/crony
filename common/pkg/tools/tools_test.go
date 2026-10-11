@@ -25,6 +25,7 @@ type stubTool struct {
 	name     string
 	schema   *jsonschema.Schema
 	readOnly bool
+	risk     RiskLevel
 	timeout  time.Duration
 	fn       func(ctx context.Context, args map[string]interface{}) (Result, error)
 	calls    int
@@ -34,13 +35,49 @@ func (s *stubTool) Name() string               { return s.name }
 func (s *stubTool) Description() string        { return "测试工具" }
 func (s *stubTool) Schema() *jsonschema.Schema { return s.schema }
 func (s *stubTool) ReadOnly() bool             { return s.readOnly }
-func (s *stubTool) Timeout() time.Duration     { return s.timeout }
+
+// Risk 未显式声明时按 readOnly 推导，保持既有测试的写法不变。
+func (s *stubTool) Risk() RiskLevel {
+	if s.risk != "" {
+		return s.risk
+	}
+	if s.readOnly {
+		return RiskRead
+	}
+	return RiskWrite
+}
+func (s *stubTool) Timeout() time.Duration { return s.timeout }
 func (s *stubTool) Execute(ctx context.Context, args map[string]interface{}) (Result, error) {
 	s.calls++
 	if s.fn == nil {
 		return Result{OK: true, Summary: "ok"}, nil
 	}
 	return s.fn(ctx, args)
+}
+
+// stubWriteTool 写工具替身：实现 TargetProvider（写工具的注册前置条件）。
+type stubWriteTool struct {
+	*stubTool
+	targets []string
+}
+
+func (s *stubWriteTool) Targets(map[string]interface{}) []string { return s.targets }
+
+// newWriteStub 造一个合法的可逆写工具（目标固定）。
+func newWriteStub(name string, targets ...string) *stubWriteTool {
+	return &stubWriteTool{
+		stubTool: &stubTool{name: name, schema: okSchema(), readOnly: false, risk: RiskWrite, fn: func(context.Context, map[string]interface{}) (Result, error) {
+			return Result{OK: true, Summary: "写动作执行了", Output: "done"}, nil
+		}},
+		targets: targets,
+	}
+}
+
+// writePolicy 开启写工具的测试策略。
+func writePolicy() Policy {
+	p := DefaultPolicy()
+	p.AllowWrite = true
+	return p
 }
 
 func okSchema() *jsonschema.Schema {

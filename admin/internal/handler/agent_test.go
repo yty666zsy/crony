@@ -180,21 +180,38 @@ func TestToolViewsAndPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("注册只读工具失败: %v", err)
 	}
-	views := toolViews(reg.Specs(), reg.Policy())
+	views := toolViews(reg, reg.Policy())
 	if len(views) == 0 {
 		t.Fatal("应至少返回 shell 工具")
 	}
 	for _, v := range views {
-		if !v.Readonly {
-			t.Fatalf("阶段 2 只允许只读工具，%s 被标成可写", v.Name)
+		if !v.Readonly || v.Risk != string(tools.RiskRead) {
+			t.Fatalf("阶段 4 的只读工具集里，%s 的风险声明不符: readonly=%v risk=%s", v.Name, v.Readonly, v.Risk)
 		}
 		if v.TimeoutMS <= 0 {
 			t.Fatalf("%s 应带超时上限", v.Name)
 		}
 	}
-	p := toolPolicyView(tools.DefaultPolicy())
+	// 超时必须来自工具自身（而不是策略默认值）：两者不同才能区分出"取错了来源"
+	if v := views[0]; v.Name == "node_probe" {
+		t.Fatal("不接入探测数据源时不应出现 node_probe")
+	}
+	p := toolPolicyView(reg.Policy())
 	if p.MaxCallsPerSession <= 0 || p.AllowHosts == nil || p.ShellReadPaths == nil {
 		t.Fatalf("策略视图不应给出 null 数组/零预算: %#v", p)
+	}
+	// 阶段 4 契约：默认策略必须**明确表达"写动作关着、且一律需要审批"**
+	if p.AllowWrite || p.AllowDestructive {
+		t.Fatalf("默认策略不得放开写动作: %#v", p)
+	}
+	if p.Autonomy != string(tools.AutonomyL1) {
+		t.Fatalf("默认自治级别应为 L1（写动作一律审批），实际 %q", p.Autonomy)
+	}
+	if p.MaxCallsPerMinute <= 0 || p.MaxConcurrentCalls <= 0 || p.ApprovalTTLSeconds <= 0 {
+		t.Fatalf("阶段 4 新增策略字段必须有非零默认值: %#v", p)
+	}
+	if p.AutoApprove == nil || p.Deny == nil {
+		t.Fatalf("白名单/黑名单必须是空数组而不是 null: %#v", p)
 	}
 }
 

@@ -380,8 +380,12 @@ type agentToolView struct {
 	Name        string      `json:"name"`
 	Description string      `json:"description"`
 	Readonly    bool        `json:"readonly"`
-	TimeoutMS   int64       `json:"timeout_ms"`
-	Schema      interface{} `json:"schema"`
+	// Risk 风险级别（阶段 4）：read/write/destructive。
+	// 与 readonly 不是冗余：`readonly` 只说"有没有副作用"，
+	// `risk` 还说"副作用可不可逆"——重启主机与重跑任务在这两个字段上才分得开。
+	Risk      string      `json:"risk"`
+	TimeoutMS int64       `json:"timeout_ms"`
+	Schema    interface{} `json:"schema"`
 }
 
 type agentToolPolicyView struct {
@@ -391,17 +395,45 @@ type agentToolPolicyView struct {
 	SQLMaxRows         int      `json:"sql_max_rows"`
 	AllowHosts         []string `json:"allow_hosts"`
 	ShellReadPaths     []string `json:"shell_read_paths"`
+	// ---- 阶段 4：风险与自治（控制台据此展示"这台部署到底放开了什么"）----
+	AllowWrite                 bool     `json:"allow_write"`
+	AllowDestructive           bool     `json:"allow_destructive"`
+	Autonomy                   string   `json:"autonomy"`
+	AutoApprove                []string `json:"auto_approve"`
+	ApprovalTTLSeconds         int      `json:"approval_ttl_seconds"`
+	MaxCallsPerMinute          int      `json:"max_calls_per_minute"`
+	MaxConcurrentCalls         int      `json:"max_concurrent_calls"`
+	MaxWriteActionsPerSession  int      `json:"max_write_actions_per_session"`
+	MaxAffectedHostsPerSession int      `json:"max_affected_hosts_per_session"`
+	DefaultTimeoutMS           int64    `json:"default_timeout_ms"`
+	Deny                       []string `json:"deny"`
 }
 
-func toolViews(specs []llm.ToolSpec, policy tools.Policy) []agentToolView {
+// toolViews 从**注册表**构造工具清单。
+//
+// 为什么不再从 []llm.ToolSpec 构造：风险级别与超时都在 Tool 实现上，
+// 旧写法只能硬编码 `Readonly: true` 与 `policy.DefaultTimeout`，
+// 结果是"接口说都是只读、超时都是 15s"，而实际注册的工具可能并非如此——
+// 能力边界的对外声明与实际生效值必须是同一个来源。
+func toolViews(reg *tools.Registry, policy tools.Policy) []agentToolView {
 	policy = policy.Normalize()
+	specs := reg.Specs()
 	out := make([]agentToolView, 0, len(specs))
 	for _, s := range specs {
+		risk := tools.RiskRead
+		timeout := policy.DefaultTimeout
+		if tool, ok := reg.Get(s.Name); ok {
+			risk = tool.Risk()
+			if t := tool.Timeout(); t > 0 {
+				timeout = t
+			}
+		}
 		out = append(out, agentToolView{
 			Name:        s.Name,
 			Description: s.Description,
-			Readonly:    true, // 阶段 2 只注册只读工具（写工具在阶段 3 的沙箱里）
-			TimeoutMS:   policy.DefaultTimeout.Milliseconds(),
+			Readonly:    risk == tools.RiskRead,
+			Risk:        risk.String(),
+			TimeoutMS:   timeout.Milliseconds(),
 			Schema:      s.Parameters,
 		})
 	}
@@ -411,12 +443,23 @@ func toolViews(specs []llm.ToolSpec, policy tools.Policy) []agentToolView {
 func toolPolicyView(policy tools.Policy) agentToolPolicyView {
 	p := policy.Normalize()
 	return agentToolPolicyView{
-		MaxCallsPerSession: p.MaxCallsPerSession,
-		MaxCallsPerTool:    p.MaxCallsPerTool,
-		MaxOutputBytes:     p.MaxOutputBytes,
-		SQLMaxRows:         p.SQLMaxRows,
-		AllowHosts:         orEmptyStrings(p.AllowHosts),
-		ShellReadPaths:     orEmptyStrings(p.ShellReadPaths),
+		MaxCallsPerSession:         p.MaxCallsPerSession,
+		MaxCallsPerTool:            p.MaxCallsPerTool,
+		MaxOutputBytes:             p.MaxOutputBytes,
+		SQLMaxRows:                 p.SQLMaxRows,
+		AllowHosts:                 orEmptyStrings(p.AllowHosts),
+		ShellReadPaths:             orEmptyStrings(p.ShellReadPaths),
+		AllowWrite:                 p.AllowWrite,
+		AllowDestructive:           p.AllowDestructive,
+		Autonomy:                   p.Autonomy.String(),
+		AutoApprove:                orEmptyStrings(p.AutoApprove),
+		ApprovalTTLSeconds:         int(p.ApprovalTTL.Seconds()),
+		MaxCallsPerMinute:          p.MaxCallsPerMinute,
+		MaxConcurrentCalls:         p.MaxConcurrentCalls,
+		MaxWriteActionsPerSession:  p.MaxWriteActionsPerSession,
+		MaxAffectedHostsPerSession: p.MaxAffectedHostsPerSession,
+		DefaultTimeoutMS:           p.DefaultTimeout.Milliseconds(),
+		Deny:                       orEmptyStrings(p.Deny),
 	}
 }
 

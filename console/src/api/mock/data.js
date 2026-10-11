@@ -2265,6 +2265,7 @@ export const agentTools = [
       '（df=磁盘使用率，ps=进程列表，tail=看日志尾部，journalctl=systemd 日志）。' +
       '不接受管道、重定向或其他命令；tail 只能读取 /var/log 下的文件。',
     readonly: true,
+    risk: 'read',
     timeout_ms: 15000,
     schema: {
       type: 'object',
@@ -2280,6 +2281,7 @@ export const agentTools = [
     name: 'http_get',
     description: '发起只读 HTTP GET 请求做健康检查（当前未配置 AllowHosts，**所有请求都会被拒绝**）',
     readonly: true,
+    risk: 'read',
     timeout_ms: 15000,
     schema: {
       type: 'object',
@@ -2292,6 +2294,7 @@ export const agentTools = [
     name: 'node_status',
     description: '查询 crony 节点的在线状态、心跳时间、正在运行的任务数与资源水位（CPU/内存/磁盘）。',
     readonly: true,
+    risk: 'read',
     timeout_ms: 5000,
     schema: {
       type: 'object',
@@ -2303,6 +2306,7 @@ export const agentTools = [
     name: 'log_search',
     description: '按关键字/任务/运行 ID 检索任务日志。至少给出 keyword、job_id、run_id 之一，避免全量拉取。',
     readonly: true,
+    risk: 'read',
     timeout_ms: 10000,
     schema: {
       type: 'object',
@@ -2321,6 +2325,7 @@ export const agentTools = [
       '对 crony 元数据库执行**只读 SELECT** 查询（必须带 LIMIT，且不超过 100 行）。' +
       '禁止任何写操作、DDL、注释与多语句。',
     readonly: true,
+    risk: 'read',
     timeout_ms: 10000,
     schema: {
       type: 'object',
@@ -2329,9 +2334,35 @@ export const agentTools = [
       additionalProperties: false,
     },
   },
+  {
+    name: 'node_probe',
+    description:
+      '在**指定节点**上执行只读诊断命令（端口监听、进程、服务状态、网络配置）。' +
+      'admin 只能看到数据库，看不到节点本机事实；要断言"端口未监听/服务未运行"这类结论，必须先实际探测拿到证据。',
+    readonly: true,
+    risk: 'read',
+    timeout_ms: 20000,
+    schema: {
+      type: 'object',
+      properties: {
+        node: { type: 'string', description: '目标节点 UUID' },
+        command: { type: 'string', description: '只读命令名' },
+        args: { type: 'array', items: { type: 'string' }, description: '参数列表' },
+        reason: { type: 'string', description: '为什么要探测（写进审计）' },
+      },
+      required: ['node', 'command'],
+      additionalProperties: false,
+    },
+  },
 ]
 
-/** tools.DefaultPolicy() 的默认值 + 当前生效的收窄项 */
+/**
+ * tools.Policy 的默认值 + 当前生效的收窄项。
+ *
+ * 阶段 4 起策略多了"风险开关"：默认一律是**关着**的那一档。
+ * 这些字段不是装饰——控制台的"能力边界"面板直接读它们，
+ * 因此值必须与后端 toolPolicyView 的字段名逐字一致。
+ */
 export const agentToolPolicy = {
   max_calls_per_session: AGENT_MAX_TOOL_CALLS,
   max_calls_per_tool: 4,
@@ -2339,6 +2370,17 @@ export const agentToolPolicy = {
   sql_max_rows: 100,
   allow_hosts: [],
   shell_read_paths: ['/var/log/', '/var/log/crony/'],
+  allow_write: false,
+  allow_destructive: false,
+  autonomy: 'L1',
+  auto_approve: [],
+  approval_ttl_seconds: 900,
+  max_calls_per_minute: 60,
+  max_concurrent_calls: 4,
+  max_write_actions_per_session: 2,
+  max_affected_hosts_per_session: 1,
+  default_timeout_ms: 15000,
+  deny: [],
 }
 
 /* ------------------------------------------------------------------ *
@@ -2833,21 +2875,22 @@ export const settingsSnapshot = {
       { key: 'wechat', label: '企业微信', enabled: false, supported: false },
     ],
   },
-  // 阶段 2 真实口径：Agent 内核已落地，但本机只有确定性离线 provider，
-  // 且工具全部只读、诊断恒为 advisory_only（《契约》§7）。这里不再写模型品牌名。
+  // 阶段 4 真实口径：Agent 内核 + 只读工具集（含 admin→node 探测通道）已落地，
+  // 工具全部 read 风险、诊断恒为 advisory_only；写工具默认**不注册**（allow-write=false）。
   agent: {
     enabled: true,
     provider: 'offline',
     model: '',
-    autonomy_level: 'L1（只读工具 + 只给建议，不自动执行）',
+    autonomy_level: 'L1（写动作一律人工审批，不自动执行）',
     advisory_only: true,
-    readonly_tools: 5,
+    readonly_tools: 6,
+    write_tools: 0,
     prompt_versions: ['diagnose-v1', 'nljob-v1'],
     // 阶段 2 是"单会话 ReAct 循环"，没有多 Agent 并行编排
     max_parallel_agents: 1,
     budget: { max_calls: 20, max_tokens: 200000, max_duration_ms: 1800000 },
     max_tool_calls_per_session: 12,
-    require_approval_for: ['变更/删除类动作（阶段 3 才存在，当前不会产生）'],
+    require_approval_for: ['所有写动作（阶段 4 起存在：写工具默认不注册，注册后一律转人工审批）'],
   },
 }
 

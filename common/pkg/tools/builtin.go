@@ -75,15 +75,20 @@ func NewShellToolWithPolicy(policy Policy) *ShellTool {
 	return &ShellTool{runner: DefaultShellRunner, timeout: 15 * time.Second, policy: policy.Normalize()}
 }
 
-// NewShellToolWithRunner 注入执行器（测试用）。
+// NewShellToolWithRunner 注入执行器（测试用；策略取默认值）。
 func NewShellToolWithRunner(r ShellRunner, timeout time.Duration) *ShellTool {
+	return NewShellToolWithRunnerAndPolicy(r, timeout, DefaultPolicy())
+}
+
+// NewShellToolWithRunnerAndPolicy 注入执行器 + 策略（测试用；策略与注册表保持一致）。
+func NewShellToolWithRunnerAndPolicy(r ShellRunner, timeout time.Duration, policy Policy) *ShellTool {
 	if r == nil {
 		r = DefaultShellRunner
 	}
 	if timeout <= 0 {
 		timeout = 15 * time.Second
 	}
-	return &ShellTool{runner: r, timeout: timeout, policy: DefaultPolicy()}
+	return &ShellTool{runner: r, timeout: timeout, policy: policy.Normalize()}
 }
 
 // Name 实现 Tool。
@@ -112,6 +117,11 @@ func (t *ShellTool) Schema() *jsonschema.Schema {
 
 // ReadOnly 实现 Tool。
 func (t *ShellTool) ReadOnly() bool { return true }
+
+// Risk 实现 Tool：命令来自**只读白名单**（`AllowedShellCommands`），
+// 且 GuardShellCommand 拒绝管道/重定向/写命令，因此是只读。
+// 注意：这不是"shell 很安全"，而是"能进这个白名单的命令本身没有副作用"。
+func (t *ShellTool) Risk() RiskLevel { return RiskRead }
 
 // Timeout 实现 Tool。
 func (t *ShellTool) Timeout() time.Duration { return t.timeout }
@@ -257,6 +267,10 @@ func (t *HTTPGetTool) Schema() *jsonschema.Schema {
 // ReadOnly 实现 Tool。
 func (t *HTTPGetTool) ReadOnly() bool { return true }
 
+// Risk 实现 Tool：GET 语义只读；但**默认不许访问任何 host**（AllowHosts 为空 = 全禁），
+// 放开的目标由策略显式配置，因此"只读"是策略层面的结论而不是 HTTP 方法给的保证。
+func (t *HTTPGetTool) Risk() RiskLevel { return RiskRead }
+
 // Timeout 实现 Tool。
 func (t *HTTPGetTool) Timeout() time.Duration { return t.timeout }
 
@@ -392,6 +406,9 @@ func (t *NodeStatusTool) Schema() *jsonschema.Schema {
 
 // ReadOnly 实现 Tool。
 func (t *NodeStatusTool) ReadOnly() bool { return true }
+
+// Risk 实现 Tool：读共享库里的节点记录与水位，不改动任何状态。
+func (t *NodeStatusTool) Risk() RiskLevel { return RiskRead }
 
 // Timeout 实现 Tool。
 func (t *NodeStatusTool) Timeout() time.Duration { return 5 * time.Second }
@@ -577,10 +594,22 @@ type ProbeSource interface {
 //   - 不用 shell 执行（argv 直传，没有管道/重定向/变量展开）；
 //   - 有超时上限与输出上限；
 //   - 每次探测在 node_probe_request 表留下一条审计（谁、为什么、跑了什么、结果）。
-type NodeProbeTool struct{ src ProbeSource }
+type NodeProbeTool struct {
+	src ProbeSource
+	// policy 与注册表**同一份**策略：这里硬编码 DefaultPolicy() 曾经意味着
+	// "部署方收窄了可读路径，但本工具仍按默认白名单校验"（兜底比主检查松）。
+	policy Policy
+}
 
-// NewNodeProbeTool 创建工具。
-func NewNodeProbeTool(src ProbeSource) *NodeProbeTool { return &NodeProbeTool{src: src} }
+// NewNodeProbeTool 创建工具（策略取默认值；装配方应优先用 NewNodeProbeToolWithPolicy）。
+func NewNodeProbeTool(src ProbeSource) *NodeProbeTool {
+	return &NodeProbeTool{src: src, policy: DefaultPolicy()}
+}
+
+// NewNodeProbeToolWithPolicy 创建工具并注入生效策略。
+func NewNodeProbeToolWithPolicy(src ProbeSource, policy Policy) *NodeProbeTool {
+	return &NodeProbeTool{src: src, policy: policy.Normalize()}
+}
 
 // Name 实现 Tool。
 func (t *NodeProbeTool) Name() string { return "node_probe" }
@@ -606,6 +635,10 @@ func (t *NodeProbeTool) Schema() *jsonschema.Schema {
 // ReadOnly 实现 Tool。
 func (t *NodeProbeTool) ReadOnly() bool { return true }
 
+// Risk 实现 Tool：节点侧执行的命令同样来自只读白名单，且节点侧会**再校验一次**。
+// 它的"探测请求"会写入共享库，但那是审计记录，不是对目标节点的副作用。
+func (t *NodeProbeTool) Risk() RiskLevel { return RiskRead }
+
 // Timeout 实现 Tool：节点侧执行 + 轮询领取，给够时间但**不能无限**。
 func (t *NodeProbeTool) Timeout() time.Duration { return 20 * time.Second }
 
@@ -625,7 +658,7 @@ func (t *NodeProbeTool) Execute(ctx context.Context, args map[string]interface{}
 	if command == "" {
 		return Result{OK: false, Summary: "缺少 command 参数", Err: "node_probe 必须指定 command"}, nil
 	}
-	if err := GuardShellCommand(command, argv, DefaultPolicy()); err != nil {
+	if err := GuardShellCommand(command, argv, t.policy.Normalize()); err != nil {
 		return Result{OK: false, Summary: "命令未通过只读白名单", Err: err.Error()}, nil
 	}
 	reason := strings.TrimSpace(llm.StringOr(args, "reason", ""))
@@ -737,6 +770,9 @@ func (t *LogSearchTool) Schema() *jsonschema.Schema {
 // ReadOnly 实现 Tool。
 func (t *LogSearchTool) ReadOnly() bool { return true }
 
+// Risk 实现 Tool：只查日志。
+func (t *LogSearchTool) Risk() RiskLevel { return RiskRead }
+
 // Timeout 实现 Tool。
 func (t *LogSearchTool) Timeout() time.Duration { return 10 * time.Second }
 
@@ -831,6 +867,9 @@ func (t *SQLTool) Schema() *jsonschema.Schema {
 // ReadOnly 实现 Tool。
 func (t *SQLTool) ReadOnly() bool { return true }
 
+// Risk 实现 Tool：GuardSQL 只放行 SELECT 类语句，且走只读连接语义。
+func (t *SQLTool) Risk() RiskLevel { return RiskRead }
+
 // Timeout 实现 Tool。
 func (t *SQLTool) Timeout() time.Duration { return 10 * time.Second }
 
@@ -915,7 +954,7 @@ func NewReadonlyRegistry(policy Policy, src Sources, opts ...Option) (*Registry,
 	// 只有 admin 装配了探测数据源（节点侧为 nil，因此节点上不会出现 node_probe——
 	// 那条通道的方向是 admin→node，节点给自己发请求没有意义）。
 	if src.Probe != nil {
-		if err := r.Register(NewNodeProbeTool(src.Probe)); err != nil {
+		if err := r.Register(NewNodeProbeToolWithPolicy(src.Probe, policy)); err != nil {
 			return nil, err
 		}
 	}

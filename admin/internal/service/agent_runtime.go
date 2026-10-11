@@ -46,6 +46,13 @@ func InitAgentRuntime() (*agentruntime.Runtime, error) {
 		return nil, nil
 	}
 
+	// 阶段 4：工具策略来自配置（`tools` 段），不再用硬编码默认值。
+	// 配置非法/自相矛盾时**显式失败**：静默退回默认值会让"我明明配了"变成查不出的谜。
+	toolsPolicy, perr := agentconfig.ToolsPolicyFromConfig(cfg.Tools)
+	if perr != nil {
+		return nil, fmt.Errorf("tools 配置非法: %w", perr)
+	}
+
 	// 阶段 3 第二段：节点只读探测通道的数据源。
 	// 拿不到数据库连接时**明确降级**（不注册 node_probe），而不是注册一个
 	// "调用永远失败"的工具——后者会让模型以为"探测过了，什么都没发现"。
@@ -53,14 +60,19 @@ func InitAgentRuntime() (*agentruntime.Runtime, error) {
 	if probeErr != nil {
 		logger.GetLogger().Warn("[agent] 节点只读探测通道未启用（node_probe 工具不注册）: " + probeErr.Error())
 		probeSource = nil
+	} else {
+		// 兜底再校验用同一份策略（否则"收窄了可读路径"的部署仍会被默认策略放行）。
+		probeSource.SetPolicy(toolsPolicy)
 	}
 
 	rt, err := agentruntime.New(agentruntime.Options{
 		Config: cfg.LLM,
-		Policy: tools.DefaultPolicy(),
+		Policy: toolsPolicy,
 		Sources: tools.Sources{
 			Logs: &agentruntime.DBLogSource{},
-			SQL:  &agentruntime.ReadonlySQLSource{},
+			// MaxRows 显式取自同一个策略：此前这里用零值（源内部默认 200），
+			// 与网关的 100 行上限并存，形成"两个都说自己是上限"的漂移。
+			SQL: &agentruntime.ReadonlySQLSource{MaxRows: toolsPolicy.SQLMaxRows},
 			// 阶段 3 第一段：admin→node 证据通道。
 			// 节点存活/心跳/主机名/在跑任务数读共享库即有；CPU/内存/磁盘/load 由
 			// node 侧写入 node_metric 后才有（未上报时工具显式输出"未上报"，不编造 0%）。
@@ -70,6 +82,9 @@ func InitAgentRuntime() (*agentruntime.Runtime, error) {
 			// 有了它，"未观测就断言"才可能被真正消除，而不是只被标记。
 			Probe: probeSource,
 		},
+		// 阶段 4：每次工具调用（含被拒的）都落 agent_tool_audit。
+		// 观察者内部对"数据库未就绪/落库失败"只记日志，不影响调用。
+		Observer: agentruntime.ToolAuditObserver(),
 	})
 	if err != nil {
 		return nil, err
@@ -78,6 +93,13 @@ func InitAgentRuntime() (*agentruntime.Runtime, error) {
 	logger.GetLogger().Info(fmt.Sprintf(
 		"[agent] Agent 运行时已就绪：provider=%s offline=%v model=%s 工具=%s（诊断证据来源：数据库 + 节点水位 + 节点本机只读探测）",
 		rt.ProviderName(), rt.Offline(), rt.Model(), strings.Join(rt.ToolNames(), ",")))
+	// 生效策略必须打日志：安全边界的"可读性"和正确性一样重要——
+	// 出事后第一件事就是确认"当时到底放开了什么"。
+	logger.GetLogger().Info(fmt.Sprintf(
+		"[agent] 工具策略：自治级别=%s 允许写=%v 允许不可逆=%v 会话调用上限=%d 每分钟上限=%d 并发上限=%d 写动作上限=%d 影响主机上限=%d 免审批白名单=%v",
+		toolsPolicy.Autonomy, toolsPolicy.AllowWrite, toolsPolicy.AllowDestructive,
+		toolsPolicy.MaxCallsPerSession, toolsPolicy.MaxCallsPerMinute, toolsPolicy.MaxConcurrentCalls,
+		toolsPolicy.MaxWriteActionsPerSession, toolsPolicy.MaxAffectedHostsPerSession, toolsPolicy.AutoApprove))
 	return rt, nil
 }
 

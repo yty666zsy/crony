@@ -70,5 +70,27 @@
     "encode-level": "LowercaseLevelEncoder",
     "stacktrace-key": "stacktrace",
     "log-in-console": false
+  },
+  "tools": {
+    "#policy": "阶段 4 工具网关策略（生产默认最保守：只读 + 写动作一律人工审批）。",
+    "#autonomy": "L0=只建议 / L1=写动作一律人工审批(默认) / L2=白名单内自动 / L3=非破坏性全自动",
+    "allow-write": false,
+    "allow-destructive": false,
+    "autonomy": "L1",
+    "auto-approve": [],
+    "approval-ttl-seconds": 900,
+    "max-calls-per-session": 12,
+    "max-calls-per-tool": 4,
+    "max-calls-per-minute": 60,
+    "max-concurrent-calls": 4,
+    "max-write-actions-per-session": 2,
+    "max-affected-hosts-per-session": 1,
+    "default-timeout-seconds": 15,
+    "max-output-bytes": 65536,
+    "allow-hosts": [],
+    "shell-read-paths": ["/var/log/", "/var/log/crony/"],
+    "sql-max-rows": 100,
+    "deny": [],
+    "allow": []
   }
 }

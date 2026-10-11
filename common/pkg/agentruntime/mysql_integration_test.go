@@ -53,10 +53,15 @@ func integrationDB(t *testing.T) *gorm.DB {
 	if err := db.AutoMigrate(
 		&models.Job{}, &models.JobRun{}, &models.JobRunStep{}, &models.JobLog{},
 		&models.AgentSession{}, &models.AgentStep{},
+		// 阶段 4：工具审计 / 审批单（audit_mysql_test.go 与本文件共用这一份迁移）
+		&models.AgentToolAudit{}, &models.ApprovalRequest{},
 	); err != nil {
 		t.Fatalf("迁移测试表失败: %v", err)
 	}
-	for _, table := range []string{models.CronyAgentSessionTableName, models.CronyAgentStepTableName} {
+	for _, table := range []string{
+		models.CronyAgentSessionTableName, models.CronyAgentStepTableName,
+		models.CronyAgentToolAuditTableName, models.CronyApprovalRequestTableName,
+	} {
 		if !db.Migrator().HasTable(table) {
 			t.Fatalf("表 %s 未被创建", table)
 		}

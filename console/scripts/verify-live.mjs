@@ -171,11 +171,23 @@ if (detail.ok) {
 
 const tools = await step('POST /agent/tool/list', () => mods.agent.listAgentTools({}))
 if (tools.ok) {
-  const names = (tools.value?.tools || []).map((t) => t.name)
+  const list = tools.value?.tools || []
+  const names = list.map((t) => t.name)
+  const policy = tools.value?.policy || {}
   check(
     'POST /agent/tool/list（能力边界来自后端注册表）',
-    names.length > 0,
-    `${names.length} 个工具: ${names.join(', ')}；配额 max_calls_per_session=${tools.value?.policy?.max_calls_per_session}`,
+    names.length > 0 && list.every((t) => typeof t.risk === 'string' && t.risk.length > 0),
+    `${names.length} 个工具: ${names.join(', ')}；风险级别: ${list.map((t) => `${t.name}=${t.risk}`).join(', ')}；配额 max_calls_per_session=${policy.max_calls_per_session}`,
+  )
+  // 阶段 4：策略视图必须如实暴露写动作开关与自治级别（控制台要据此展示"这台部署放开了什么"）
+  check(
+    'POST /agent/tool/list（阶段 4 风险策略字段）',
+    policy.allow_write === false &&
+      policy.allow_destructive === false &&
+      policy.autonomy === 'L1' &&
+      policy.approval_ttl_seconds > 0 &&
+      Array.isArray(policy.auto_approve),
+    `allow_write=${policy.allow_write} allow_destructive=${policy.allow_destructive} autonomy=${policy.autonomy} approval_ttl=${policy.approval_ttl_seconds}s max_calls_per_minute=${policy.max_calls_per_minute} max_concurrent=${policy.max_concurrent_calls} auto_approve=${JSON.stringify(policy.auto_approve)}`,
   )
 }
 

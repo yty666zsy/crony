@@ -305,26 +305,80 @@ func redactDSN(dsn string) string {
 // 返回夹具的 run_id；清理逻辑通过 t.Cleanup 注册。
 func provisionRunFixture(t *testing.T, db *sql.DB) string {
 	t.Helper()
+	return provisionRunFixtureAs(t, db, "run", true)
+}
+
+// provisionBareRunFixture 造一条**没有任何步骤、没有任何证据**的失败执行记录。
+//
+// 用途与有步骤的夹具不同：诊断 Agent 的系统要求是"结论必须有证据"，
+// 当库里什么材料都没有时，它只能去调工具（node_status / node_probe / log_search…）。
+// 因此这条夹具是**从黑盒侧触发一次真实工具调用**的可重复手段——
+// 否则"工具审计是否落库"就只能指望模型当天心情好，验收结果时红时绿。
+//
+// run_id 与主夹具不同（-bare 后缀），阶段之间互不干扰。
+//
+// 关键细节：主记录的 `error_msg` 刻意写成**本地材料无法回答**的形态
+// （"连接被拒绝，但没说端口是否在监听"）。第一版夹具直接复用了主夹具的
+// error_msg（里面写着"引号测试代码，不是真实故障"），结果模型仅凭这条记录
+// 就能下结论，一次工具都不调——夹具自己把题目答了，也就无法触发工具审计。
+func provisionBareRunFixture(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	return provisionRunFixtureAs(t, db, "bare", false)
+}
+
+// provisionBareRunFixtureN 同上，但允许造多条（每条的 run_id 不同）。
+//
+// 为什么需要多条：AC-16 的"主动取证"依赖模型真的去调工具，而模型是随机的。
+// 单次尝试不成立时再试一次（换一条 run、换一种说法），比"第一次不动手就判 SKIP"
+// 更能反映真实能力；但重试次数必须封顶，否则验收变成"烧 token 抽卡"。
+func provisionBareRunFixtureN(t *testing.T, db *sql.DB, n int) string {
+	t.Helper()
+	return provisionRunFixtureAs(t, db, fmt.Sprintf("bare%d", n), false)
+}
+
+// provisionRunFixtureAs 是两种夹具的共同实现：withSteps=false 时只写主记录。
+func provisionRunFixtureAs(t *testing.T, db *sql.DB, suffix string, withSteps bool) string {
+	t.Helper()
 	tag := strings.TrimSpace(os.Getenv("CRONY_ACC_RUN_TAG"))
 	if tag == "" {
 		tag = "acc-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	}
-	runID := tag + "-run"
+	runID := tag + "-" + suffix
 	now := time.Now()
 	started := now.Add(-3 * time.Second)
 
 	// status=3 是 RunStatusFailed（见 common/models/run.go）：诊断用例需要"失败"
 	// 才有可解释的东西；同时它是**终态**，SSE 应立即下发 end。
+	// step_count/error_msg 随夹具形态变化：bare 夹具不写步骤，且 error_msg
+	// 只描述现象（连接被拒），不提供"是不是夹具/是不是端口没监听"的答案。
+	stepCount := 2
+	errMsg := "验收夹具：第 2 步失败（引号测试代码，不是真实故障）"
+	output := "step1 ok"
+	cmdText := `sh -c "exit 7"`
+	jobName := "验收夹具任务"
+	if !withSteps {
+		stepCount = 0
+		// 这两个字段的取值是**实测调出来的**，不是随手写的：
+		// 只要 error_msg 或 command 里已经含有失败原因（"连接被拒绝"/"exit 7"），
+		// 模型一步就能下结论、一次工具都不调。真实历史上唯一能稳定触发工具调用的
+		// 那条记录长这样：脚本调用 + error_msg 只有"命令退出码 1" —— 信息量极低，
+		// 模型只能去节点上取证（16 个有工具轨迹的会话全部来自这一类 run）。
+		errMsg = "命令退出码 1"
+		output = ""
+		cmdText = `powershell -NoProfile -File scripts\check_db_port.ps1 -Port 13307`
+		jobName = "验收诊断取证夹具"
+	}
 	res, err := db.Exec(`insert into job_run
 		(run_id, job_id, job_name, spec, command, job_type, node_uuid, hostname, ip,
 		 trigger_source, triggered_by, status, attempt, scheduled_time, started_at, finished_at,
 		 duration_ms, exit_code, step_count, success_steps, failed_steps, retry_count,
 		 error_msg, output, created, updated)
-		values (?, 910007, '验收夹具任务', '0 0 3 * * *', 'sh -c "exit 7"', 1, ?, 'acc-host', '127.0.0.1',
-		 1, 'acceptance', 3, 1, ?, ?, ?, 3000, 7, 2, 1, 1, 0,
-		 '验收夹具：第 2 步失败（引号测试代码，不是真实故障）', 'step1 ok', ?, ?)`,
-		runID, envOr("CRONY_ACC_NODE_UUID", "node-it-01"),
-		now.Add(-3*time.Second).Unix(), started.Unix(), now.Unix(), now.Unix(), now.Unix())
+		values (?, 910007, ?, '0 0 3 * * *', ?, 1, ?, 'acc-host', '127.0.0.1',
+		 1, 'acceptance', 3, 1, ?, ?, ?, 3000, 7, ?, 0, 1, 0,
+		 ?, ?, ?, ?)`,
+		runID, jobName, cmdText, envOr("CRONY_ACC_NODE_UUID", "node-it-01"),
+		now.Add(-3*time.Second).Unix(), started.Unix(), now.Unix(),
+		stepCount, errMsg, output, now.Unix(), now.Unix())
 	if err != nil {
 		t.Fatalf("造 run 夹具失败（验收库需要 INSERT 权限）: %v", err)
 	}
@@ -345,14 +399,16 @@ func provisionRunFixture(t *testing.T, db *sql.DB) string {
 		{0, "准备环境", 2, 0, "step1 ok", "", 900},
 		{1, "执行清理", 3, 7, "", "引号测试代码：第 2 步退出码 7", 2100},
 	}
-	for _, s := range steps {
-		if _, err := db.Exec(`insert into job_run_step
+	if withSteps {
+		for _, s := range steps {
+			if _, err := db.Exec(`insert into job_run_step
 			(run_id, step_index, name, kind, `+"`condition`"+`, command, status, exit_code,
 			 retry_count, started_at, finished_at, duration_ms, output, error_msg, created)
 			values (?, ?, ?, 'cmd', 'on_success', ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
-			runID, s.idx, s.name, "echo "+s.name, s.status, s.code,
-			started.Unix(), now.Unix(), s.elapsed, s.output, s.errMsg, now.Unix()); err != nil {
-			t.Fatalf("造步骤夹具失败: %v", err)
+				runID, s.idx, s.name, "echo "+s.name, s.status, s.code,
+				started.Unix(), now.Unix(), s.elapsed, s.output, s.errMsg, now.Unix()); err != nil {
+				t.Fatalf("造步骤夹具失败: %v", err)
+			}
 		}
 	}
 

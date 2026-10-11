@@ -11,6 +11,9 @@ const (
 	// 阶段 2：Agent 会话与轨迹。定义在 agent.go，这里只做统一索引。
 	CronyAgentSessionTable = CronyAgentSessionTableName
 	CronyAgentStepTable    = CronyAgentStepTableName
+	// 阶段 4：工具调用审计（append-only）与写动作审批。定义在各自文件，这里统一索引。
+	CronyAgentToolAuditTable = CronyAgentToolAuditTableName
+	CronyApprovalRequestTable = CronyApprovalRequestTableName
 )
 
 type (
@@ -131,6 +134,54 @@ type (
 		// LLM 大模型网关（阶段 2 新增）。空配置 = 未配置模型，
 		// 所有 Agent 能力必须返回明确的"未配置"错误，而不是静默降级成假结论。
 		LLM LLM `mapstructure:"llm" json:"llm" yaml:"llm" ini:"llm"`
+		// Tools 工具网关策略（阶段 4 新增）。
+		//
+		// 为什么策略必须配置化而不是硬编码：阶段 2/3 的默认策略散落在 7 处
+		// `tools.DefaultPolicy()` 调用点上，各自漂移（同一个"只读 SQL 行数上限"
+		// 在网关里是 100、在执行路径里是 200）。配置化之后**只有一个来源**，
+		// 而且"这台部署到底放开了什么"可以从配置文件直接读出来——
+		// 安全边界的可读性和它的正确性一样重要。
+		Tools Tools `mapstructure:"tools" json:"tools" yaml:"tools" ini:"tools"`
+	}
+	// Tools 工具网关策略（阶段 4）。所有字段都有保守默认值；
+	// 缺失/留空 = 用默认值，且默认值一律是"关着"的那一档。
+	Tools struct {
+		// AllowWrite 是否允许注册可逆写工具（默认 false）。
+		AllowWrite bool `mapstructure:"allow-write" json:"allowWrite" yaml:"allow-write" ini:"allow-write"`
+		// AllowDestructive 是否允许注册不可逆/高爆工具（默认 false；即使开启也永远需要审批）。
+		AllowDestructive bool `mapstructure:"allow-destructive" json:"allowDestructive" yaml:"allow-destructive" ini:"allow-destructive"`
+		// Autonomy 自治级别：L0 只建议 / L1 一律审批（默认） / L2 白名单自动 / L3 全自动。
+		Autonomy string `mapstructure:"autonomy" json:"autonomy" yaml:"autonomy" ini:"autonomy"`
+		// AutoApprove L2/L3 的免审批白名单，条目为 `工具名` 或 `工具名@目标`（默认空）。
+		AutoApprove []string `mapstructure:"auto-approve" json:"autoApprove" yaml:"auto-approve" ini:"auto-approve"`
+		// ApprovalTTLSeconds 审批单有效期（默认 900s = 15 分钟）。
+		ApprovalTTLSeconds int `mapstructure:"approval-ttl-seconds" json:"approvalTtlSeconds" yaml:"approval-ttl-seconds" ini:"approval-ttl-seconds"`
+		// MaxCallsPerSession 单会话工具调用上限（默认 12）。
+		MaxCallsPerSession int `mapstructure:"max-calls-per-session" json:"maxCallsPerSession" yaml:"max-calls-per-session" ini:"max-calls-per-session"`
+		// MaxCallsPerTool 单会话同一工具上限（默认 4）。
+		MaxCallsPerTool int `mapstructure:"max-calls-per-tool" json:"maxCallsPerTool" yaml:"max-calls-per-tool" ini:"max-calls-per-tool"`
+		// MaxCallsPerMinute 进程级速率上限（默认 60）。
+		MaxCallsPerMinute int `mapstructure:"max-calls-per-minute" json:"maxCallsPerMinute" yaml:"max-calls-per-minute" ini:"max-calls-per-minute"`
+		// MaxConcurrentCalls 进程级并发上限（默认 4）。
+		MaxConcurrentCalls int `mapstructure:"max-concurrent-calls" json:"maxConcurrentCalls" yaml:"max-concurrent-calls" ini:"max-concurrent-calls"`
+		// MaxWriteActionsPerSession 单会话写动作上限（默认 2）。
+		MaxWriteActionsPerSession int `mapstructure:"max-write-actions-per-session" json:"maxWriteActionsPerSession" yaml:"max-write-actions-per-session" ini:"max-write-actions-per-session"`
+		// MaxAffectedHostsPerSession 单会话可影响的去重主机数（默认 1）。
+		MaxAffectedHostsPerSession int `mapstructure:"max-affected-hosts-per-session" json:"maxAffectedHostsPerSession" yaml:"max-affected-hosts-per-session" ini:"max-affected-hosts-per-session"`
+		// DefaultTimeoutSeconds 单次工具默认超时（默认 15s）。
+		DefaultTimeoutSeconds int `mapstructure:"default-timeout-seconds" json:"defaultTimeoutSeconds" yaml:"default-timeout-seconds" ini:"default-timeout-seconds"`
+		// MaxOutputBytes 单次工具输出上限（默认 65536）。
+		MaxOutputBytes int `mapstructure:"max-output-bytes" json:"maxOutputBytes" yaml:"max-output-bytes" ini:"max-output-bytes"`
+		// AllowHosts http_get 允许的 host（默认空 = 完全禁止外部请求）。
+		AllowHosts []string `mapstructure:"allow-hosts" json:"allowHosts" yaml:"allow-hosts" ini:"allow-hosts"`
+		// ShellReadPaths tail 等可读路径前缀白名单（默认 /var/log、/var/log/crony）。
+		ShellReadPaths []string `mapstructure:"shell-read-paths" json:"shellReadPaths" yaml:"shell-read-paths" ini:"shell-read-paths"`
+		// SQLMaxRows 只读 SQL 行数上限（默认 100）。
+		SQLMaxRows int `mapstructure:"sql-max-rows" json:"sqlMaxRows" yaml:"sql-max-rows" ini:"sql-max-rows"`
+		// Deny 显式禁止的工具（优先级高于一切开关）。
+		Deny []string `mapstructure:"deny" json:"deny" yaml:"deny" ini:"deny"`
+		// Allow 工具白名单（非空时只允许这些）。
+		Allow []string `mapstructure:"allow" json:"allow" yaml:"allow" ini:"allow"`
 	}
 )
 

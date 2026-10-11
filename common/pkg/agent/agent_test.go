@@ -29,6 +29,12 @@ func (f *fakeTool) Name() string               { return f.name }
 func (f *fakeTool) Description() string        { return "测试工具" }
 func (f *fakeTool) Schema() *jsonschema.Schema { return f.schema }
 func (f *fakeTool) ReadOnly() bool             { return f.readOnly }
+func (f *fakeTool) Risk() tools.RiskLevel {
+	if f.readOnly {
+		return tools.RiskRead
+	}
+	return tools.RiskWrite
+}
 func (f *fakeTool) Timeout() time.Duration     { return 5 * time.Second }
 func (f *fakeTool) Execute(ctx context.Context, args map[string]interface{}) (tools.Result, error) {
 	return f.fn(ctx, args)

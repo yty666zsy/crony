@@ -69,5 +69,29 @@
     "encode-level": "LowercaseLevelEncoder",
     "stacktrace-key": "stacktrace",
     "log-in-console": false
+  },
+  "tools": {
+    "#policy": "阶段 4 工具网关策略。默认一律是『关着』的那一档：不注册写工具、写动作一律需要人工审批。放开某一项都必须是有意识的决定，而不是忘配置的结果。",
+    "#autonomy": "L0=只建议(连写工具都不注册) / L1=写动作一律人工审批(默认) / L2=白名单内自动 / L3=非破坏性全自动",
+    "allow-write": false,
+    "allow-destructive": false,
+    "autonomy": "L1",
+    "auto-approve": [],
+    "#auto-approve": "条目为 工具名 或 工具名@目标（精确匹配）。allow-write=false 时该列表必须为空，否则装配直接失败（配置自相矛盾要吵出来）。",
+    "approval-ttl-seconds": 900,
+    "max-calls-per-session": 12,
+    "max-calls-per-tool": 4,
+    "max-calls-per-minute": 60,
+    "max-concurrent-calls": 4,
+    "max-write-actions-per-session": 2,
+    "max-affected-hosts-per-session": 1,
+    "default-timeout-seconds": 15,
+    "max-output-bytes": 65536,
+    "#allow-hosts": "http_get 的出网白名单。空数组 = 完全禁止外部请求（默认）。",
+    "allow-hosts": [],
+    "shell-read-paths": ["/var/log/", "/var/log/crony/"],
+    "sql-max-rows": 100,
+    "deny": [],
+    "allow": []
   }
 }

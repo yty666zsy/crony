@@ -57,5 +57,26 @@
     "encode-level": "LowercaseLevelEncoder",
     "stacktrace-key": "stacktrace",
     "log-in-console": true
+  },
+  "tools": {
+    "#policy": "阶段 4 工具网关策略（节点侧与 admin 共用同一份实现，配置各自一份）。",
+    "allow-write": false,
+    "allow-destructive": false,
+    "autonomy": "L1",
+    "auto-approve": [],
+    "approval-ttl-seconds": 900,
+    "max-calls-per-session": 12,
+    "max-calls-per-tool": 4,
+    "max-calls-per-minute": 60,
+    "max-concurrent-calls": 4,
+    "max-write-actions-per-session": 2,
+    "max-affected-hosts-per-session": 1,
+    "default-timeout-seconds": 15,
+    "max-output-bytes": 65536,
+    "allow-hosts": [],
+    "shell-read-paths": ["/var/log/", "/var/log/crony/"],
+    "sql-max-rows": 100,
+    "deny": [],
+    "allow": []
   }
 }

@@ -39,16 +39,26 @@ func (srv *NodeServer) initAgentRuntime() {
 		roots = append(roots, dir)
 	}
 
+	// 阶段 4：与 admin 用**同一个**配置来源构造策略（此前两边各自 DefaultPolicy()，
+	// 是"admin 说配置好了、node 说没配置"这类不一致温床）。
+	toolsPolicy, perr := agentconfig.ToolsPolicyFromConfig(cfg.Tools)
+	if perr != nil {
+		logger.GetLogger().Error(fmt.Sprintf("[agent] tools 配置非法，Agent 型任务不可用：%s", perr.Error()))
+		return
+	}
+
 	rt, err := agentruntime.New(agentruntime.Options{
 		Config: cfg.LLM,
-		Policy: tools.DefaultPolicy(),
+		Policy: toolsPolicy,
 		Sources: tools.Sources{
 			Logs: agentruntime.MultiLogSource{
 				&agentruntime.DBLogSource{},
 				&FileLogSource{Roots: roots},
 			},
-			SQL: &agentruntime.ReadonlySQLSource{},
+			SQL: &agentruntime.ReadonlySQLSource{MaxRows: toolsPolicy.SQLMaxRows},
 		},
+		// 节点侧的工具调用也要留痕：否则"节点上有没有跑过写动作"只能靠猜。
+		Observer: agentruntime.ToolAuditObserver(),
 		NodeUUID: srv.UUID,
 	})
 	if err != nil {
@@ -59,6 +69,9 @@ func (srv *NodeServer) initAgentRuntime() {
 	handler.SetAgentRunner(&nodeAgentRunner{rt: rt})
 	logger.GetLogger().Info(fmt.Sprintf("[agent] Agent 运行时已就绪：provider=%s offline=%v 工具=%s",
 		rt.ProviderName(), rt.Offline(), strings.Join(rt.ToolNames(), ",")))
+	logger.GetLogger().Info(fmt.Sprintf(
+		"[agent] 工具策略：自治级别=%s 允许写=%v 允许不可逆=%v 会话调用上限=%d",
+		toolsPolicy.Autonomy, toolsPolicy.AllowWrite, toolsPolicy.AllowDestructive, toolsPolicy.MaxCallsPerSession))
 }
 
 // nodeAgentRunner 把共享运行时适配成 executor.AgentRunner。

@@ -109,7 +109,7 @@ type DiagnosisResult struct {
 	PersistError string `json:"persist_error,omitempty"`
 }
 
-// runContext 为**一次 Agent 运行**绑定独立的预算记账器。
+// runContext 为**一次 Agent 运行**绑定独立的预算记账器 + 调用归属。
 //
 // 为什么必须在入口层做：Gateway 是进程级单例，早期把 Tracker 挂在网关上，
 // 于是 `max-calls-per-session` / `max-duration-seconds` 实际约束的是**整个进程**：
@@ -117,8 +117,13 @@ type DiagnosisResult struct {
 // 重启又好了"（`force=true` 重诊断第一次报错、第二次起每次都失败）。
 // 预算是会话/运行级的，所以每次运行新建一个并绑定到 ctx，
 // 由 gateway.Complete 通过 ctx 取用（并发的两次运行互不污染）。
-func (r *Runtime) runContext(ctx context.Context) context.Context {
-	return llm.ContextWithTracker(ctx, llm.NewTracker(r.rt.Budget))
+//
+// 阶段 4 起同时绑定调用归属（AgentKind / RunID）：工具审计表要能回答
+// "这次工具调用属于哪种会话、哪条执行记录"，否则审计行只有 session_id，
+// 复盘时要回表 join 才能定位（而 join 的信息在会话被清理后就丢了）。
+func (r *Runtime) runContext(ctx context.Context, meta tools.RunMeta) context.Context {
+	ctx = llm.ContextWithTracker(ctx, llm.NewTracker(r.rt.Budget))
+	return tools.WithRunMeta(ctx, meta)
 }
 
 // RunDiagnosis 诊断一次失败执行。
@@ -134,7 +139,7 @@ func (r *Runtime) RunDiagnosis(ctx context.Context, req DiagnosisRequest) (*Diag
 
 	// 回放路径也要绑定：会话详情里的 budget 快照必须反映"这次运行"，
 	// 而不是进程启动至今的累计值。
-	ctx = r.runContext(ctx)
+	ctx = r.runContext(ctx, tools.RunMeta{AgentKind: models.AgentKindDiagnose, RunID: runID})
 
 	if !req.Force {
 		if existing, err := loadDiagnosisSession(runID); err != nil {
@@ -212,7 +217,7 @@ type InspectionResult struct {
 
 // RunInspect 执行一次巡检。
 func (r *Runtime) RunInspect(ctx context.Context, req InspectRequest) (*InspectionResult, error) {
-	ctx = r.runContext(ctx)
+	ctx = r.runContext(ctx, tools.RunMeta{AgentKind: models.AgentKindJob, RunID: req.SessionID})
 	started := time.Now()
 	out, err := agent.Inspect(ctx, r.agent, agent.InspectRequest{
 		SessionID: req.SessionID,
@@ -260,7 +265,7 @@ type DraftResult struct {
 // 会话会落库（kind=nljob），这样"确认"能通过 session_id 找回草案原文，
 // 而不是信任浏览器回传的草案内容。
 func (r *Runtime) RunDraftJob(ctx context.Context, req DraftRequest) (*DraftResult, error) {
-	ctx = r.runContext(ctx)
+	ctx = r.runContext(ctx, tools.RunMeta{AgentKind: models.AgentKindNLJob})
 	started := req.Now
 	if started.IsZero() {
 		started = time.Now()

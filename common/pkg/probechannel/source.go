@@ -28,6 +28,12 @@ type Source struct {
 	pollInterval time.Duration
 	// waitTimeout 等待上限（默认 15s；工具自身 Timeout 是 20s，留出余量）
 	waitTimeout time.Duration
+	// policy 用于"绕过工具层直接调数据源"时的兜底再校验（目录白名单等）。
+	//
+	// 阶段 4 起由装配方注入**同一份**生效策略：此前这里硬编码 DefaultPolicy()，
+	// 于是"部署方收窄了可读路径"与"兜底检查仍按默认放行"会不一致——
+	// 兜底检查比主检查更松，等于给绕行者留了一条路。
+	policy tools.Policy
 }
 
 var _ tools.ProbeSource = (*Source)(nil)
@@ -38,8 +44,11 @@ func NewSource(db *gorm.DB) (*Source, error) {
 	if db == nil {
 		return nil, fmt.Errorf("节点探测数据源需要数据库连接")
 	}
-	return &Source{db: db, pollInterval: 300 * time.Millisecond, waitTimeout: 15 * time.Second}, nil
+	return &Source{db: db, pollInterval: 300 * time.Millisecond, waitTimeout: 15 * time.Second, policy: tools.DefaultPolicy()}, nil
 }
+
+// SetPolicy 注入生效的只读工具策略（装配方调用；未注入时退化为保守默认策略）。
+func (s *Source) SetPolicy(p tools.Policy) { s.policy = p.Normalize() }
 
 // SetWaitTimeout 调整等待上限（测试与"交互式快问快答"场景使用）。
 //
@@ -66,8 +75,9 @@ func (s *Source) Probe(ctx context.Context, req tools.ProbeRequest) (tools.Probe
 	if strings.TrimSpace(req.Command) == "" {
 		return tools.ProbeResult{}, fmt.Errorf("command 不能为空")
 	}
-	// 防御性再校验一次（工具层已校验；这里是"即使有人绕过工具直接调数据源"的兜底）
-	if err := tools.GuardShellCommand(req.Command, req.Args, tools.DefaultPolicy()); err != nil {
+	// 防御性再校验一次（工具层已校验；这里是"即使有人绕过工具直接调数据源"的兜底）。
+	// policy 为零值时 Normalize 会补齐成保守默认策略，不会退化成"不校验"。
+	if err := tools.GuardShellCommand(req.Command, req.Args, s.policy.Normalize()); err != nil {
 		return tools.ProbeResult{}, err
 	}
 	// 目标节点必须存在且在库里有登记，否则请求会一直挂着等一个不存在的节点，

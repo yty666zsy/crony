@@ -119,6 +119,46 @@ const shellPathsText = computed(() => {
   return paths.length ? paths.join('、') : '（空：shell_readonly 的路径白名单为空）'
 })
 
+const autoApproveText = computed(() => {
+  const list = policy.value?.auto_approve || []
+  // 空列表不是"没配置"，而是**最安全**的一档：所有写动作都要人批。
+  return list.length ? list.join('、') : '（空：不存在免审批的写动作，全部需要人工确认）'
+})
+
+const denyText = computed(() => {
+  const list = policy.value?.deny || []
+  return list.length ? list.join('、') : '（空：没有额外禁用项）'
+})
+
+// 风险级别的人话：read/write/destructive 直接展示会让运维现场反复查字典，
+// 而这三个词恰好是"能不能自动执行"的关键，必须一眼看懂。
+function riskText(risk) {
+  switch (risk) {
+    case 'read':
+      return '只读'
+    case 'write':
+      return '可逆写'
+    case 'destructive':
+      return '不可逆'
+    default:
+      return risk ? String(risk) : '未声明'
+  }
+}
+
+function riskClass(risk) {
+  switch (risk) {
+    case 'read':
+      return 'border-ok/40 text-ok'
+    case 'write':
+      return 'border-warn/40 text-warn'
+    case 'destructive':
+      return 'border-danger/40 text-danger'
+    default:
+      // 未声明风险是异常状态（后端 Register 会拒绝），用醒目色提示
+      return 'border-danger/40 text-danger'
+  }
+}
+
 /* ------------------------ §3.2 立即诊断（就地触发） ------------------------ */
 
 const diag = reactive({
@@ -229,6 +269,11 @@ onMounted(() => {
                 </span>
               </template>
             </el-table-column>
+            <el-table-column label="风险" width="110" align="center">
+              <template #default="{ row }">
+                <span class="chip" :class="riskClass(row.risk)">{{ riskText(row.risk) }}</span>
+              </template>
+            </el-table-column>
             <template #empty>
               <EmptyState
                 compact
@@ -241,21 +286,38 @@ onMounted(() => {
         </div>
 
         <div class="space-y-2 rounded-lg border border-navy-600 bg-navy-900 p-3">
-          <p class="section-label">硬配额（policy）</p>
+          <p class="section-label">硬配额与风险策略（policy）</p>
           <template v-if="policy">
             <div class="flex flex-wrap gap-1.5">
               <span class="chip">单会话最多 {{ policy.max_calls_per_session }} 次工具调用</span>
               <span class="chip">单工具最多 {{ policy.max_calls_per_tool }} 次</span>
               <span class="chip">单次输出 ≤ {{ formatNumber(policy.max_output_bytes) }} 字节</span>
               <span class="chip">SQL 最多返回 {{ policy.sql_max_rows }} 行</span>
+              <span class="chip">每分钟 ≤ {{ policy.max_calls_per_minute }} 次</span>
+              <span class="chip">并发 ≤ {{ policy.max_concurrent_calls }}</span>
+            </div>
+            <div class="flex flex-wrap gap-1.5">
+              <span class="chip" :class="policy.allow_write ? 'border-warn/40 text-warn' : 'border-ok/40 text-ok'">
+                写动作：{{ policy.allow_write ? '已开启' : '关闭（写工具不注册）' }}
+              </span>
+              <span class="chip" :class="policy.allow_destructive ? 'border-danger/40 text-danger' : 'border-ok/40 text-ok'">
+                不可逆动作：{{ policy.allow_destructive ? '已开启（仍须审批）' : '关闭' }}
+              </span>
+              <span class="chip">自治级别：{{ policy.autonomy }}</span>
+              <span class="chip">写动作 ≤ {{ policy.max_write_actions_per_session }} 次/会话</span>
+              <span class="chip">影响主机 ≤ {{ policy.max_affected_hosts_per_session }} 台/会话</span>
+              <span class="chip">审批有效期 {{ policy.approval_ttl_seconds }}s</span>
             </div>
             <div class="space-y-1 pt-1 text-[10px] leading-5 text-ink-dim">
               <p>允许访问的主机（allow_hosts）：<span class="text-ink-muted">{{ allowHostsText }}</span></p>
               <p>shell_readonly 可读路径：<span class="text-ink-muted">{{ shellPathsText }}</span></p>
+              <p>免审批白名单（auto_approve）：<span class="text-ink-muted">{{ autoApproveText }}</span></p>
+              <p>显式禁止（deny）：<span class="text-ink-muted">{{ denyText }}</span></p>
             </div>
             <p class="border-t border-navy-600 pt-2 text-[10px] leading-5 text-ink-dim">
               配额是**硬上限**：达到上限时内核会停止调用工具并以 stop_reason 记录（tool_budget / llm_budget），
-              不是无限重试。阶段 2 不存在变更类工具，因此也不需要审批流。
+              不是无限重试。写动作默认**连工具都不注册**（allow-write=false）；
+              一旦开启，L1 策略下每一次写动作都必须由人在审批面板确认——Agent 不能自己批准自己。
             </p>
           </template>
           <p v-else class="text-[11px] text-ink-dim">配额未取到（接口失败或后端未返回 policy）。</p>

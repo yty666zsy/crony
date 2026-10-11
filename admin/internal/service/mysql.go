@@ -44,6 +44,12 @@ func RegisterTables(db *gorm.DB) error {
 		// request_id 上有唯一索引：一次探测一条记录，可作为证据定位回溯
 		// （证据 ref 形如 node_probe:<request_id>）。
 		models.NodeProbeRequest{},
+		// 阶段 4（写动作与审批）：工具调用审计（append-only）+ 审批单。
+		// 审计表 session_id/decision/tool 建索引：复盘就是按这三个维度捞行；
+		// 审批表 approval_id 唯一 + status/expires_at 索引：状态迁移用 CAS 更新，
+		// "一个审批单至多执行一次"依赖状态机的原子迁移而不是应用层判断。
+		models.AgentToolAudit{},
+		models.ApprovalRequest{},
 	)
 	if err != nil {
 		return errors.Wrap(err, "register table failed")

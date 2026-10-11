@@ -299,8 +299,8 @@ func TestRunInspectBudgetIsPerRunNotPerProcess(t *testing.T) {
 		t.Fatalf("装配运行时失败: %v", err)
 	}
 
-	first := llm.TrackerFromContext(rt.runContext(context.Background()))
-	second := llm.TrackerFromContext(rt.runContext(context.Background()))
+	first := llm.TrackerFromContext(rt.runContext(context.Background(), tools.RunMeta{}))
+	second := llm.TrackerFromContext(rt.runContext(context.Background(), tools.RunMeta{}))
 	if first == nil || second == nil {
 		t.Fatal("入口层必须把记账器绑进 ctx（否则会退回进程级预算）")
 	}

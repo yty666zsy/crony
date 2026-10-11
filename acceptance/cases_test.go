@@ -149,7 +149,7 @@ func TestAcceptanceSuite(t *testing.T) {
 		cc.note("正确口令 token 长度 %d；错误口令 HTTP %d/code %d", len(c.token), status, env.Code)
 	})
 
-	run("AC-03", "工具能力面：只读白名单与配额来自后端注册表", func(cc *caseCtx) {
+	run("AC-03", "工具能力面：只读白名单、风险声明与配额来自后端注册表", func(cc *caseCtx) {
 		data, err := c.postOK("/agent/tool/list", map[string]any{})
 		if err != nil {
 			cc.t.Fatal(err)
@@ -161,7 +161,11 @@ func TestAcceptanceSuite(t *testing.T) {
 			name := asStr(m["name"])
 			names = append(names, name)
 			if !asBool(m["readonly"]) {
-				cc.t.Fatalf("工具 %s 的 readonly 不是 true：阶段 2/3 不应注册写工具", name)
+				cc.t.Fatalf("工具 %s 的 readonly 不是 true：默认部署（allow-write=false）不应注册写工具", name)
+			}
+			// 阶段 4：只读工具必须显式声明风险级别（缺字段说明视图层退回硬编码了）
+			if got := asStr(m["risk"]); got != "read" {
+				cc.t.Fatalf("工具 %s 的 risk 应为 read，实际 %q（缺字段/取值错误都说明风险声明没走注册表）", name, got)
 			}
 		}
 		sort.Strings(names)
@@ -173,9 +177,21 @@ func TestAcceptanceSuite(t *testing.T) {
 		if asNum(policy["max_calls_per_session"]) <= 0 {
 			cc.t.Fatal("缺少 max_calls_per_session 配额")
 		}
-		cc.note("%d 个工具（全部只读）: %s；max_calls_per_session=%v max_output_bytes=%v sql_max_rows=%v",
-			len(names), strings.Join(names, ","),
-			policy["max_calls_per_session"], policy["max_output_bytes"], policy["sql_max_rows"])
+		// 阶段 4 契约：策略视图必须暴露风险/自治/审批相关字段，且默认**关着**
+		if asBool(policy["allow_write"]) || asBool(policy["allow_destructive"]) {
+			cc.t.Fatalf("默认部署不得放开写动作：allow_write=%v allow_destructive=%v",
+				policy["allow_write"], policy["allow_destructive"])
+		}
+		if got := asStr(policy["autonomy"]); got != "L1" {
+			cc.t.Fatalf("默认自治级别应为 L1（写动作一律人工审批），实际 %q", got)
+		}
+		if asNum(policy["approval_ttl_seconds"]) <= 0 || asNum(policy["max_concurrent_calls"]) <= 0 ||
+			asNum(policy["max_calls_per_minute"]) <= 0 {
+			cc.t.Fatalf("策略视图缺少阶段 4 的速率/并发/审批字段: %v", policy)
+		}
+		cc.note("%d 个工具（全部只读且 risk=read）: %s；autonomy=%v allow_write=%v max_calls_per_session=%v sql_max_rows=%v ttl=%vs",
+			len(names), strings.Join(names, ","), policy["autonomy"], policy["allow_write"],
+			policy["max_calls_per_session"], policy["sql_max_rows"], policy["approval_ttl_seconds"])
 	})
 
 	run("AC-04", "会话检索：分页可用且条目含控制台契约字段", func(cc *caseCtx) {
@@ -642,5 +658,184 @@ func TestAcceptanceSuite(t *testing.T) {
 		}
 		cc.note("%d 个契约字段齐全；tool_stats=%v；per_tool 计数与 calls 自洽（合计 %d）；budget=%v",
 			len(required), stats, sum, asMap(detail["budget"]))
+	})
+
+	// ---------- 阶段 4：工具审计 ----------
+
+	run("AC-16", "工具调用审计落库：每次调用一行事实（含被拒的），且能追到会话/运行", func(cc *caseCtx) {
+		if db == nil {
+			cc.skip("未提供 CRONY_TEST_MYSQL_DSN：审计表核查需要只读 SQL 通道")
+		}
+		// 表必须存在且可读——这条在**任何分支**下都要成立，
+		// 否则"没有审计行"可能只是因为表根本没建（把缺陷伪装成"本轮没调工具"）。
+		var tableCount int
+		if err := db.QueryRow("select count(*) from information_schema.tables " +
+			"where table_schema = database() and table_name = 'agent_tool_audit'").Scan(&tableCount); err != nil {
+			cc.t.Fatalf("检查 agent_tool_audit 是否存在失败: %v", err)
+		}
+		if tableCount == 0 {
+			cc.t.Fatal("agent_tool_audit 表不存在：AutoMigrate 未包含审计表，工具调用不可能留痕")
+		}
+
+		// 本套件自己产生的两个会话：AC-07 诊断会话 + AC-10 起草会话。
+		// 审计事实必须能追到**具体会话**，而不是只能查全库最近若干行。
+		// 注意：AC-16 允许单独运行（`-run TestAcceptanceSuite/AC-16`），
+		// 此时没有会话——不跳过，直接走下面的"主动触发"分支，保证这条用例自给自足。
+		sessions := make([]string, 0, 3)
+		if lastSession != "" {
+			sessions = append(sessions, lastSession)
+		}
+		if lastDraftSession != "" {
+			sessions = append(sessions, lastDraftSession)
+		}
+
+		// 会话视角的汇总（tool_stats）与"每次调用一行的事实"必须一致：
+		// 只有汇总没有事实，事后无法回答"到底哪一次调用被哪道闸拦了"。
+		totalCalls := 0
+		for _, sid := range sessions {
+			detail, err := c.postOK("/agent/session/find", map[string]any{"session_id": sid})
+			if err != nil {
+				// 会话可能因 AC-10 的清理而消失：单条取不到不影响整体判定
+				cc.note("会话 %s 详情取不到（%v），跳过其 calls 口径", sid, err)
+				continue
+			}
+			totalCalls += int(asNum(asMap(detail["tool_stats"])["calls"]))
+		}
+
+		type auditRow struct {
+			sessionID, tool, decision, reason, kind, runID string
+			errMsg                                         string
+			ok                                             bool
+			created, createdMS                             int64
+		}
+		const auditCols = "select session_id, tool, decision, reason, agent_kind, run_id, ok, err, created, created_ms " +
+			"from agent_tool_audit where session_id in ("
+		// 占位符数量必须跟着**实际查询的会话数**走：写死成初始 len(sessions) 会让
+		// "主动触发"那次查询参数个数不匹配而静默拿不到行（错误被忽略 → 用例误判成链路断了）。
+		auditQuery := func(ids []string) (string, []any) {
+			q := auditCols
+			args := make([]any, 0, len(ids))
+			for i, sid := range ids {
+				if i > 0 {
+					q += ","
+				}
+				q += "?"
+				args = append(args, sid)
+			}
+			return q + ") order by id asc", args
+		}
+
+		var got []auditRow
+		loadRows := func(ids []string) error {
+			if len(ids) == 0 {
+				return nil
+			}
+			q, args := auditQuery(ids)
+			sqlRows, err := db.Query(q, args...)
+			if err != nil {
+				return err
+			}
+			defer sqlRows.Close()
+			for sqlRows.Next() {
+				var r auditRow
+				if err := sqlRows.Scan(&r.sessionID, &r.tool, &r.decision, &r.reason, &r.kind, &r.runID, &r.ok, &r.errMsg, &r.created, &r.createdMS); err != nil {
+					return err
+				}
+				if r.sessionID != "" {
+					got = append(got, r)
+				}
+			}
+			return sqlRows.Err()
+		}
+		if err := loadRows(sessions); err != nil {
+			cc.t.Fatalf("查询 agent_tool_audit 失败: %v", err)
+		}
+
+		// 模型行为不可控：本轮会话恰好一次工具都没调时，"审计无行"是**正确**结果。
+		// 但直接 SKIP 等于把"审计链路是否真的在工作"永远挂在模型心情上，
+		// 所以这里再**主动触发**：造一条"信息量极低"的 run（只有退出码、无步骤无日志，
+		// 见 provisionBareRunFixture 的注释），逼诊断 Agent 去节点上取证。
+		// 最多试 2 次（换 run、换说法）——重试封顶，不做"烧 token 抽卡"。
+		provoked, provokedCalls := "", 0
+		provokeGoals := []string{
+			"诊断任务[验收诊断取证夹具]（id=910007）本次运行失败的原因；" +
+				"记录里只有『命令退出码 1』，没有步骤与日志 —— 请在目标节点上实际取证" +
+				"（node_probe / node_status / log_search），不要凭猜测断言",
+			"按巡检流程排查任务 910007 为何失败：先用 node_status 看目标节点是否在线与资源水位，" +
+				"再用 node_probe 确认 13307 端口是否在监听，必要时用 log_search 查日志；" +
+				"没有证据就不要下结论",
+		}
+		for attempt := 1; attempt <= len(provokeGoals) && len(got) == 0 && totalCalls == 0 && db != nil; attempt++ {
+			bare := provisionBareRunFixtureN(t, db, attempt)
+			resp, err := c.postOK("/agent/diagnosis/run", map[string]any{
+				"run_id": bare, "force": true, "goal": provokeGoals[attempt-1],
+			})
+			if err != nil {
+				cc.note("第 %d 次主动触发诊断失败（不影响审计判定）：%v", attempt, err)
+				continue
+			}
+			provoked = asStr(resp["session_id"])
+			if provoked == "" {
+				continue
+			}
+			sessions = append(sessions, provoked)
+			if detail, err := c.postOK("/agent/session/find", map[string]any{"session_id": provoked}); err == nil {
+				provokedCalls = int(asNum(asMap(detail["tool_stats"])["calls"]))
+			}
+			totalCalls += provokedCalls
+			if err := loadRows([]string{provoked}); err != nil {
+				cc.t.Fatalf("查询主动触发会话的审计行失败: %v", err)
+			}
+			cc.note("第 %d 次主动触发：会话 %s，工具调用 %d 次，审计事实 %d 行",
+				attempt, provoked, provokedCalls, len(got))
+		}
+		if len(got) == 0 {
+			if totalCalls == 0 {
+				cc.skip("本轮会话（含 %d 次主动触发）都没有发生工具调用（tool_stats.calls=0）："+
+					"审计链路无法从黑盒侧触发；该链路由真库集成测试 common/pkg/agentruntime/audit_mysql_test.go 覆盖",
+					len(sessions))
+			}
+			cc.t.Fatalf("会话统计 reports calls=%d，但 agent_tool_audit 里没有对应事实行——审计链路断了", totalCalls)
+		}
+		if provoked != "" {
+			cc.note("原会话未调工具；主动触发无证据诊断会话 %s（calls=%d）后拿到审计事实", provoked, provokedCalls)
+		}
+
+		// 每条事实都必须自洽：决策必填、原因在"非放行"时必须写明、时间双口径非零
+		for _, r := range got {
+			if r.tool == "" || r.decision == "" {
+				cc.t.Fatalf("审计行缺少 tool/decision: %+v", r)
+			}
+			if r.sessionID == "" || r.kind == "" {
+				cc.t.Fatalf("审计行必须能追到会话与场景（session_id/agent_kind 不得为空）: %+v", r)
+			}
+			switch r.decision {
+			case "allowed", "approval_executed":
+				// 放行 + 执行失败是**正常事实**（工具本身报错、命令不存在等），
+				// 但它必须留下可诊断的原因（reason 或 err 至少有一个非空）；
+				// 两者都空才是缺陷：审计会变成"某次调用失败了，但没人知道为什么"。
+				// 这条断言最初写反了（把"有原因"当成失败），是 AC-16 自己在
+				// 真机第一次抓到"allowed + 执行失败"的行时暴露出来的。
+				if !r.ok && r.reason == "" && r.errMsg == "" {
+					cc.t.Fatalf("放行但执行失败的行必须写明失败原因（reason/err 至少一个非空）: %+v", r)
+				}
+			case "denied", "approval_required":
+				if r.reason == "" {
+					cc.t.Fatalf("被拦/转审批的行必须写明原因（哪道闸）: %+v", r)
+				}
+			default:
+				cc.t.Fatalf("未知决策取值 %q（前端审计面板会渲染不出来）", r.decision)
+			}
+			if r.created <= 0 || r.createdMS <= 0 {
+				cc.t.Fatalf("审计行时间必须双口径非零: %+v", r)
+			}
+		}
+		// 事实数量与汇总数量要对得上（被拒调用不计入 calls，所以是 >= 而不是 ==）
+		if len(got) < totalCalls {
+			cc.t.Fatalf("审计事实行数（%d）少于会话统计的 calls（%d）：有调用没有落痕", len(got), totalCalls)
+		}
+		cc.note("%d 行审计事实（%d 个会话、calls 合计 %d）；首行 session=%s tool=%s decision=%s ok=%v reason=%s err=%s kind=%s run=%s",
+			len(got), len(sessions), totalCalls, got[0].sessionID, got[0].tool, got[0].decision,
+			got[0].ok, truncate(got[0].reason, 40), truncate(got[0].errMsg, 60), got[0].kind, got[0].runID)
 	})
 }

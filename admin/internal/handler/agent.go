@@ -282,10 +282,9 @@ func (a *AgentRouter) ToolList(c *gin.Context) {
 		return
 	}
 	reg := rt.Agent().Registry()
-	specs := reg.Specs()
 	policy := reg.Policy()
 	resp.OkWithData(gin.H{
-		"tools":  toolViews(specs, policy),
+		"tools":  toolViews(reg, policy),
 		"policy": toolPolicyView(policy),
 	}, c)
 }

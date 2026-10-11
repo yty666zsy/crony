@@ -180,12 +180,21 @@ check('§3.2 触发诊断：force=false 幂等、force=true 新增会话', async
 check('§4 只读工具清单与配额', async () => {
   const r = await api.listAgentTools()
   assert.ok(r.tools.length >= 3, '工具清单非空')
-  assert.ok(r.tools.every((t) => t.readonly === true), '阶段 2 工具必须全部只读')
+  assert.ok(r.tools.every((t) => t.readonly === true), '默认部署（allow-write=false）工具必须全部只读')
+  assert.ok(r.tools.every((t) => t.risk === 'read'), '每个工具必须显式声明 risk=read（不能靠前端猜）')
   for (const t of r.tools) {
-    for (const k of ['name', 'description', 'readonly', 'timeout_ms', 'schema']) assert.ok(k in t, `工具缺少 ${k}`)
+    for (const k of ['name', 'description', 'readonly', 'risk', 'timeout_ms', 'schema']) assert.ok(k in t, `工具缺少 ${k}`)
   }
   for (const k of ['max_calls_per_session', 'max_calls_per_tool', 'max_output_bytes', 'sql_max_rows', 'allow_hosts', 'shell_read_paths']) {
     assert.ok(k in r.policy, `policy 缺少 ${k}`)
+  }
+  // 阶段 4：策略必须把"风险开关"也暴露出来，且默认关着
+  assert.equal(r.policy.allow_write, false, '默认不得放开写动作')
+  assert.equal(r.policy.allow_destructive, false, '默认不得放开不可逆动作')
+  assert.equal(r.policy.autonomy, 'L1', '默认自治级别应为 L1')
+  assert.ok(r.policy.approval_ttl_seconds > 0, '策略必须给出审批有效期')
+  for (const k of ['max_calls_per_minute', 'max_concurrent_calls', 'max_write_actions_per_session', 'max_affected_hosts_per_session', 'auto_approve', 'deny']) {
+    assert.ok(k in r.policy, `policy 缺少阶段 4 字段 ${k}`)
   }
 })
 
