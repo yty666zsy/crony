@@ -178,11 +178,18 @@ func (g *Gateway) providerFor(name string) (Provider, error) {
 //     或者直接把"证据不足"作为结论输出；
 //   - 本次调用超预算（Charge 报错）但已经成功时，**仍然返回成功结果**，
 //     由下一次 Check 拦截，避免"明明拿到了答案却丢掉"。
+//   - **预算按 ctx 绑定**：优先用 `ContextWithTracker` 注入的记账器（一次 Agent 运行一个），
+//     没有绑定时才回退到网关自身的 tracker（测试/单次调用场景）。
+//     这条纠正了"进程级预算"的真实缺陷：见 budget.go 中 Tracker 的说明。
 func (g *Gateway) Complete(ctx context.Context, req Request) (Completion, error) {
 	if g == nil {
 		return Completion{}, retry.Fatal(fmt.Errorf("%w: gateway 未初始化", ErrNotConfigured))
 	}
-	if err := g.tracker.Check(); err != nil {
+	tr := TrackerFromContext(ctx)
+	if tr == nil {
+		tr = g.tracker
+	}
+	if err := tr.Check(); err != nil {
 		g.observe(CallRecord{PromptVersion: req.PromptVersion, OK: false, Err: err.Error(), Metadata: req.Metadata})
 		return Completion{}, err
 	}
@@ -214,12 +221,12 @@ func (g *Gateway) Complete(ctx context.Context, req Request) (Completion, error)
 		record.OK = false
 		record.Err = Redact(callErr.Error())
 		// 失败的调用同样消耗了配额（429/超时都算），必须记账
-		_ = g.tracker.Charge(comp.Usage, latency)
+		_ = tr.Charge(comp.Usage, latency)
 		g.observe(record)
 		return comp, callErr
 	}
 
-	chargeErr := g.tracker.Charge(comp.Usage, latency)
+	chargeErr := tr.Charge(comp.Usage, latency)
 
 	if req.ResponseSchema != nil {
 		structured, verr := ValidateStructured(req.ResponseSchema, comp.Content)

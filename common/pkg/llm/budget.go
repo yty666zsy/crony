@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -53,7 +54,15 @@ type BudgetSnapshot struct {
 	Reason           string        `json:"reason,omitempty"`
 }
 
-// Tracker 预算记账器（并发安全：一个 Gateway 可能被多个会话共用）。
+// Tracker 预算记账器（并发安全）。
+//
+// ⚠️ 语义纠偏（2026-10-11 真实联调发现）：**预算是"一次 Agent 运行/一个会话"的，
+// 不是"一个进程"的。** 早期实现把 Tracker 挂在 Gateway 上、网关又是进程级单例，
+// 于是 `max-calls-per-session=8` 变成"整个 admin 进程一共只能调 8 次"，
+// `max-duration-seconds=300` 变成"admin 启动 5 分钟后 Agent 永久不可用"——
+// 实测表现：`force=true` 重诊断第一次报 "会话时长已达上限 5m0s"，
+// 第二次起每次调用都失败，而重启 admin 又"好了"。
+// 现在由入口层用 ContextWithTracker 为每次运行绑定独立记账器（见 gateway.Complete）。
 type Tracker struct {
 	mu         sync.Mutex
 	budget     Budget
@@ -65,6 +74,28 @@ type Tracker struct {
 	exceeded   bool
 	reason     string
 	now        func() time.Time
+}
+
+// trackerCtxKey 上下文键（私有类型，避免与其他包的键冲突）。
+type trackerCtxKey struct{}
+
+// ContextWithTracker 把记账器绑定到 ctx，供本次运行内的所有模型调用共用。
+func ContextWithTracker(ctx context.Context, t *Tracker) context.Context {
+	if ctx == nil || t == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, trackerCtxKey{}, t)
+}
+
+// TrackerFromContext 取出绑定的记账器；没有绑定返回 nil（调用方回退到网关默认）。
+func TrackerFromContext(ctx context.Context) *Tracker {
+	if ctx == nil {
+		return nil
+	}
+	if t, ok := ctx.Value(trackerCtxKey{}).(*Tracker); ok {
+		return t
+	}
+	return nil
 }
 
 // NewTracker 创建记账器。

@@ -274,3 +274,56 @@ func TestReadonlySQLSourceGuard(t *testing.T) {
 		})
 	}
 }
+
+// TestRunInspectBudgetIsPerRunNotPerProcess 锁定"进程级预算"缺陷（2026-10-11 联调发现）。
+//
+// 缺陷原状：Gateway 是进程级单例、Tracker 挂在网关上，于是
+// `max-calls-per-session=1` 实际含义变成"整个 admin 进程只能调 1 次模型"，
+// 第二次巡检/诊断起必然报 "调用次数已达上限"，而重启 admin 又会"恢复正常"。
+//
+// 为什么这里只验证"入口层确实绑定了独立记账器"，而不是连跑 3 次巡检：
+// 离线 provider 的脚本是**跨运行共享的队列**（`FakeProvider.idx`），
+// 脚本用完后回一句固定收尾文本，第 2 次巡检会因为"输出不是 JSON"进入修复轮，
+// 与预算语义纠缠在一起，断言会变成在测假 provider 的队列行为。
+// 因此：
+//   - 这里验证 `runContext` 每次给出**独立且带配置额度**的记账器（入口层接线）；
+//   - 端到端语义（网关级配额被耗光不影响后续运行、trace 快照按运行计数）
+//     由 `common/pkg/agent/agent_budget_test.go` 用可控 responder 覆盖。
+func TestRunInspectBudgetIsPerRunNotPerProcess(t *testing.T) {
+	cfg := offlineConfig("", validInspection)
+	cfg.MaxCallsPerSession = 2
+	cfg.MaxTokensPerSession = 0 // 离线 provider 无 usage，避免 token 闸门干扰
+	cfg.MaxDurationSeconds = 0  // 时长闸门单独由 llm 包用例覆盖
+	rt, err := New(Options{Config: cfg})
+	if err != nil {
+		t.Fatalf("装配运行时失败: %v", err)
+	}
+
+	first := llm.TrackerFromContext(rt.runContext(context.Background()))
+	second := llm.TrackerFromContext(rt.runContext(context.Background()))
+	if first == nil || second == nil {
+		t.Fatal("入口层必须把记账器绑进 ctx（否则会退回进程级预算）")
+	}
+	if first == second {
+		t.Fatal("两次运行必须绑定不同记账器——相同就意味着额度被进程共享")
+	}
+	if got := first.Snapshot().Budget.MaxCalls; got != 2 {
+		t.Fatalf("绑定记账器的额度应来自配置（max-calls-per-session=2），实际 %d", got)
+	}
+
+	// 把第一个记账器用满后，新运行的记账器仍然完好（这正是缺陷的观测点）。
+	for i := 0; i < 2; i++ {
+		if err := first.Charge(llm.Usage{}, 0); err != nil && i == 0 {
+			t.Fatalf("第 1 次记账不该报错: %v", err)
+		}
+	}
+	if err := first.Check(); err == nil {
+		t.Fatal("前置条件：第一个记账器用满后应已耗尽")
+	}
+	if err := second.Check(); err != nil {
+		t.Fatalf("新运行的记账器不该被上一次运行拖累: %v", err)
+	}
+	if got := second.Snapshot().Calls; got != 0 {
+		t.Fatalf("新运行应从未用额度开始，实际 calls=%d", got)
+	}
+}

@@ -201,17 +201,17 @@ func (a *Agent) Run(ctx context.Context, in Input, schema *jsonschema.Schema) (O
 	if a.gateway == nil || !a.gateway.HasProvider() {
 		out.StopReason = StopNoProvider
 		out.Err = fmt.Errorf("%w: 请在配置的 llm 段落里启用 provider", ErrNoProvider)
-		return a.finish(out, trace)
+		return a.finish(ctx, out, trace)
 	}
 	if schema == nil {
 		out.StopReason = StopSchemaInvalid
 		out.Err = fmt.Errorf("%w: 场景未提供输出 Schema", ErrSchemaInvalid)
-		return a.finish(out, trace)
+		return a.finish(ctx, out, trace)
 	}
 	if err := schema.Valid(); err != nil {
 		out.StopReason = StopSchemaInvalid
 		out.Err = fmt.Errorf("%w: 场景提供的 Schema 本身不合法: %v", ErrSchemaInvalid, err)
-		return a.finish(out, trace)
+		return a.finish(ctx, out, trace)
 	}
 
 	var specs []llm.ToolSpec
@@ -235,7 +235,7 @@ func (a *Agent) Run(ctx context.Context, in Input, schema *jsonschema.Schema) (O
 		if err := ctx.Err(); err != nil {
 			out.StopReason = StopCanceled
 			out.Err = fmt.Errorf("%w: 运行被取消", retry.ErrCanceled)
-			return a.finish(out, trace)
+			return a.finish(ctx, out, trace)
 		}
 
 		req := llm.Request{
@@ -251,7 +251,7 @@ func (a *Agent) Run(ctx context.Context, in Input, schema *jsonschema.Schema) (O
 		a.emit(Step{Kind: StepModel, Provider: comp.Provider, Model: comp.Model, LatencyMS: comp.Latency.Milliseconds(), Err: errString(err)})
 		if err != nil {
 			out.StopReason, out.Err = classifyRunError(err)
-			return a.finish(out, trace)
+			return a.finish(ctx, out, trace)
 		}
 		trace.mu.Lock()
 		trace.ModelCalls++
@@ -271,7 +271,7 @@ func (a *Agent) Run(ctx context.Context, in Input, schema *jsonschema.Schema) (O
 				out.Structured = obj
 				out.Raw = llm.Truncate(comp.Content, cfg.MaxContentBytes)
 				out.StopReason = StopCompleted
-				return a.finish(out, trace)
+				return a.finish(ctx, out, trace)
 			}
 			if out.Repairs < cfg.MaxRepair {
 				out.Repairs++
@@ -285,7 +285,7 @@ func (a *Agent) Run(ctx context.Context, in Input, schema *jsonschema.Schema) (O
 			out.Raw = llm.Truncate(comp.Content, cfg.MaxContentBytes)
 			out.StopReason = StopSchemaInvalid
 			out.Err = fmt.Errorf("%w: %v", ErrSchemaInvalid, verr)
-			return a.finish(out, trace)
+			return a.finish(ctx, out, trace)
 		}
 
 		// 有工具调用 → 执行（只读），把观测回灌。
@@ -293,7 +293,7 @@ func (a *Agent) Run(ctx context.Context, in Input, schema *jsonschema.Schema) (O
 			if toolCallsUsed >= cfg.MaxToolCalls {
 				out.StopReason = StopToolBudget
 				out.Err = fmt.Errorf("%w: 已用 %d 次", ErrToolBudget, toolCallsUsed)
-				return a.finish(out, trace)
+				return a.finish(ctx, out, trace)
 			}
 			toolCallsUsed++
 			observation, res, callErr := a.callTool(ctx, in.SessionID, tc, cfg)
@@ -316,13 +316,13 @@ func (a *Agent) Run(ctx context.Context, in Input, schema *jsonschema.Schema) (O
 		if ctx.Err() != nil {
 			out.StopReason = StopCanceled
 			out.Err = fmt.Errorf("%w: 运行被取消", retry.ErrCanceled)
-			return a.finish(out, trace)
+			return a.finish(ctx, out, trace)
 		}
 	}
 
 	out.StopReason = StopMaxSteps
 	out.Err = fmt.Errorf("%w: 已用 %d 步", ErrMaxSteps, cfg.MaxSteps)
-	return a.finish(out, trace)
+	return a.finish(ctx, out, trace)
 }
 
 // StopStopInvalidSchema 返回"场景参数不合法"的终止原因。
@@ -330,13 +330,19 @@ func (a *Agent) Run(ctx context.Context, in Input, schema *jsonschema.Schema) (O
 func StopStopInvalidSchema() StopReason { return StopSchemaInvalid }
 
 // finish 收尾：填充轨迹尾部信息、快照预算与工具统计、执行回调。
-func (a *Agent) finish(out Outcome, trace *Trace) (Outcome, error) {
+func (a *Agent) finish(ctx context.Context, out Outcome, trace *Trace) (Outcome, error) {
 	trace.mu.Lock()
 	trace.FinishedAt = time.Now()
 	trace.StopReason = out.StopReason
 	trace.StopExplain = out.StopReason.Explain()
 	if a.gateway != nil {
-		if tracker := a.gateway.Tracker(); tracker != nil {
+		// 预算快照取**本次运行**的记账器（ctx 绑定），没有绑定才回退到网关默认。
+		// 进程级默认记账器会让"这次会话花了多少"显示成"整个进程花了多少"。
+		tracker := llm.TrackerFromContext(ctx)
+		if tracker == nil {
+			tracker = a.gateway.Tracker()
+		}
+		if tracker != nil {
 			trace.Budget = tracker.Snapshot()
 		}
 	}
