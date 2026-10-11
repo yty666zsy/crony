@@ -9,6 +9,7 @@ import (
 
 	"github.com/tmnhs/crony/common/models"
 	"github.com/tmnhs/crony/common/pkg/agent"
+	"github.com/tmnhs/crony/common/pkg/dbclient"
 	"github.com/tmnhs/crony/common/pkg/llm"
 	"github.com/tmnhs/crony/common/pkg/tools"
 )
@@ -70,7 +71,13 @@ func TestNewRejectsUnconfigured(t *testing.T) {
 
 // TestRunInspectOfflineNoDB：离线 provider 下整条链路可跑通；
 // 没有数据库时会话落库失败，但**必须**在结果里显式暴露，而不是假装已回放。
+//
+// 注意：本用例断言的是"无数据库"这一环境状态。带 -tags integration 并用真实 MySQL 跑时，
+// 同包的集成测试会先调用 dbclient.Init（全局单例），此时本用例不再成立，必须跳过而不是失败。
 func TestRunInspectOfflineNoDB(t *testing.T) {
+	if dbclient.GetMysqlDB() != nil {
+		t.Skip("当前进程已初始化数据库（集成模式），跳过\"无库\"用例")
+	}
 	rt, err := New(Options{Config: offlineConfig("", validInspection)})
 	if err != nil {
 		t.Fatalf("离线配置应能装配: %v", err)
@@ -234,7 +241,11 @@ func TestLoadRunContextRejectsEmptyRunID(t *testing.T) {
 }
 
 // TestLoadRunContextWithoutDB：未初始化数据库时必须是可读错误（不能 panic）。
+// 同 TestRunInspectOfflineNoDB：集成模式下数据库已初始化，本用例前提不成立，跳过。
 func TestLoadRunContextWithoutDB(t *testing.T) {
+	if dbclient.GetMysqlDB() != nil {
+		t.Skip("当前进程已初始化数据库（集成模式），跳过\"无库\"用例")
+	}
 	_, err := LoadRunContext("j7-t100")
 	if err == nil {
 		t.Fatal("无数据库时应报错")

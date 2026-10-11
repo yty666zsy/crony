@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tmnhs/crony/common/pkg/jsonschema"
 )
@@ -207,9 +208,25 @@ func Redact(s string) string {
 }
 
 // Truncate 截断长文本（提示词/响应可能很大，落库前统一收口）。
+//
+// limit 是**字节**预算，但必须回退到 UTF-8 字符边界：
+// 直接 `s[:limit]` 会把中文/emoji 从中间砍断，产生非法 UTF-8 字节序列。
+// 后果不是"看起来乱码"而是**整行写不进去**——MySQL 的 utf8mb4 列会直接
+// `Error 1366 Incorrect string value` 拒绝插入（真实事故：Agent 轨迹的
+// prompt_preview 被砍断，导致每次诊断都"会话落库成功但步骤全失败"，
+// 前端只表现为回放里没有步骤）。内存单测不校验字符集，只有真库能抓出来。
 func Truncate(s string, limit int) string {
 	if limit <= 0 || len(s) <= limit {
 		return s
 	}
-	return s[:limit] + fmt.Sprintf("…[已截断 %d 字节]", len(s)-limit)
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	suffix := fmt.Sprintf("…[已截断 %d 字节]", len(s)-cut)
+	if cut <= 0 {
+		// 预算连一个字符都装不下：宁可不留原文，也不能留半个字符。
+		return suffix
+	}
+	return s[:cut] + suffix
 }

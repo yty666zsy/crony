@@ -82,10 +82,12 @@ func (s *AgentSession) TableName() string { return CronyAgentSessionTableName }
 type AgentStep struct {
 	ID        int64  `json:"id" gorm:"column:id;primary_key;auto_increment"`
 	SessionID string `json:"session_id" gorm:"size:128;column:session_id;not null;index:idx_agent_step_session,priority:1"`
-	Seq       int    `json:"seq" gorm:"column:seq;not null;index:idx_agent_step_session,priority:2"`
-	Kind      string `json:"kind" gorm:"size:16;column:kind;not null"`
-	Provider  string `json:"provider" gorm:"size:64;column:provider"`
-	Model     string `json:"model" gorm:"size:64;column:model"`
+	// Seq 与内核 agent.Step.Index 一致，**从 0 开始**（与 job_run_step.step_index 同口径）。
+	// 不要在这里改成 1 起：两处口径不一致会让"第几步失败"对不上。
+	Seq      int    `json:"seq" gorm:"column:seq;not null;index:idx_agent_step_session,priority:2"`
+	Kind     string `json:"kind" gorm:"size:16;column:kind;not null"`
+	Provider string `json:"provider" gorm:"size:64;column:provider"`
+	Model    string `json:"model" gorm:"size:64;column:model"`
 	// PromptPreview 提示词预览（截断），完整内容在 agent_session.trace_json。
 	PromptPreview string `json:"prompt_preview" gorm:"type:text;column:prompt_preview"`
 	PromptBytes   int    `json:"prompt_bytes" gorm:"column:prompt_bytes;default:0"`
@@ -132,21 +134,113 @@ func (q *AgentSessionQuery) normalize() {
 }
 
 // Insert 落库一条会话。
+//
+// 先做长度校验再写库：gorm 的 size tag 只在建表时生效，**插入时不校验**，
+// 超出长度的值要等 MySQL 严格模式返回 `Error 1406 Data too long for column 'xxx'` 才知道，
+// 而那条错误既看不出是哪一步写错的，也只在有真库时才会出现。
+// 真实事故：调用方把 131 字符的系统提示词全文当成 `prompt_version`（varchar(64)）传入，
+// 在没有数据库的单元测试里全绿，一上真库则**每次诊断都落库失败**。
+// 这里把它变成一条可读的、无需数据库就能触发的错误。
 func (s *AgentSession) Insert() (int64, error) {
+	if err := s.Validate(); err != nil {
+		return 0, err
+	}
 	err := dbclient.GetMysqlDB().Table(CronyAgentSessionTableName).Create(s).Error
 	return s.ID, err
+}
+
+// MaxSystemPromptRunes 是 system_prompt（varchar(4096)）的容量上限，
+// 留出余量避免"刚好等于列宽"时因字符集差异被拒。
+const MaxSystemPromptRunes = 4000
+
+// agentSessionLimits 列宽（字符数）与字段名，与 struct tag 一一对应。
+// 只列短列：长文本列（text/longtext）容量足够，不在这里挡。
+var agentSessionLimits = []struct {
+	Field string
+	Value string
+	Max   int
+}{
+	{"session_id", "", 128},
+	{"kind", "", 32},
+	{"run_id", "", 128},
+	{"node_uuid", "", 128},
+	{"goal", "", 1024},
+	{"status", "", 32},
+	{"stop_reason", "", 32},
+	{"provider", "", 64},
+	{"model", "", 64},
+	{"prompt_version", "", 64},
+	{"system_prompt", "", 4096},
+}
+
+// Validate 校验短列长度（插入前调用）。
+func (s *AgentSession) Validate() error {
+	if s == nil {
+		return fmt.Errorf("agent 会话为空")
+	}
+	if strings.TrimSpace(s.SessionID) == "" {
+		return fmt.Errorf("session_id 不能为空")
+	}
+	values := map[string]string{
+		"session_id": s.SessionID, "kind": s.Kind, "run_id": s.RunID,
+		"node_uuid": s.NodeUUID, "goal": s.Goal, "status": s.Status,
+		"stop_reason": s.StopReason, "provider": s.Provider, "model": s.Model,
+		"prompt_version": s.PromptVersion, "system_prompt": s.SystemPrompt,
+	}
+	for _, lim := range agentSessionLimits {
+		v := values[lim.Field]
+		if n := len([]rune(v)); n > lim.Max {
+			return fmt.Errorf("字段 %s 超长：%d 字符 > 列宽 %d（这类值应存到长文本列或先截断）",
+				lim.Field, n, lim.Max)
+		}
+	}
+	return nil
+}
+
+// Insert 落库一个步骤。
+func (s *AgentStep) Insert() (int64, error) {
+	if err := s.Validate(); err != nil {
+		return 0, err
+	}
+	err := dbclient.GetMysqlDB().Table(CronyAgentStepTableName).Create(s).Error
+	return s.ID, err
+}
+
+// Validate 校验步骤短列长度与序号。
+func (s *AgentStep) Validate() error {
+	if s == nil {
+		return fmt.Errorf("agent 步骤为空")
+	}
+	if strings.TrimSpace(s.SessionID) == "" {
+		return fmt.Errorf("步骤的 session_id 不能为空")
+	}
+	if s.Seq < 0 {
+		return fmt.Errorf("步骤序号不能为负，实际 %d", s.Seq)
+	}
+	short := []struct {
+		field string
+		value string
+		max   int
+	}{
+		{"session_id", s.SessionID, 128},
+		{"kind", s.Kind, 16},
+		{"provider", s.Provider, 64},
+		{"model", s.Model, 64},
+		{"tool_name", s.ToolName, 64},
+		{"finish_reason", s.FinishReason, 32},
+	}
+	for _, f := range short {
+		if n := len([]rune(f.value)); n > f.max {
+			return fmt.Errorf("步骤字段 %s 超长：%d 字符 > 列宽 %d", f.field, n, f.max)
+		}
+	}
+	return nil
 }
 
 // FindBySessionID 按 session_id 读取会话。
 func (s *AgentSession) FindBySessionID() error {
 	return dbclient.GetMysqlDB().Table(CronyAgentSessionTableName).
 		Where("session_id = ?", s.SessionID).First(s).Error
-}
-
-// Insert 落库一个步骤。
-func (s *AgentStep) Insert() (int64, error) {
-	err := dbclient.GetMysqlDB().Table(CronyAgentStepTableName).Create(s).Error
-	return s.ID, err
 }
 
 // ListAgentSessions 分页查询会话（新的在前）。

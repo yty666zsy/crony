@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tmnhs/crony/common/pkg/jsonschema"
 	"github.com/tmnhs/crony/common/pkg/retry"
@@ -567,6 +568,44 @@ func TestRedactAndTruncate(t *testing.T) {
 	}
 	if Truncate("short", 100) != "short" {
 		t.Fatal("未超限不应改动")
+	}
+}
+
+// TestTruncateKeepsUTF8Boundary：截断绝不能把多字节字符砍成半个。
+//
+// 为什么必须有这条：Truncate 的返回值会直接写进 MySQL 的 utf8mb4 列
+// （agent_step.prompt_preview / content / observation、job_log.output 等）。
+// 非法 UTF-8 字节序列会被 MySQL 以 `Error 1366 Incorrect string value` 整行拒绝，
+// 表现是"会话落库成功、步骤全部失败"——内存单测不校验字符集，只有真库能抓出来。
+func TestTruncateKeepsUTF8Boundary(t *testing.T) {
+	cases := []string{
+		strings.Repeat("中文提示词", 500),
+		strings.Repeat("嗯", 3000),
+		strings.Repeat("a中b", 999),
+		strings.Repeat("🙂🙃", 800), // 4 字节 emoji
+		"你",                       // 单字符
+	}
+	limits := []int{1, 2, 3, 4, 5, 7, 63, 64, 4000}
+	for _, src := range cases {
+		for _, limit := range limits {
+			got := Truncate(src, limit)
+			if !utf8.ValidString(got) {
+				t.Fatalf("截断结果不是合法 UTF-8（limit=%d, src 前缀=%q）", limit, src[:12])
+			}
+			// 预算含义：保留的原文不超过 limit 字节
+			if body := strings.SplitN(got, "…", 2)[0]; len(body) > limit {
+				t.Fatalf("保留的原文 %d 字节超过预算 %d", len(body), limit)
+			}
+			if limit < len(src) && !strings.Contains(got, "已截断") {
+				t.Fatalf("超限时必须标注截断，实际 %q", got)
+			}
+		}
+	}
+	// limit 连一个字符都装不下时，宁可不留原文
+	if got := Truncate("中文", 1); strings.HasPrefix(got, "\xe4") && !utf8.ValidString(got) {
+		t.Fatalf("预算不足时必须丢弃原文，实际 %q", got)
+	} else if !utf8.ValidString(got) {
+		t.Fatalf("结果必须始终是合法 UTF-8，实际 %q", got)
 	}
 }
 

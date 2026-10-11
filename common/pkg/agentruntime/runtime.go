@@ -154,6 +154,7 @@ func (r *Runtime) RunDiagnosis(ctx context.Context, req DiagnosisRequest) (*Diag
 
 	res := &DiagnosisResult{Diagnosis: out, SessionID: sessionID, Explain: out.Explain()}
 	goalText := fmt.Sprintf("诊断任务[%s]（id=%d）第 %s 次运行失败的原因", orDash(rc.JobName), rc.JobID, orDash(rc.RunID))
+	// 第 7 个参数是**系统提示词全文**（存 system_prompt）；prompt_version 由 trace 提供。
 	if err := r.persist(models.AgentKindDiagnose, out.Trace, out, rc.JobID, rc.RunID, goalText,
 		agent.PromptDiagnoseV1, started); err != nil {
 		res.PersistError = err.Error()
@@ -201,6 +202,7 @@ func (r *Runtime) RunInspect(ctx context.Context, req InspectRequest) (*Inspecti
 		sessionID = out.Trace.SessionID
 	}
 	res := &InspectionResult{Inspection: out, SessionID: sessionID, Explain: out.Explain()}
+	// 同上：传系统提示词全文，版本号由 trace 提供。
 	if perr := r.persist(models.AgentKindJob, out.Trace, out, req.JobID, "", req.Goal,
 		agent.PromptInspectV1, started); perr != nil {
 		res.PersistError = perr.Error()
@@ -247,8 +249,10 @@ func (r *Runtime) RunDraftJob(ctx context.Context, req DraftRequest) (*DraftResu
 	if draft.Trace != nil {
 		res.SessionID = draft.Trace.SessionID
 	}
+	// 这里此前传的是"版本号"（nljob-v1），但该位置现在是系统提示词全文——传错会让
+	// system_prompt 存成 "nljob-v1"，而 §2 的 "system" 字段就永远是假的。故显式传全文。
 	if perr := r.persist(models.AgentKindNLJob, draft.Trace, draft, 0, "", "把自然语言描述翻译成定时任务定义",
-		agent.PromptVersionNLJobV1, started); perr != nil {
+		agent.PromptNLJobV1, started); perr != nil {
 		res.PersistError = perr.Error()
 	}
 	return res, err
@@ -315,7 +319,15 @@ func (r *Runtime) AgentContext(jobID int, jobName, spec, command, extra string) 
 // persist 把一次会话的轨迹与结论落库。
 //
 // 失败不静默：调用方把错误放进响应的 persist_error 字段，前端能显示"这次结论没能回放"。
-func (r *Runtime) persist(kind string, trace *agent.Trace, result interface{}, jobID int, runID, goal, promptVersion string, started time.Time) error {
+// persist 落库一次会话与它的全部步骤。
+//
+// 参数语义（这里曾经出过一个只有真实 MySQL 才会暴露的严重 bug，务必看清）：
+//   - systemPrompt 是**系统提示词全文**（存 system_prompt，varchar(4096)）；
+//   - prompt_version **不再由调用方传入**，而是取自 `trace.PromptVersion`（内核登记过的短标识，
+//     varchar(64)）。此前调用方把 `agent.PromptDiagnoseV1`（131 个字符的提示词全文）当版本号传入，
+//     MySQL 严格模式直接 1406 拒绝整条会话——结果是"每次诊断都落库失败、前端永远回放不了"。
+//     教训：短列（版本号）与长文本（提示词）必须分开来源，不能让调用方靠记忆区分。
+func (r *Runtime) persist(kind string, trace *agent.Trace, result interface{}, jobID int, runID, goal, systemPrompt string, started time.Time) error {
 	if trace == nil {
 		return nil
 	}
@@ -324,6 +336,7 @@ func (r *Runtime) persist(kind string, trace *agent.Trace, result interface{}, j
 	}
 	steps := trace.StepList()
 	warnings := trace.WarningsList()
+	promptVersion := strings.TrimSpace(trace.PromptVersion)
 
 	resultJSON := ""
 	if result != nil {
@@ -370,6 +383,7 @@ func (r *Runtime) persist(kind string, trace *agent.Trace, result interface{}, j
 		DurationMs:    trace.FinishedAt.Sub(trace.StartedAt).Milliseconds(),
 		WarnCount:     len(warnings),
 		EvidenceCount: len(trace.EvidenceList()),
+		SystemPrompt:  llm.Truncate(systemPrompt, models.MaxSystemPromptRunes),
 		WarningsJSON:  warningsJSON,
 		ContextJSON:   contextJSON,
 		TraceJSON:     traceJSON,
