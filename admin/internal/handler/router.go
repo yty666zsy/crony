@@ -81,6 +81,9 @@ func configRoute(r *gin.Engine) {
 			run.GET("find", defaultJobRunRouter.Find)
 			run.POST("steps", defaultJobRunRouter.Steps)
 			run.GET("overview", defaultJobRunRouter.Overview)
+			// 阶段 2 收尾：执行事实订阅（SSE）。轮询语义在服务端，前端只消费推送。
+			// 注意：这是 GET + JWT，浏览器侧必须用 fetch 流式读取（EventSource 不能带 Authorization 头）。
+			run.GET("stream", defaultJobRunRouter.RunStream)
 		}
 	}
 
