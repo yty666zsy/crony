@@ -203,20 +203,24 @@ type agentDiagnosisView struct {
 	EvidenceSufficient bool                    `json:"evidence_sufficient"`
 	NextDataToCollect  []string                `json:"next_data_to_collect"`
 	UnverifiedRefs     []string                `json:"unverified_refs"`
-	Warnings           []string                `json:"warnings"`
-	AdvisoryOnly       bool                    `json:"advisory_only"`
-	Provider           string                  `json:"provider"`
-	Model              string                  `json:"model"`
-	PromptVersion      string                  `json:"prompt_version"`
-	StopReason         string                  `json:"stop_reason"`
-	StopReasonText     string                  `json:"stop_reason_text"`
-	DurationMS         int64                   `json:"duration_ms"`
-	ToolCalls          int                     `json:"tool_calls"`
-	TotalTokens        int                     `json:"total_tokens"`
-	SessionID          string                  `json:"session_id"`
-	RunID              string                  `json:"run_id"`
-	Created            string                  `json:"created"`
-	Explain            string                  `json:"explain"`
+	// UnverifiedNodeClaims 结论句里"本应观测却靠推测"的节点侧断言类型。
+	// 与 unverified_refs 并列但不相同：后者是引用了假 ref，前者是 ref 全真但结论越界
+	// （例如断言"端口未监听"，而本次运行没有任何节点侧观测）。前端应同样高亮展示。
+	UnverifiedNodeClaims []string `json:"unverified_node_claims"`
+	Warnings             []string `json:"warnings"`
+	AdvisoryOnly         bool     `json:"advisory_only"`
+	Provider             string   `json:"provider"`
+	Model                string   `json:"model"`
+	PromptVersion        string   `json:"prompt_version"`
+	StopReason           string   `json:"stop_reason"`
+	StopReasonText       string   `json:"stop_reason_text"`
+	DurationMS           int64    `json:"duration_ms"`
+	ToolCalls            int      `json:"tool_calls"`
+	TotalTokens          int      `json:"total_tokens"`
+	SessionID            string   `json:"session_id"`
+	RunID                string   `json:"run_id"`
+	Created              string   `json:"created"`
+	Explain              string   `json:"explain"`
 }
 
 type diagnosisEvidenceView struct {
@@ -249,24 +253,25 @@ func diagnosisView(d agent.Diagnosis, session *models.AgentSession) agentDiagnos
 		CategoryText: categoryText(d.Category),
 		Cause:        d.Cause,
 		// 内部置信度是 0-1 的比例，契约按 0-100 展示（模型自评，不代表准确率）。
-		Confidence:         int(math.Round(d.Confidence * 100)),
-		ConfidenceNote:     "模型自评置信度（未经验证，不代表准确率）",
-		Assumptions:        orEmpty(d.Assumptions),
-		EvidenceSufficient: d.EvidenceSufficient,
-		NextDataToCollect:  orEmpty(d.NextDataToCollect),
-		UnverifiedRefs:     orEmpty(d.UnverifiedRefs),
-		Warnings:           orEmpty(d.Warnings),
-		AdvisoryOnly:       true, // 恒定：诊断不执行任何动作（契约 §7.2）
-		Provider:           d.Provider,
-		Model:              d.Model,
-		PromptVersion:      d.PromptVersion,
-		StopReason:         string(d.StopReason),
-		StopReasonText:     stopReasonText(string(d.StopReason)),
-		DurationMS:         d.DurationMS,
-		ToolCalls:          d.ToolCalls,
-		TotalTokens:        d.TotalTokens,
-		RunID:              d.RunID,
-		Explain:            d.Explain(),
+		Confidence:           int(math.Round(d.Confidence * 100)),
+		ConfidenceNote:       "模型自评置信度（未经验证，不代表准确率）",
+		Assumptions:          orEmpty(d.Assumptions),
+		EvidenceSufficient:   d.EvidenceSufficient,
+		NextDataToCollect:    orEmpty(d.NextDataToCollect),
+		UnverifiedRefs:       orEmpty(d.UnverifiedRefs),
+		UnverifiedNodeClaims: orEmpty(d.UnverifiedNodeClaims),
+		Warnings:             orEmpty(d.Warnings),
+		AdvisoryOnly:         true, // 恒定：诊断不执行任何动作（契约 §7.2）
+		Provider:             d.Provider,
+		Model:                d.Model,
+		PromptVersion:        d.PromptVersion,
+		StopReason:           string(d.StopReason),
+		StopReasonText:       stopReasonText(string(d.StopReason)),
+		DurationMS:           d.DurationMS,
+		ToolCalls:            d.ToolCalls,
+		TotalTokens:          d.TotalTokens,
+		RunID:                d.RunID,
+		Explain:              d.Explain(),
 	}
 	for _, e := range d.Evidence {
 		out.Evidence = append(out.Evidence, diagnosisEvidenceView{Ref: e.Ref, Quote: e.Quote, Why: e.Why})

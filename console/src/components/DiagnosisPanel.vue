@@ -15,6 +15,10 @@ import { formatConfidence, formatDuration, formatTime, prettyJson } from '@/util
  *     所以既显示数字也显示这句话，且不参与任何排序/阈值判断；
  *  3) unverified_refs 非空 → 用红色告警块醒目提示"引用了未观测到的证据定位"，
  *     因为这些定位无法回溯，结论不能直接采信。
+ *  4) unverified_node_claims 非空 → 同样红色告警块：ref 都是真的，但结论断言了
+ *     只有目标机器才知道的事实（端口未监听 / 服务未运行 / 磁盘已满……），
+ *     而本次会话在 admin 侧没有观测过。这类问题 grounding 校验查不出来，
+ *     由服务端的"结论句守卫"抓出，前端必须显式呈现，不能只显示证据充分的"否"。
  */
 const props = defineProps({
   /** §3.1 的 diagnosis 对象；found=false 时为 null */
@@ -36,6 +40,15 @@ const showRaw = ref(false)
 const cat = computed(() => DIAGNOSIS_CATEGORY[props.diagnosis?.category] || null)
 const confidenceText = computed(() => formatConfidence(props.diagnosis?.confidence))
 const unverified = computed(() => props.diagnosis?.unverified_refs || [])
+/**
+ * unverified_node_claims：结论句里"本应观测却靠推测"的节点侧断言类型。
+ *
+ * 与 unverified_refs 的区别（两者都要展示，不能合并）：
+ *   - unverified_refs：引用了**假 ref**（证据定位无法回溯）；
+ *   - 本字段：ref **全真**，但结论断言了只有目标机器才知道的事实——
+ *     grounding 校验查不出这类问题，是服务端的"结论句守卫"抓出来的。
+ */
+const unverifiedClaims = computed(() => props.diagnosis?.unverified_node_claims || [])
 const warnings = computed(() => props.diagnosis?.warnings || [])
 const actions = computed(() => props.diagnosis?.suggested_actions || [])
 
@@ -71,6 +84,13 @@ async function copyDiagnosis() {
     ),
     ...(unverified.value.length
       ? ['', '警告：引用了未观测到的证据定位：', ...unverified.value.map((r) => `- ${r}`)]
+      : []),
+    ...(unverifiedClaims.value.length
+      ? [
+          '',
+          '警告：结论含未观测的节点侧断言（只有目标机器自己知道，本次未观测）：',
+          `- ${unverifiedClaims.value.join('、')}`,
+        ]
       : []),
   ].join('\n')
   try {
@@ -150,6 +170,18 @@ async function copyDiagnosis() {
         <ul class="mt-2 space-y-1">
           <li v-for="r in unverified" :key="r" class="font-mono text-[11px] text-danger">· {{ r }}</li>
         </ul>
+      </div>
+
+      <!-- 结论含未观测的节点侧断言：ref 全真但结论越界，同样必须醒目 -->
+      <div v-if="unverifiedClaims.length" class="rounded-lg border border-danger/60 bg-danger/10 p-3">
+        <p class="text-xs font-medium text-danger">
+          ⚠ 结论含未观测的节点侧断言（{{ unverifiedClaims.join('、') }}）
+        </p>
+        <p class="mt-1 text-[11px] leading-5 text-ink-muted">
+          这些事实只有目标机器自己知道（端口是否监听 / 服务是否运行 / 资源水位 / 文件与进程是否存在），
+          而本次会话在 admin 侧**没有**观测过它们——结论里的这部分是推测，不是观测。
+          已在服务端强制标记为"证据不足"，请先在节点上确认再据此决策。
+        </p>
       </div>
 
       <!-- 证据不足：把"还要采集什么"提到最显眼处 -->

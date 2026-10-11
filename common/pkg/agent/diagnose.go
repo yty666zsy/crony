@@ -99,6 +99,13 @@ type Diagnosis struct {
 	// UnverifiedRefs 模型引用了但本次运行**并未观测到**的证据定位。
 	// 非空意味着这条结论里存在"看起来有据、其实没据"的成分，必须显式告警。
 	UnverifiedRefs []string `json:"unverified_refs,omitempty"`
+	// UnverifiedNodeClaims 结论句里出现的"节点侧事实断言"，而本次运行没有节点侧观测证据。
+	//
+	// 与 UnverifiedRefs 的区别：UnverifiedRefs 抓"引用假证据"，
+	// 本字段抓"结论本身越界"——ref 都是真的，但结论断言了只有目标机器才知道的事实
+	// （端口未监听 / 服务未运行 / 磁盘已满……），这类结论**本应观测却靠推测**。
+	// 见 claimguard.go 的说明与真实联调实证。
+	UnverifiedNodeClaims []string `json:"unverified_node_claims,omitempty"`
 	// Warnings 运行与校验过程中的告警。
 	Warnings []string `json:"warnings,omitempty"`
 
@@ -151,6 +158,9 @@ func (d Diagnosis) Explain() string {
 	}
 	if len(d.UnverifiedRefs) > 0 {
 		b.WriteString("⚠ 未观测到的引用（可能是模型编造）: " + strings.Join(d.UnverifiedRefs, ", ") + "\n")
+	}
+	if len(d.UnverifiedNodeClaims) > 0 {
+		b.WriteString("⚠ 结论含未观测的节点侧断言（本应观测却靠推测）: " + strings.Join(d.UnverifiedNodeClaims, "、") + "\n")
 	}
 	if len(d.NextDataToCollect) > 0 {
 		b.WriteString("还需要的数据:\n")
@@ -302,6 +312,10 @@ func DiagnoseWithSession(ctx context.Context, a *Agent, rc RunContext, sessionID
 			diag.EvidenceSufficient = false
 			diag.Warnings = append(diag.Warnings, "模型声称证据充分但未给出任何证据条目，已降级为证据不足")
 		}
+	}
+	// ---- 结论句守卫：节点侧事实必须观测过才能断言（见 claimguard.go） ----
+	if out.Trace != nil {
+		applyNodeClaimGuard(&diag, out.Trace.EvidenceList())
 	}
 	// 证据不足时必须有"还需要什么"的清单，否则这条结论没法推进
 	if !diag.EvidenceSufficient && len(diag.NextDataToCollect) == 0 {
