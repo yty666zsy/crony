@@ -26,9 +26,11 @@ func main() {
 	// Register the API routing service
 	srv.RegisterRouters(handler.RegisterRouters)
 	service.DefaultNodeWatcher = service.NewNodeWatcherService()
-	err = service.DefaultNodeWatcher.Watch()
-	if err != nil {
-		logger.GetLogger().Error(fmt.Sprintf("resolver  error:%#v", err))
+	if err = service.DefaultNodeWatcher.Watch(); err != nil {
+		// 降级而非崩溃：节点列表/调度协同不可用，控制面 HTTP API 继续服务
+		// （Agent 诊断、执行记录查询与订阅都不依赖 etcd）。
+		// 依赖 etcd 的接口会返回明确错误（errors.ErrEtcdNotInit），不会静默失败。
+		logger.GetLogger().Error(fmt.Sprintf("node watcher 未启动，进入降级运行（节点/调度协同不可用）:%v", err))
 	}
 	//init db table
 	err = service.RegisterTables(dbclient.GetMysqlDB())

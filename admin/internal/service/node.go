@@ -34,7 +34,21 @@ func NewNodeWatcherService() *NodeWatcherService {
 	}
 }
 
+// Watch 启动节点列表的初始同步与后续 watch。
+//
+// etcd 未初始化时必须返回可读错误，而不是解引用 null 客户端 panic：
+// 真实启动测试里，etcd 不可用时 admin 直接以
+//
+//	panic: runtime error: invalid memory address or nil pointer dereference
+//	github.com/tmnhs/crony/admin/internal/service.(*NodeWatcherService).Watch
+//
+// 崩溃 —— 整个控制面连 /login 都起不来。note：控制面 HTTP API（含 Agent 诊断/订阅）
+// 本身不依赖 etcd，所以这里的语义是"节点列表与调度协同降级不可用"，
+// 由调用方决定是记录降级继续服务，还是 fail fast。
 func (n *NodeWatcherService) Watch() error {
+	if n == nil || n.client == nil {
+		return fmt.Errorf("etcd 未初始化，节点列表与调度协同不可用（控制面 API 不受影响；请检查 etcd.endpoints 与 etcd 服务）")
+	}
 	resp, err := n.client.Get(context.Background(), etcdclient.KeyEtcdNodeProfile, clientv3.WithPrefix())
 	if err != nil {
 		return err
@@ -46,6 +60,9 @@ func (n *NodeWatcherService) Watch() error {
 }
 
 func (n *NodeWatcherService) watcher() {
+	if n == nil || n.client == nil {
+		return
+	}
 	rch := n.client.Watch(context.Background(), etcdclient.KeyEtcdNodeProfile, clientv3.WithPrefix())
 	for wresp := range rch {
 		for _, ev := range wresp.Events {

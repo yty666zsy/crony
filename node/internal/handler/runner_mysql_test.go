@@ -3,8 +3,10 @@
 package handler
 
 import (
+	"encoding/json"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -209,8 +211,79 @@ func TestMySQLRunCoordinatorFailurePersists(t *testing.T) {
 	}
 }
 
-// TestMySQLRunCoordinatorConcurrentSameSlotOnRealDB 真库上的并发抢槽位：
-// 8 个并发调度触发同槽位，必须"至多执行一次"。
+// TestMySQLRunCoordinatorFailureSeedForDiagnosis 为"真实 provider 诊断"准备一条
+// **根因可被外部独立核对**的失败执行。
+//
+// 与 TestMySQLRunCoordinatorFailurePersists 的区别：那条用 `exit 3`，库里只有退出码、
+// 没有任何可分析的文本，模型再强也无从下结论。本用例执行的是**真的会失败的真实命令**，
+// 要求 stdout/stderr 原文落到 job_run_step.output，这样才能检验
+// "证据 → 结论"这条链路是不是真的成立（而不是靠提示词猜）。
+//
+// 默认命令：读取一个不存在的文件（真实的操作系统错误）。
+// 可用 CRONY_SEED_CMD 覆盖为 JSON 数组形式的 argv，例如：
+//
+//	CRONY_SEED_CMD='["cmd","/C","E:\\MySql\\bin\\mysql.exe -h 127.0.0.1 -P 13307 -u crony_backup -pw -e \"select 1\""]'
+//
+// 这类命令的价值在于**根因可独立验证**：端口确实没监听、账号确实不存在，
+// 因此模型说得对不对可以被外部事实判定，而不是只能"看着像对"。
+func TestMySQLRunCoordinatorFailureSeedForDiagnosis(t *testing.T) {
+	requireMySQLNode(t)
+
+	argv := []string{"cmd", "/C", "type", `C:\__crony_missing_evidence_file__.sql`}
+	if raw := strings.TrimSpace(os.Getenv("CRONY_SEED_CMD")); raw != "" {
+		var parsed []string
+		if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+			t.Fatalf("CRONY_SEED_CMD 不是合法 JSON 数组: %v", err)
+		}
+		if len(parsed) == 0 {
+			t.Fatal("CRONY_SEED_CMD 为空数组")
+		}
+		argv = parsed
+	}
+
+	c := NewRunCoordinator(executor.DefaultRegistry(), MySQLRunStore{})
+	c.SetProcPublisher(nil)
+
+	job := itJob(910005, "诊断取证-真实失败", argv)
+	runID := models.NewManualRunID(job.ID, time.Now())
+	cleanupNodeRun(t, runID)
+	// 联调取证时用 CRONY_SEED_KEEP=1 保留这次失败记录：
+	// 真实 provider 的诊断要通过 HTTP 打到正在运行的 admin，必须让数据留在库里。
+	if os.Getenv("CRONY_SEED_KEEP") == "1" {
+		t.Logf("CRONY_SEED_KEEP=1：保留本次取证数据（不清理）")
+	} else {
+		defer cleanupNodeRun(t, runID)
+	}
+
+	outcome := c.RunJobWithID(job, models.TriggerManual, time.Now(), runID)
+	if outcome.Err == nil {
+		t.Fatalf("该命令必须失败，否则无法作为诊断证据: %+v", outcome)
+	}
+	stored := &models.JobRun{RunID: runID}
+	if err := stored.FindByRunID(); err != nil {
+		t.Fatalf("失败执行未落库: %v", err)
+	}
+	if stored.Status != int(models.RunStatusFailed) {
+		t.Fatalf("状态应为 failed(%d)，实际 %d", models.RunStatusFailed, stored.Status)
+	}
+
+	steps := make([]models.JobRunStep, 0)
+	if err := dbclient.GetMysqlDB().Table(models.CronyJobRunStepTableName).
+		Where("run_id = ?", runID).Order("step_index asc").Find(&steps).Error; err != nil {
+		t.Fatalf("查询步骤失败: %v", err)
+	}
+	if len(steps) == 0 {
+		t.Fatal("失败执行没有步骤记录，诊断将失去证据")
+	}
+	// 证据必须真的存在：模型能引用的东西就是这两列里的文本。
+	evidence := steps[0].Output + " " + steps[0].ErrorMsg
+	if strings.TrimSpace(evidence) == "" {
+		t.Fatalf("步骤里没有任何错误文本，无法用于诊断取证: %+v", steps[0])
+	}
+	t.Logf("取证失败执行已落库：run_id=%s exit_code=%d\n--- 步骤输出原文 ---\n%s\n--- 错误摘要 ---\n%s",
+		runID, steps[0].ExitCode, steps[0].Output, steps[0].ErrorMsg)
+	t.Logf("SEED_RUN_ID=%s", runID)
+}
 func TestMySQLRunCoordinatorConcurrentSameSlotOnRealDB(t *testing.T) {
 	requireMySQLNode(t)
 
