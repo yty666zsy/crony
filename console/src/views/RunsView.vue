@@ -1,13 +1,16 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { searchRuns, fetchRunSteps, findRun } from '@/api/run'
 import { killRun } from '@/api/run'
+import { openRunStream } from '@/api/stream'
+import { USE_MOCK } from '@/api/client'
 import { findAgentDiagnosis, runAgentDiagnosis } from '@/api/agent'
 import StatusBadge from '@/components/StatusBadge.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import DiagnosisPanel from '@/components/DiagnosisPanel.vue'
+import MockBadge from '@/components/MockBadge.vue'
 import { CONCURRENCY_POLICY, RUN_STATUS, TRIGGER_SOURCE, bizHint } from '@/utils/dict'
 import { formatDuration, formatRelative, formatTime } from '@/utils/format'
 
@@ -17,6 +20,8 @@ import { formatDuration, formatRelative, formatTime } from '@/utils/format'
  * job_run / job_run_step 列表：阶段 1 的规划接口（POST /job/run/search 等），数据来自 Mock。
  * 详情抽屉里的「AI 诊断」面板：**阶段 2 契约接口**（§3.1 读 / §3.2 触发），
  * 只读、只给建议（advisory_only=true），没有执行按钮。
+ * 详情抽屉里的「实时进度」：**阶段 2 收尾的执行事实订阅**（§9，GET /job/run/stream）。
+ * 它只消费推送、不做任何写操作；抽屉关闭即断开连接。
  */
 const route = useRoute()
 
@@ -60,6 +65,152 @@ const stepStatusText = {
   4: '已取消',
   5: '已跳过',
   6: '超时',
+}
+
+/**
+ * 实时进度订阅状态（契约 §9）。
+ * 语义边界写在界面上而不是注释里：
+ *   - connected：连接是否活着（断线会自动退避重连）；
+ *   - ended：服务端已发 end（终态或超时）——此时**不再**重连；
+ *   - lastAt：最近一次收到事件的时间，用来显示"多久没动静了"（心跳可见性）。
+ */
+const live = reactive({
+  on: false,
+  connected: false,
+  ended: false,
+  endReason: '',
+  endStatus: '',
+  lastAt: 0,
+  retry: 0,
+  error: '',
+  events: 0,
+})
+
+let liveHandle = null
+
+function stopLive(reason = 'client') {
+  if (liveHandle) {
+    liveHandle.close()
+    liveHandle = null
+  }
+  live.on = false
+  live.connected = false
+  if (reason !== 'silent') live.endReason = live.endReason || reason
+}
+
+/** 终态执行没必要订阅（服务端会立刻 end，不如直接读一次 REST）。 */
+function isTerminal(status) {
+  return [2, 3, 4, 5, 6].includes(Number(status))
+}
+
+function applyLiveEvent({ event, data }) {
+  live.events += 1
+  live.lastAt = Date.now()
+  if (event === 'heartbeat') return
+  if (event === 'snapshot') {
+    // snapshot 是**重置**语义：清空既有步骤再应用。
+    // job_id 模式下任务被再次触发时服务端会再发一次 snapshot，
+    // 前端若只是按 step_index 合并，两条执行的步骤就会混在一条时间线上。
+    if (data?.run) {
+      detail.steps = []
+      detail.run = { ...detail.run, ...data.run }
+      const row = rows.value.find((r) => r.run_id === data.run.run_id)
+      if (row) Object.assign(row, data.run)
+    }
+    return
+  }
+  if (event === 'run') {
+    if (data?.run) {
+      detail.run = { ...detail.run, ...data.run }
+      const row = rows.value.find((r) => r.run_id === data.run.run_id)
+      if (row) Object.assign(row, data.run)
+    }
+    return
+  }
+  if (event === 'step' && Array.isArray(data?.steps)) {
+    for (const s of data.steps) {
+      const idx = detail.steps.findIndex((x) => Number(x.step_index) === Number(s.step_index))
+      if (idx === -1) detail.steps.push(s)
+      else detail.steps[idx] = { ...detail.steps[idx], ...s }
+    }
+    detail.steps.sort((a, b) => Number(a.step_index) - Number(b.step_index))
+    return
+  }
+  if (event === 'error') {
+    live.error = data?.detail || '订阅出错'
+  }
+}
+
+/**
+ * 开始订阅。默认只在执行非终态时自动开启（终态执行直接读 REST 更省事），
+ * 但允许手动开启——运维想看一条历史执行"怎么跑过来的"时，服务端会先给快照与既有步骤。
+ */
+function startLive({ auto = false } = {}) {
+  if (!detail.run?.run_id) return
+  if (auto && isTerminal(detail.run.status)) return
+  stopLive('silent')
+  live.on = true
+  live.connected = false
+  live.ended = false
+  live.endReason = ''
+  live.endStatus = ''
+  live.error = ''
+  live.events = 0
+  live.lastAt = 0
+  live.retry = 0
+
+  liveHandle = openRunStream(detail.run.run_id, {
+    intervalMs: 1000,
+    maxSeconds: 600,
+    onEvent: applyLiveEvent,
+    onOpen: () => {
+      live.connected = true
+      live.error = ''
+    },
+    onRetry: (attempt) => {
+      live.connected = false
+      live.retry = attempt
+    },
+    onError: (err) => {
+      live.connected = false
+      live.error = err?.message || '订阅失败'
+    },
+    onClose: (data, reason) => {
+      live.connected = false
+      live.on = false
+      liveHandle = null
+      if (reason === 'end' || data?.reason) {
+        live.ended = true
+        live.endReason = data?.reason || reason || ''
+        live.endStatus = data?.status || ''
+      }
+      // 结束时用一次 REST 读兜底，保证界面与库一致（推送是增量，可能有并发写入）
+      refreshDetail()
+    },
+  })
+}
+
+/** 订阅结束后重新读一次 run + steps，避免增量推送与库产生任何偏差。 */
+async function refreshDetail() {
+  const runId = detail.run?.run_id
+  if (!runId) return
+  try {
+    const fresh = await findRun(runId)
+    if (fresh && fresh.run_id === runId) {
+      detail.run = { ...detail.run, ...fresh }
+      const row = rows.value.find((r) => r.run_id === runId)
+      if (row) Object.assign(row, fresh)
+    }
+  } catch {
+    /* 读不到就保留已有数据，不打扰用户 */
+  }
+  try {
+    const res = await fetchRunSteps(runId)
+    const list = res?.list || []
+    if (list.length) detail.steps = list
+  } catch {
+    /* 同上 */
+  }
 }
 
 const stepKindMeta = {
@@ -115,6 +266,7 @@ async function openDetail(row) {
   detail.loading = true
   detail.run = row
   detail.steps = []
+  stopLive('silent')
   openDiag(row.run_id)
   try {
     try {
@@ -127,6 +279,8 @@ async function openDetail(row) {
   } finally {
     detail.loading = false
   }
+  // 非终态执行自动开始订阅；终态执行不订阅（手动点"实时进度"仍可回放）
+  startLive({ auto: true })
 }
 
 /* ---------------------- AI 诊断（契约 §3.1 读 / §3.2 触发） ---------------------- */
@@ -213,6 +367,9 @@ onMounted(async () => {
     if (hit) openDetail(hit)
   }
 })
+
+// 离开页面必须断开订阅：否则留下一条对着数据库轮询的连接（后端还有 10 分钟寿命上限兜底）。
+onBeforeUnmount(() => stopLive('silent'))
 </script>
 
 <template>
@@ -359,7 +516,12 @@ onMounted(async () => {
     </section>
 
     <!-- ============ 执行详情抽屉 ============ -->
-    <el-drawer v-model="detail.visible" :size="720" title="执行详情">
+    <el-drawer
+      v-model="detail.visible"
+      :size="720"
+      title="执行详情"
+      @closed="stopLive('client')"
+    >
       <div v-loading="detail.loading" class="scroll-area h-full px-5 py-4">
         <template v-if="detail.run">
           <!-- job_run 概要 -->
@@ -476,6 +638,86 @@ onMounted(async () => {
               </router-link>
               <span v-else>会话详情</span>
               里可逐条回放。
+            </p>
+          </div>
+
+          <!-- 实时进度（契约 §9：GET /job/run/stream，SSE） -->
+          <div class="card mt-4 card-pad">
+            <div class="flex flex-wrap items-start justify-between gap-3">
+              <div class="min-w-0">
+                <p class="card-title flex items-center gap-2">
+                  实时进度
+                  <MockBadge v-if="USE_MOCK" text="Mock 模拟回放" />
+                </p>
+                <p class="card-sub mt-0.5">
+                  服务端按 1s 对比执行事实并推送变化（首帧全量快照 + 增量步骤）；
+                  终态后自动 end，不做历史事件重放。
+                </p>
+              </div>
+              <div class="flex shrink-0 items-center gap-2">
+                <span
+                  class="chip"
+                  :class="live.connected ? 'border-ok/40 text-ok' : 'text-ink-dim'"
+                  :title="live.lastAt ? `最近事件：${formatTime(Math.floor(live.lastAt / 1000))}` : '尚无事件'"
+                >
+                  <span
+                    class="mr-1.5 inline-block h-1.5 w-1.5 rounded-full align-middle"
+                    :style="{ backgroundColor: live.connected ? '#22c55e' : '#7c8aa8' }"
+                  />
+                  {{ live.connected ? '已连接' : live.on ? '重连中…' : '未连接' }}
+                </span>
+                <el-button
+                  size="small"
+                  :type="live.on ? 'default' : 'primary'"
+                  @click="live.on ? stopLive('client') : startLive()"
+                >
+                  {{ live.on ? '停止' : '开始订阅' }}
+                </el-button>
+              </div>
+            </div>
+
+            <div class="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+              <div class="rounded-md bg-navy-900 px-2.5 py-1.5">
+                <p class="text-[10px] text-ink-dim">收到事件</p>
+                <p class="font-mono text-[11px] text-ink">{{ live.events }}</p>
+              </div>
+              <div class="rounded-md bg-navy-900 px-2.5 py-1.5">
+                <p class="text-[10px] text-ink-dim">最近事件</p>
+                <p class="font-mono text-[11px] text-ink">
+                  {{ live.lastAt ? formatRelative(Math.floor(live.lastAt / 1000)) : '—' }}
+                </p>
+              </div>
+              <div class="rounded-md bg-navy-900 px-2.5 py-1.5">
+                <p class="text-[10px] text-ink-dim">重连次数</p>
+                <p class="font-mono text-[11px]" :class="live.retry ? 'text-warn' : 'text-ink'">
+                  {{ live.retry }}
+                </p>
+              </div>
+              <div class="rounded-md bg-navy-900 px-2.5 py-1.5">
+                <p class="text-[10px] text-ink-dim">结束原因</p>
+                <p class="font-mono text-[11px] text-ink">
+                  {{ live.ended ? live.endReason || 'end' : '—' }}
+                </p>
+              </div>
+            </div>
+
+            <p
+              v-if="live.ended"
+              class="mt-2 rounded-lg border border-navy-600 bg-navy-900 px-3 py-2 text-[11px] leading-5 text-ink-muted"
+            >
+              订阅已结束（reason={{ live.endReason || 'end' }}
+              <span v-if="live.endStatus">，status={{ live.endStatus }}</span>）。
+              增量推送结束后已用一次 REST 读取校正界面，故此处与库内一致。
+            </p>
+            <p
+              v-if="live.error"
+              class="mt-2 rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-[11px] leading-5 text-danger"
+            >
+              {{ live.error }}
+            </p>
+            <p class="mt-2 border-t border-navy-600 pt-2 text-[10px] leading-5 text-ink-dim">
+              鉴权：EventSource 不能带 Authorization 头，因此前端用 fetch 流式读取（src/api/stream.js）。
+              未验证项：真实浏览器下的断线重连与心跳可见性尚未人工点验（Mock 模式为模拟回放，不是实时能力）。
             </p>
           </div>
 

@@ -277,6 +277,88 @@ check('1012 节点离线分支（把 run 指到失联节点后可命中）', asy
   }
 })
 
+/* ------------------------- §9 执行事实订阅（SSE） ------------------------- */
+
+check('§9 SSE 解析器：跨 chunk 的半帧、CRLF、多行 data、注释行', async () => {
+  const { createSSEParser } = await server.ssrLoadModule('/src/api/stream.js')
+  const p = createSSEParser()
+
+  // 一帧被切成两半：先给前半，不应吐出事件；补齐后才吐
+  const half1 = 'id: 1\nevent: snapshot\ndata: {"seq":1,"kind":"snapshot","run":{"run_id":"r1"}'
+  assert.deepEqual(p.push(half1), [], '不完整帧不能提前吐出')
+  const evs = p.push('}\n\n')
+  assert.equal(evs.length, 1)
+  assert.equal(evs[0].event, 'snapshot')
+  assert.equal(evs[0].id, '1')
+  assert.equal(evs[0].data.run.run_id, 'r1', 'data 必须被解析成对象')
+
+  // 一次 chunk 里多帧 + CRLF + 注释行（代理心跳）+ 多行 data（按 SSE 规范用 \n 连接）
+  const multi =
+    ': keep-alive\r\n\r\n' +
+    'id: 2\r\nevent: step\r\ndata: {"seq":2,"kind":"step","steps":[]}\r\n\r\n' +
+    'event: heartbeat\ndata: {"seq":3}\n\n'
+  const list = p.push(multi)
+  assert.deepEqual(
+    list.map((e) => e.event),
+    ['step', 'heartbeat'],
+    '注释行必须被忽略，且 CRLF 要能正确切帧',
+  )
+  assert.equal(list[0].data.seq, 2)
+
+  // 不以 data 结尾的半帧要留在缓冲里
+  const pending = p.push('event: run\ndata: {"seq":4')
+  assert.deepEqual(pending, [])
+  assert.ok(p.pending().includes('"seq":4'), '未闭合内容应留在缓冲')
+})
+
+check('§9 订阅帧序列：snapshot → step… → run → end，且 end 后不再重连', async () => {
+  const { openRunStream, createSSEParser } = await server.ssrLoadModule('/src/api/stream.js')
+  assert.equal(typeof createSSEParser, 'function')
+
+  const runId = data.runs[0].run_id
+  const seen = []
+  let closed = null
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Mock 订阅 10s 未结束')), 10000)
+    openRunStream(runId, {
+      tickMs: 5,
+      onEvent: (ev) => seen.push(ev.event),
+      onClose: (_d, reason) => {
+        closed = reason
+        clearTimeout(timer)
+        resolve()
+      },
+      onError: (err) => {
+        clearTimeout(timer)
+        reject(err)
+      },
+    })
+  })
+  assert.ok(seen.length >= 3, `事件过少：${seen.join(',')}`)
+  assert.equal(seen[0], 'snapshot', '首帧必须是全量快照')
+  assert.ok(seen.includes('step'), '必须有 step 增量事件')
+  assert.ok(seen.includes('end'), '必须收到 end')
+  assert.equal(seen[seen.length - 1], 'end', 'end 必须是最后一帧')
+  assert.equal(closed, 'end', '收到 end 后必须停止（不得重连）')
+})
+
+check('§9 run_id 不存在：Mock 也必须给出 error + end，而不是静默挂起', async () => {
+  const { openRunStream } = await server.ssrLoadModule('/src/api/stream.js')
+  const seen = []
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('未结束')), 5000)
+    openRunStream('run-not-exist', {
+      tickMs: 5,
+      onEvent: (ev) => seen.push(ev.event),
+      onClose: () => {
+        clearTimeout(timer)
+        resolve()
+      },
+    })
+  })
+  assert.deepEqual(seen, ['error', 'end'])
+})
+
 let failed = 0
 for (const { name, fn } of checks) {
   try {

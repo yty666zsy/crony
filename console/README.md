@@ -32,7 +32,8 @@ pnpm preview
 pnpm smoke
 
 # 阶段 2 契约自检（无需后端：Node 内真实执行 src/api/agent.js → mock 的完整调用链，
-# 逐条断言 §1–§5 的字段、分页/过滤、三种诊断样本与 1007/1008/1009/1010/1011/1012 分支）
+# 逐条断言 §1–§5 的字段、分页/过滤、三种诊断样本、1007/1008/1009/1010/1011/1012 分支，
+# 以及 §9 的 SSE 帧解析器与订阅帧序列；当前 13/13）
 node verify-phase2.mjs
 ```
 
@@ -77,6 +78,7 @@ console/
     │   ├── client.js             # axios 实例、Token、{code,data,msg} 解包、业务错误弹窗
     │   ├── mock/{index.js,data.js}  # Mock 处理器 + 可信中文样例数据（含阶段 2 §1–§5）
     │   ├── agent.js              # ★ 阶段 2 契约接口：§1/§2/§3.1/§3.2/§4/§5.1/§5.2
+    │   ├── stream.js             # ★ 阶段 2 §9：SSE 订阅（fetch + ReadableStream）+ 可单测帧解析器
     │   ├── auth.js job.js run.js node.js script.js statis.js
     │   └── knowledge.js audit.js settings.js   # 规划中接口（阶段 2 之后）
     ├── router/index.js           # 路由表（hash 模式）
@@ -179,10 +181,14 @@ success_rate, skip_rate, by_status, since }`，其中
 
 ### 4.3 阶段 2 Agent 契约接口（冻结契约 `PHASE2-接口契约.md` §1–§5）
 
-这 7 个接口是**契约已冻结、前端已按其实现**的接口；Go 内核实现已在
+这 7 个接口**已双向落地**：Go 内核在
 `crony/common/pkg/agent/{trace,diagnose,nljob,cronnext,agent,prompt}.go` 与
-`crony/common/pkg/llm`、`crony/common/pkg/tools` 落地，但 **admin 层 HTTP handler 尚未注册**
-（`router.go` 里没有这些路由），因此当前一律走 Mock。
+`crony/common/pkg/llm`、`crony/common/pkg/tools`，
+admin HTTP handler 已注册在 `admin/internal/handler/router.go` 的 `/agent` 组（第 96–105 行，
+`JWTAuth` 保护）。**默认 `VITE_USE_MOCK=true` 时前端仍走 Mock**（无需后端即可运行）；
+用 `VITE_USE_MOCK=false` 启动才会打到真后端——此时浏览器看到的字段由 admin 视图层保证与契约一致。
+
+> 本节此前写着"admin 层 HTTP handler 尚未注册"，那是 `e2829cd` 之前的旧状态，已更正。
 
 | 契约 | 前端 API（`src/api/agent.js`） | 路由 | 页面 |
 | --- | --- | --- | --- |
@@ -193,6 +199,24 @@ success_rate, skip_rate, by_status, since }`，其中
 | §4 工具与配额 | `listAgentTools` | `POST /agent/tool/list` | `/agents` 顶部"当前能力边界" |
 | §5.1 草案 | `draftNlJob` | `POST /agent/nljob/draft` | `/jobs` 自然语言建任务向导 |
 | §5.2 确认创建 | `confirmNlJob` | `POST /agent/nljob/confirm` | 同上（二次确认步骤） |
+
+### 4.4 执行事实订阅（`PHASE2-接口契约.md` §9，SSE）
+
+| 能力 | 前端 API（`src/api/stream.js`） | 路由 | 页面 |
+| --- | --- | --- | --- |
+| 实时进度（run/step/heartbeat/end） | `openRunStream(run_id, …)` → `{ close() }` | `GET /job/run/stream?run_id=&interval_ms=&max_seconds=&after_step=` | `/runs` 抽屉「实时进度」卡片 |
+| 纯函数帧解析器（可单测） | `createSSEParser()` | — | 由 `verify-phase2.mjs` §9 三项断言覆盖 |
+
+要点（细节见契约 §9，**不要当成消息总线**）：
+
+- **不能用 `EventSource`**：它无法设置 `Authorization` 头，而本项目的鉴权是 Bearer JWT；
+  因此用 `fetch` + `ReadableStream` 手工解析（`src/api/stream.js`）。把 token 放 query 会进
+  浏览器历史/代理日志/`Referer`，明确不做。
+- 服务端按 `interval_ms` 做 **DB（`job_run`/`job_run_step`）差异对比**，没有进程内事件总线；
+  延迟上界 = 间隔。`snapshot` 是**重置**语义（换执行对象时会重发），前端必须清空既有步骤再应用。
+- 终态后服务端发 `end` 并关闭，客户端**不得**重连；连接异常中断才退避重连（重连拿新快照）。
+- 未做：历史事件重放、多订阅者广播、**Agent 会话轨迹的逐步推送**（阶段 3）。
+- `VITE_USE_MOCK=true` 时该卡片是**模拟回放**（有 Mock 角标），不得据此认为"已实时推送过"。
 
 `src/api/agent.js` 导出 13 个符号：上表 7 个契约函数 + 2 个归一化视图
 （`budgetView`、`toolStatsView`，用于吸收"契约字段 vs Go 内核字段"差异）+ 4 个步骤取值兜底函数
@@ -334,17 +358,22 @@ Mock 里**可达**的业务错误分支（不是装饰）：`1008`（未知 sess
 4. **规划接口未做联调**：第 4.2 节 5 个接口后端尚未实现，真实模式下会报错属预期。
    `/job/run/overview` 只按 `service.RunOverview` 的字段与口径对接（含成功率分母扣除 skipped），
    但**未与真实数据库联调过数值**。
-5. **鉴权链路未端到端验证**：没有登录页，`Bearer` 头与 401 处理只做了代码级实现与 Mock 验证。
+5. **鉴权链路**：`Bearer` 头与 401 处理只做了代码级实现与 Mock 验证（无登录页、无真实联调）。
+   连带发现并修复：后端 `JWTAuth` 原先只接受**裸 token**，收到标准 `Bearer <jwt>` 会返回
+   `That's not even a token`——即 `VITE_USE_MOCK=false` 时**所有**带鉴权的接口都会失败。
+   修复后中间件同时接受两种写法（`BearerToken`，含单测）。此缺陷由后端的真 HTTP 端到端用例抓出，
+   **前端的 Mock 模式与 `verify-phase2.mjs` 都测不到**，这也是"Mock 通过 ≠ 联调通过"的实证。
 6. **开发服务器需显式 `--host 127.0.0.1`**：沙箱内不显式指定 host 时不会监听回环地址（已实测
    非沙箱回环 TCP 本身可用），显式指定后页面与模块均正常返回（40/40 模块 HTTP 200）。
 7. **`esbuild-wasm` 为环境遗留依赖**（见第 7 节），当前构建不依赖它。
 
 ### 9.1 阶段 2 专项：未验证项（**未对真后端跑过**）
 
-1. **7 个契约接口全部未对真后端跑过**：`admin` 层没有这些路由，`VITE_USE_MOCK=false` 时
-   `/agent/*` 会返回 404/业务错误（解包层会弹提示，这是预期）。本期的正确性依据是
-   `node verify-phase2.mjs` —— 它验证的是**前端 API 层 + Mock 的契约一致性**，
-   **不能替代联调**。该脚本当前 10/10 通过，覆盖：
+1. **7 个契约接口已注册，但未对真后端联调过**：`admin` 层路由已在
+   `router.go:96–105` 注册（此前 README 写"没有这些路由"已更正），
+   本环境未同时起 admin + MySQL 做端到端联调，因此**前端 API 层的正确性依据仍是
+   `node verify-phase2.mjs`** —— 它验证的是**前端 API 层 + Mock 的契约一致性**，
+   **不能替代联调**。该脚本当前 13/13 通过，覆盖：
 
    | # | 检查项 | 断言要点 |
    | --- | --- | --- |
@@ -358,6 +387,14 @@ Mock 里**可达**的业务错误分支（不是装饰）：`1008`（未知 sess
    | 8 | §5.2 确认创建 | 创建出的任务出现在任务列表且 `status=0`；非法 spec / 越界 timeout / `confirmed=false` 走 1009；空文本草案走 1009 |
    | 9 | 错误码 | 1008（未知会话）、1010（未知 run）、1011（enabled=false）、1007（provider 为空） |
    | 10 | 错误码 | 1012（把 run 指到失联节点） |
+   | 11 | §9 SSE 解析器 | 跨 chunk 半帧不提前吐出；CRLF 切帧；注释行忽略；多行 data；未闭合内容留在缓冲 |
+   | 12 | §9 帧序列 | 首帧 `snapshot` → `step`… → `run` → `end` 且 `end` 必须在最后、`end` 后不再重连 |
+   | 13 | §9 缺失执行 | run 不存在时给出 `error` + `end`，不得静默挂起 |
+
+   **§9 的实时进度仍有明确的未验证面**：真实浏览器下"服务端主动断线 → 自动重连 → 新快照收敛"
+   与心跳可见性未人工点验（Mock 模式是模拟回放，不是实时能力）；
+   后端侧的 SSE 行为有单元测试 9 例 + 真实 MySQL 集成 3 例（含真 HTTP + JWT 端到端）兜底，
+   见契约 §9.6。
 2. **没有真实模型凭据**：所有 `provider='offline'`、`model=''` 都来自 Mock 的假设
    （`offlineProvider()` 的 FakeProvider 只设 `Provider`、不设 `Model`）。真实 provider 的
    `model` / token 计数 / `finish_reason` 表现未验证；**未做任何准确率评测，页面上也不声明准确率**。
