@@ -199,7 +199,7 @@ func (j *JWT) ParseToken(tokenString string) (*CustomClaims, error) {
 }
 
 func GetClaims(c *gin.Context) (*CustomClaims, error) {
-	token := c.Request.Header.Get("Authorization")
+	token := BearerToken(c.Request.Header.Get("Authorization"))
 	j := NewJWT()
 	claims, err := j.ParseToken(token)
 	if err != nil {
@@ -222,13 +222,34 @@ func GetUserInfo(c *gin.Context) *CustomClaims {
 	}
 }
 
+// BearerToken 从 Authorization 头里取出令牌本体。
+//
+// 为什么要做这一步：历史实现把整个头当作令牌解析，于是任何按 RFC 6750 发送
+// `Authorization: Bearer <jwt>` 的客户端（例如本项目 console 的 axios 拦截器）
+// 都会拿到 "That's not even a token"。
+// 现在同时接受标准 `Bearer <token>`（大小写不敏感）与历史裸 token，
+// 两种写法都能通过；由真实 HTTP 端到端用例锁定（见 PHASE2-接口契约.md §9.6）。
+func BearerToken(header string) string {
+	value := strings.TrimSpace(header)
+	// 只看 scheme 本身（大小写不敏感），余下部分才是令牌。
+	if len(value) >= 6 && strings.EqualFold(value[:6], "bearer") {
+		rest := value[6:]
+		if rest == "" || rest[0] == ' ' || rest[0] == '\t' {
+			// "Bearer" / "Bearer " 这类"有 scheme 无凭据"的头按未登录处理，
+			// 不能把 scheme 本身当令牌去解析。
+			return strings.TrimSpace(rest)
+		}
+	}
+	return value
+}
+
 func JWTAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// We have jwt authentication header information to return token information when Authorization logs in. Here,
 		//the front end needs to store the token in cookie or local localStorage,
 		//but you need to negotiate the expiration time with the back end.
 		//You can agree to refresh the token or log in again.
-		token := c.Request.Header.Get("Authorization")
+		token := BearerToken(c.Request.Header.Get("Authorization"))
 		if token == "" {
 			resp.FailWithDetailed(resp.ERROR, gin.H{"reload": true}, "未登录或非法访问", c)
 			c.Abort()
