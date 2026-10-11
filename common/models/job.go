@@ -71,10 +71,16 @@ type Job struct {
 	// 0=skip（默认，与旧行为最接近：上一次没跑完就跳过本次）
 	// 1=buffer_one / 2=buffer_all / 3=cancel_other / 4=terminate_other
 	// 取值见 common/pkg/runpolicy。老数据默认为 0，升级后行为可预期。
-	ConcurrencyPolicy int    `json:"concurrency_policy" gorm:"size:1;column:concurrency_policy;not null;default:0"`
-	Note              string `json:"note" gorm:"size:512;column:note;default:''"`
-	Created           int64  `json:"created" gorm:"column:created;not null"`
-	Updated           int64  `json:"updated" gorm:"column:updated;default:0"`
+	ConcurrencyPolicy int `json:"concurrency_policy" gorm:"size:1;column:concurrency_policy;not null;default:0"`
+	// StepsJSON 阶段 4-B：多步骤编排定义（JSON 文本，见 job_steps.go 的形态说明）。
+	//
+	// 空串 = 没有编排 = 老的单步语义（执行时由 node 的 BuildPlan 决定），
+	// 因此老任务升级后行为**逐字节不变**，不需要任何数据迁移。
+	// 存成一列而不是拆表，理由见 job_steps.go 顶部注释。
+	StepsJSON string `json:"steps_json" gorm:"type:text;column:steps_json"`
+	Note      string `json:"note" gorm:"size:512;column:note;default:''"`
+	Created   int64  `json:"created" gorm:"column:created;not null"`
+	Updated   int64  `json:"updated" gorm:"column:updated;default:0"`
 
 	Hostname string   `json:"host_name" gorm:"-"`
 	Ip       string   `json:"ip" gorm:"-"`
@@ -133,14 +139,23 @@ func (j *Job) Check() error {
 }
 
 func (j *Job) SplitCmd() {
-	ps := strings.SplitN(j.Command, " ", 2)
+	j.Cmd = SplitCommand(j.Command)
+}
+
+// SplitCommand 按与 Job.SplitCmd 完全相同的规则切分一条命令。
+//
+// 抽出来的理由：阶段 4-B 的多步骤编排也要切分命令。如果编排侧自己再写一份切分逻辑，
+// 就会出现"单步任务与实际 argv 不一致"的经典事故（引号/转义的处理稍有不同就会改变参数个数），
+// 而这种不一致不会报错，只会跑错命令。
+func SplitCommand(command string) []string {
+	ps := strings.SplitN(command, " ", 2)
 	if len(ps) == 1 {
-		j.Cmd = ps
-		return
+		return ps
 	}
-	j.Cmd = make([]string, 0, 2)
-	j.Cmd = append(j.Cmd, ps[0])
-	j.Cmd = append(j.Cmd, utils.ParseCmdArguments(ps[1])...)
+	out := make([]string, 0, 2)
+	out = append(out, ps[0])
+	out = append(out, utils.ParseCmdArguments(ps[1])...)
+	return out
 }
 
 // SerializeArgv 把 argv 数组序列化成 Job.Command，保证 SplitCmd 能**无损还原**。

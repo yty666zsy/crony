@@ -57,3 +57,22 @@ export function killJob(payload) {
   if (USE_MOCK) return mockResponse(mock.jobKill(payload))
   return request.post('/job/kill', payload)
 }
+
+/**
+ * POST /job/dag/validate —— 校验一份编排定义（阶段 4-B）。
+ *
+ * 两种用法：给 steps_json（编辑器草稿，还没保存），或给 job_id（校验库里已有的任务）。
+ * 失败时后端返回业务码 1021（编排非法）并带上具体原因（哪个步骤、哪个环），
+ * 1022 表示"该任务本来就没有编排"。调用方应捕获 BizError 并**内联展示原因**，
+ * 只靠 toast 会丢掉"具体哪一行错了"。
+ */
+export function validateJobDag(payload) {
+  if (USE_MOCK) return mockResponse(mock.jobDagValidate(payload))
+  return request.post('/job/dag/validate', payload)
+}
+
+/** POST /job/dag/find —— 读取某个任务的编排摘要（步骤 / 边 / 层深 / 告警） */
+export function findJobDag(jobId) {
+  if (USE_MOCK) return mockResponse(mock.jobDagFind({ job_id: jobId }))
+  return request.post('/job/dag/find', { job_id: jobId })
+}

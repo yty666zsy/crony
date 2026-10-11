@@ -46,6 +46,17 @@ const routes = [
     component: () => import('@/views/RunsView.vue'),
     meta: { title: 'Run History', subtitle: '执行记录 · job_run 与步骤时间线', group: 'Automation', icon: 'DataLine' },
   },
+  {
+    path: '/orchestration',
+    name: 'orchestration',
+    component: () => import('@/views/OrchestrationView.vue'),
+    meta: {
+      title: 'Orchestration',
+      subtitle: '任务编排 · 多步骤 DAG（依赖 / 汇聚 / 层深）',
+      group: 'Automation',
+      icon: 'Share',
+    },
+  },
 
   /* ------------------------ Infrastructure ---------------------- */
   {

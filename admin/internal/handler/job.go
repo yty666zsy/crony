@@ -35,6 +35,11 @@ func (j *JobRouter) CreateOrUpdate(c *gin.Context) {
 			"[create_job] check error: "+err.Error(), c)
 		return
 	}
+	// 阶段 4-B：编排定义必须在这里就被拒绝（含成环、依赖不存在、未知字段）。
+	// 理由：一份"存得下但节点执行不了"的定义，只会在最需要它跑的那一刻暴露。
+	if !validateJobPlanOrReply(req.Job, c) {
+		return
+	}
 
 	var err error
 	var insertId int
@@ -111,6 +116,10 @@ func (j *JobRouter) CreateOrUpdate(c *gin.Context) {
 	}
 
 	resp.OkWithDetailed(req, "operate success", c)
+	if planLog := marshalPlanForLog(req.Job); planLog != "" {
+		// 保存成功时把编排结构记一条日志：出问题时可以回答"当时存进去的到底是哪张图"。
+		logger.GetLogger().Info(fmt.Sprintf("[create_or_update_job] job[%d] orchestration: %s", req.ID, planLog))
+	}
 }
 
 func (j *JobRouter) Delete(c *gin.Context) {

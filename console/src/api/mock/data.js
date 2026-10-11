@@ -164,6 +164,18 @@ export const jobs = [
     step_count: 4,
     last_run_status: 2,
     success_rate: 96.8,
+    // 阶段 4-B：多步骤编排定义（真实后端存 job.steps_json，形态与这里逐字一致）。
+    // 用菱形（两条分支 + 汇聚）作为默认样例：它同时说明了"并排分支"和"汇聚"两件事。
+    steps_json: JSON.stringify({
+      max_parallel: 2,
+      fail_fast: false,
+      steps: [
+        { index: 0, name: 'extract', kind: 'shell', command: '/opt/logstat.sh --days 90' },
+        { index: 1, name: 'archive', kind: 'shell', command: '/opt/archive.sh --to /backup/app', depends_on: '0' },
+        { index: 2, name: 'notify', kind: 'http', command: 'https://alert.example.com/hook?{"level":"info"}', http_method: 'POST', depends_on: '0' },
+        { index: 3, name: 'purge', kind: 'shell', command: '/opt/purge.sh --days 90', depends_on: '1,2', join: 'all_success' },
+      ],
+    }),
   },
   {
     id: 2,

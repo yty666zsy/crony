@@ -70,6 +70,10 @@ func configRoute(r *gin.Engine) {
 		job.POST("search", defaultJobRouter.Search)
 		job.POST("log", defaultJobRouter.SearchLog)
 		job.POST("once", defaultJobRouter.Once)
+
+		// 阶段 4-B：多步骤编排（DAG）只读控制面。写入路径仍是 /job/add（见 job_dag.go 顶部说明）。
+		job.POST("dag/validate", defaultJobRouter.DagValidate)
+		job.POST("dag/find", defaultJobRouter.DagFind)
 		// 阶段 1 恢复：节点侧已实现基于 context + 进程树终止的取消传播
 		job.POST("kill", defaultJobRouter.Kill)
 

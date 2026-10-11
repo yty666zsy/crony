@@ -1494,4 +1494,257 @@ func TestAcceptanceSuite(t *testing.T) {
 		cc.note("total=%d（enabled %d / disabled %d），by_outcome 分组和=%d，成功 %d / 失败 %d，口径自述齐全",
 			total, enabled, disabled, sum, successSum, failSum)
 	})
+
+	// ---------- 阶段 4-B：多步骤编排 / DAG（AC-30…AC-33） ----------
+	//
+	// 4-B 的验收重点不是"能存下一段 JSON"，而是三件事：
+	//   1. 合法与非法有**唯一裁决**（BuildPlan 通过即为合法，任何一处坏了都必须说清是哪一处）；
+	//   2. 坏图**不允许进入系统**（保存时拒绝，而不是等到执行那一刻才炸）；
+	//   3. 执行语义（跳过的步骤为什么没跑）**在库里能查**。
+	//
+	// 前两件走真实 HTTP 接口取证；第三件需要节点真的跑一次 DAG，而本机 etcd 未启动
+	// （节点靠 etcd 长轮询接单），因此 AC-33 采取"有真实数据就核对、没有就 SKIP 并写明
+	// 证据在集成测试里"的策略——不把"环境缺件"伪装成"通过"。
+
+	// dagsPost 发一个 POST 并返回业务码/数据/消息；审批类用例已有同款写法（见 AC-17 段）。
+	dagPost := func(path string, body map[string]any) (int, map[string]any, string) {
+		status, env, err := c.do(http.MethodPost, path, body, true)
+		if err != nil {
+			return 0, nil, "网络错误: " + err.Error()
+		}
+		if status != http.StatusOK {
+			return env.Code, nil, fmt.Sprintf("HTTP %d（编排接口约定恒 HTTP 200）", status)
+		}
+		return env.Code, env.dataMap(), env.Msg
+	}
+
+	const (
+		dagDiamondJSON = `{"max_parallel":2,"fail_fast":false,"steps":[` +
+			`{"index":0,"name":"extract","command":"echo extract"},` +
+			`{"index":1,"name":"transform","command":"echo transform","depends_on":"0"},` +
+			`{"index":2,"name":"enrich","command":"echo enrich","depends_on":"0"},` +
+			`{"index":3,"name":"load","command":"echo load","depends_on":"1,2","join":"all_success"}]}`
+		dagCycleJSON = `{"steps":[` +
+			`{"index":0,"name":"load","command":"echo load","depends_on":"2"},` +
+			`{"index":1,"name":"verify","command":"echo verify","depends_on":"0"},` +
+			`{"index":2,"name":"notify","command":"echo notify","depends_on":"1"}]}`
+	)
+
+	// AC-30：校验接口对合法图给出可渲染的摘要，对坏图给出**具体**原因与专门业务码。
+	run("AC-30", "编排校验：合法图给出步骤/边/层深，坏图返回 1021 并指出具体错处", func(cc *caseCtx) {
+		code, data, msg := dagPost("/job/dag/validate", map[string]any{"steps_json": dagDiamondJSON})
+		if code != 200 {
+			cc.t.Fatalf("合法菱形应通过校验，实际 code=%d msg=%q", code, msg)
+		}
+		if !asBool(data["valid"]) {
+			cc.t.Fatalf("合法图必须回 valid=true: %+v", data)
+		}
+		plan := asMap(data["plan"])
+		steps := asSlice(plan["steps"])
+		edges := asSlice(plan["edges"])
+		if len(steps) != 4 || len(edges) != 4 {
+			cc.t.Fatalf("摘要应给出 4 步 4 边，实际 steps=%d edges=%d", len(steps), len(edges))
+		}
+		// 层深按最长路径：extract(0) → {transform,enrich}(1) → load(2)
+		if got := int(asNum(plan["max_depth"])); got != 2 {
+			cc.t.Fatalf("菱形层深应为 2（最长路径），实际 %d", got)
+		}
+		if got := int(asNum(plan["max_parallel"])); got != 2 {
+			cc.t.Fatalf("摘要必须回显并发上限，实际 %d", got)
+		}
+		var loadDeps []any
+		for _, s := range steps {
+			m := asMap(s)
+			if int(asNum(m["index"])) == 3 {
+				loadDeps = asSlice(m["depends_on"])
+			}
+		}
+		if len(loadDeps) != 2 {
+			cc.t.Fatalf("load 必须依赖两条分支（1,2），实际 %v", loadDeps)
+		}
+
+		// 坏图：成环 → 1021，且 msg 必须指出"环"与经过的步骤（不是一句泛泛的失败）
+		code, data, cycleMsg := dagPost("/job/dag/validate", map[string]any{"steps_json": dagCycleJSON})
+		msg = cycleMsg
+		if code != 1021 {
+			cc.t.Fatalf("成环应返回 ErrorJobPlanInvalid(1021)，实际 code=%d msg=%q", code, msg)
+		}
+		if !strings.Contains(msg, "环") {
+			cc.t.Fatalf("拒绝原因必须点明「环」，实际 msg=%q", msg)
+		}
+		if !strings.Contains(msg, "0") || !strings.Contains(msg, "1") || !strings.Contains(msg, "2") {
+			cc.t.Fatalf("环的报错应给出完整环路（涉及哪些步骤），实际 msg=%q", msg)
+		}
+		if asBool(data["valid"]) {
+			cc.t.Fatalf("坏图的 valid 不能为 true: %+v", data)
+		}
+
+		// 另外两类典型坏法必须同样被拒，且原因各不相同（可定位）
+		otherMsgs := make(map[string]string, 2)
+		for name, body := range map[string]map[string]any{
+			"依赖不存在的步骤": {"steps_json": `{"steps":[{"index":0,"command":"echo a"},{"index":1,"command":"echo b","depends_on":"9"}]}`},
+			"字段名拼错":    {"steps_json": `{"steps":[{"index":0,"command":"echo a"},{"index":1,"command":"echo b","depends_ons":"0"}]}`},
+		} {
+			c2, _, m2 := dagPost("/job/dag/validate", body)
+			if c2 != 1021 {
+				cc.t.Fatalf("%s 应被拒（1021），实际 code=%d msg=%q", name, c2, m2)
+			}
+			if strings.TrimSpace(m2) == "" {
+				cc.t.Fatalf("%s 被拒了但没说原因（运维只能猜）", name)
+			}
+			otherMsgs[name] = m2
+		}
+		cc.note("合法菱形：steps=4 edges=4 max_depth=2 max_parallel=2；成环 msg=%q；"+
+			"依赖不存在 msg=%q；字段名拼错 msg=%q（三类坏图均 1021 且原因可定位）",
+			truncate(cycleMsg, 100), truncate(otherMsgs["依赖不存在的步骤"], 80), truncate(otherMsgs["字段名拼错"], 80))
+	})
+
+	// AC-31：坏图**进不了系统**——保存路径必须拒绝，而且不能留下半成品任务。
+	run("AC-31", "保存拦截：坏编排在 /job/add 被拒（1021），且库里不留半成品任务", func(cc *caseCtx) {
+		if db == nil {
+			cc.skip("未配置 CRONY_TEST_MYSQL_DSN：无法核对「拒绝保存后没有留下任务行」")
+		}
+		jobName := "acc-dag-bad-" + strings.TrimSpace(os.Getenv("CRONY_ACC_RUN_TAG")) + "-" + fmt.Sprint(time.Now().UnixNano()%100000)
+		// 字段名必须与后端绑定一致（job_type 而不是 type；allocation 必填），
+		// 否则会先被参数校验拦下（1001），验收就验不到"编排校验"这一层。
+		code, _, msg := dagPost("/job/add", map[string]any{
+			"name":       jobName,
+			"command":    "echo should-not-be-saved",
+			"spec":       "0 5 * * *",
+			"job_type":   1,
+			"status":     1,
+			"timeout":    60,
+			"allocation": 2,
+			"run_on":     os.Getenv("CRONY_ACC_NODE_UUID"),
+			"steps_json": dagCycleJSON,
+		})
+		if code != 1021 {
+			cc.t.Fatalf("带环的编排在保存时必须被拒（1021），实际 code=%d msg=%q（如果这里是 1000/其他，"+
+				"说明校验没有挡在落库之前）", code, msg)
+		}
+		if !strings.Contains(msg, "环") {
+			cc.t.Fatalf("拒绝保存的原因必须点明「环」，实际 msg=%q", msg)
+		}
+		var cnt int
+		if err := db.QueryRow("select count(*) from job where name = ?", jobName).Scan(&cnt); err != nil {
+			cc.t.Fatalf("按名称核对任务是否落库失败: %v", err)
+		}
+		if cnt != 0 {
+			cc.t.Fatalf("坏编排被拒后库里仍留下 %d 条任务（%s）：拒绝必须是「什么都没发生」", cnt, jobName)
+		}
+		cc.note("任务名 %s 提交带环编排 → code=1021 msg=%q；库中同名行数=%d（无半成品）", jobName, truncate(msg, 80), cnt)
+	})
+
+	// AC-32：读路径——有编排的任务能读出可执行摘要；单步任务必须回 1022（"本来就没有"≠"坏了"）。
+	run("AC-32", "编排读取：有编排任务给出可执行摘要，单步任务回 1022 而不是空图", func(cc *caseCtx) {
+		if db == nil {
+			cc.skip("未配置 CRONY_TEST_MYSQL_DSN：无法造「库里已存编排」的夹具")
+		}
+		tag := strings.TrimSpace(os.Getenv("CRONY_ACC_RUN_TAG"))
+		if tag == "" {
+			tag = "acc"
+		}
+		const dagJobID = 910030
+		// 夹具：直接写一条带编排的任务（写库只造数据，读路径仍走真实接口）。
+		if _, err := db.Exec("delete from job where id = ?", dagJobID); err != nil {
+			cc.t.Fatalf("清理编排夹具失败: %v", err)
+		}
+		if _, err := db.Exec("insert into job (id, name, command, steps_json, status, concurrency_policy, type, notify_type, spec, created) "+
+			"values (?, ?, ?, ?, 1, 0, 1, 0, '0 5 * * *', ?)",
+			dagJobID, "acc-dag-fixture-"+tag, "echo fallback-must-not-run", dagDiamondJSON, time.Now().UnixMilli()); err != nil {
+			cc.t.Fatalf("写入编排夹具失败: %v", err)
+		}
+		defer func() {
+			_, _ = db.Exec("delete from job where id = ?", dagJobID)
+		}()
+
+		code, data, msg := dagPost("/job/dag/find", map[string]any{"job_id": dagJobID})
+		if code != 200 {
+			cc.t.Fatalf("有编排的任务应能读出摘要，实际 code=%d msg=%q", code, msg)
+		}
+		if !asBool(data["executable"]) {
+			cc.t.Fatalf("合法编排必须标记 executable=true: %+v", data)
+		}
+		plan := asMap(data["plan"])
+		if len(asSlice(plan["steps"])) != 4 || len(asSlice(plan["edges"])) != 4 {
+			cc.t.Fatalf("摘要应给出 4 步 4 边，实际 %+v", plan)
+		}
+		if asStr(data["steps_json"]) == "" {
+			cc.t.Fatalf("读接口必须回原文 steps_json（否则编辑器无法回填）")
+		}
+
+		// 单步任务：库里那些 steps_json 为空的老任务必须回 1022
+		var plainID int
+		if err := db.QueryRow("select id from job where (steps_json is null or steps_json = '') order by id limit 1").Scan(&plainID); err != nil {
+			cc.skip("库里没有单步任务可核对 1022 分支: %v", err)
+		}
+		code, data, msg = dagPost("/job/dag/find", map[string]any{"job_id": plainID})
+		if code != 1022 {
+			cc.t.Fatalf("单步任务应回 ErrorJobPlanNotFound(1022)，实际 code=%d msg=%q", code, msg)
+		}
+		if _, hasPlan := data["plan"]; hasPlan {
+			cc.t.Fatalf("没有编排时不得伪造 plan: %+v", data)
+		}
+		if strings.TrimSpace(msg) == "" {
+			cc.t.Fatalf("单步任务的说明不能为空（要让运维看懂这是正常状态）")
+		}
+		cc.note("有编排任务 #%d：executable=true steps=4 edges=4；单步任务 #%d：code=1022 msg=%q",
+			dagJobID, plainID, truncate(msg, 60))
+	})
+
+	// AC-33：执行语义的**落库证据**：多步骤 run 的每一步都要有行，跳过的步骤要写明原因。
+	run("AC-33", "DAG 执行落库：多步骤 run 每步一行，被跳过的步骤带原因与编排属性", func(cc *caseCtx) {
+		if db == nil {
+			cc.skip("未配置 CRONY_TEST_MYSQL_DSN：无法核对 job_run_step")
+		}
+		// 只认**真实执行产生**的 run：run_id 形如 j<job_id>-t<槽位>（models.RunIDForSlot），
+		// 且步骤数 ≥ 3（本套件自己造的夹具是 1~2 步、id 形如 <tag>-run）。
+		// 为什么要这样卡：拿夹具当"执行证据"等于验自己写的行，报告会好看但什么都没证明。
+		// 本机 etcd 未启动 → 黑盒套件触发不了节点执行 DAG，此时必须**老实地 SKIP**。
+		var runID string
+		var stepCount int
+		err := db.QueryRow("select run_id, step_count from job_run "+
+			"where step_count >= 3 and run_id like 'j%-t%' order by id desc limit 1").
+			Scan(&runID, &stepCount)
+		if err != nil {
+			cc.skip("库里没有真实执行产生的多步骤 run（本机 etcd 未启动 → 黑盒触发不了节点执行 DAG）。" +
+				"执行语义的证据在集成测试：TestMySQLRunCoordinatorMultiStepDAG / DAGSkipsDownstreamOnFailure / " +
+				"DAGFailFastStopsPendingBranches / RejectsInvalidPlanOnRealDB（真库 + 真进程，含跳过原因与汇聚策略落库）")
+		}
+		// 执行详情是 GET /job/run/find?run_id=xxx，步骤明细是 POST /job/run/steps（分页）。
+		status, env, err := c.do(http.MethodGet, "/job/run/find?run_id="+url.QueryEscape(runID), nil, true)
+		if err != nil || status != http.StatusOK || env.Code != 200 {
+			cc.t.Fatalf("读取 run %s 详情失败: status=%d code=%d msg=%q err=%v", runID, status, env.Code, env.Msg, err)
+		}
+		if got := int(asNum(env.dataMap()["step_count"])); got != stepCount {
+			cc.t.Fatalf("run %s 的 step_count 库内为 %d，接口回 %d（两套事实）", runID, stepCount, got)
+		}
+		page, err := c.postOK("/job/run/steps", map[string]any{"run_id": runID, "page": 1, "page_size": 100})
+		if err != nil {
+			cc.t.Fatalf("读取 run %s 的步骤明细失败: %v", runID, err)
+		}
+		steps := asSlice(page["list"])
+		if len(steps) != stepCount {
+			cc.t.Fatalf("run %s 的 step_count=%d，但步骤明细只返回 %d 行（步骤行丢了，控制台就少显示步骤）",
+				runID, stepCount, len(steps))
+		}
+		skipped := 0
+		for _, s := range steps {
+			m := asMap(s)
+			if asStr(m["condition"]) == "" {
+				cc.t.Fatalf("步骤 %v 必须带条件的最终取值（落库要能解释它为什么跑/没跑）", m["name"])
+			}
+			if int(asNum(m["status"])) != int(models.RunStatusSkipped) {
+				continue
+			}
+			skipped++
+			if asStr(m["error_msg"]) == "" {
+				cc.t.Fatalf("被跳过的步骤 %v 必须写明原因（%s）", m["name"], runID)
+			}
+			if asStr(m["artifacts"]) == "" {
+				cc.t.Fatalf("被跳过的步骤 %v 必须留下结构化产物（汇聚策略/依赖），否则无法复盘「为什么没跑」", m["name"])
+			}
+		}
+		cc.note("run %s：step_count=%d，明细行数=%d，其中跳过 %d 步（跳过均带原因与产物）", runID, stepCount, len(steps), skipped)
+	})
 }

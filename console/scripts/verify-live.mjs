@@ -99,6 +99,8 @@ try {
     approval: await server.ssrLoadModule('/src/api/approval.js'),
     // 阶段 4-A：Agent 经验库走的是 api/memory.js。
     memory: await server.ssrLoadModule('/src/api/memory.js'),
+    // 阶段 4-B：任务编排只读控制面走的是 api/job.js（与 JobsView/OrchestrationView 同一条链路）。
+    job: await server.ssrLoadModule('/src/api/job.js'),
   }
 } catch (err) {
   console.error('加载控制台 API 模块失败:', err?.message || err)
@@ -513,6 +515,111 @@ if (!SKIP_MODEL_WRITE) {
 }
 
 await server.close()
+
+// ---------------------------------------------------------------------------
+// 阶段 4-B) 任务编排（DAG）只读控制面：api/job.js → /job/dag/validate|find
+//
+// 这一节的意义不在于"接口能通"，而在于**坏图真的会被拒**：
+// 校验通过 = 允许保存并下发到节点执行；校验失败 = 明确告诉运维哪一步错了。
+// 因此这里既校验一份合法菱形，也必须校验一份成环的图（期望业务码 1021）。
+// ---------------------------------------------------------------------------
+{
+  const diamond = JSON.stringify({
+    max_parallel: 2,
+    steps: [
+      { index: 0, name: 'verify-extract', command: 'echo extract' },
+      { index: 1, name: 'verify-transform', command: 'echo transform', depends_on: '0' },
+      { index: 2, name: 'verify-enrich', command: 'echo enrich', depends_on: '0' },
+      { index: 3, name: 'verify-load', command: 'echo load', depends_on: '1,2', join: 'all_success' },
+    ],
+  })
+
+  const okDraft = await step('POST /job/dag/validate（合法菱形）', () =>
+    mods.job.validateJobDag({ steps_json: diamond }),
+  )
+  if (okDraft.ok) {
+    const p = okDraft.value?.plan
+    check(
+      'POST /job/dag/validate 合法图：给出步骤 / 依赖边 / 层深',
+      okDraft.value?.valid === true &&
+        p?.steps?.length === 4 &&
+        p?.edges?.length === 4 &&
+        p?.max_depth === 2 &&
+        Array.isArray(p.steps.find((s) => s.index === 3)?.depends_on),
+      `steps=${p?.steps?.length} edges=${p?.edges?.length} max_depth=${p?.max_depth} load.depends_on=${JSON.stringify(p?.steps?.find((s) => s.index === 3)?.depends_on)}`,
+    )
+  }
+
+  const cycleDraft = JSON.stringify({
+    steps: [
+      { index: 0, name: 'verify-a', command: 'echo a', depends_on: '2' },
+      { index: 1, name: 'verify-b', command: 'echo b', depends_on: '0' },
+      { index: 2, name: 'verify-c', command: 'echo c', depends_on: '1' },
+    ],
+  })
+  const bad = await step('POST /job/dag/validate（成环）', async () => {
+    try {
+      await mods.job.validateJobDag({ steps_json: cycleDraft })
+      return { rejected: false }
+    } catch (e) {
+      return { rejected: true, code: e?.code, msg: e?.message || String(e) }
+    }
+  })
+  if (bad.ok) {
+    check(
+      'POST /job/dag/validate 坏图被拒：code=1021 且给出完整环路',
+      bad.value?.rejected === true && bad.value?.code === 1021 && /环/.test(bad.value?.msg || ''),
+      `code=${bad.value?.code} msg=${summary(bad.value?.msg, 90)}`,
+    )
+  }
+
+  // 库里的任务：有编排的必须能读出摘要（含"是否可执行"），没有编排的必须是 1022
+  const jobs = await step('POST /job/search（编排视图的任务下拉）', () =>
+    mods.job.searchJobs({ page: 1, page_size: 100 }),
+  )
+  if (jobs.ok) {
+    const list = jobs.value?.list || []
+    const withPlan = list.filter((j) => String(j.steps_json || '').trim())
+    const without = list.find((j) => !String(j.steps_json || '').trim())
+    check(
+      'POST /job/search 返回 steps_json（前端据此区分"有编排/单步"）',
+      list.length > 0 && list.every((j) => 'steps_json' in j),
+      `任务数=${list.length} 其中有编排=${withPlan.length}`,
+    )
+
+    if (withPlan.length === 0) {
+      console.log('  - 库里暂无带 steps_json 的任务：/job/dag/find 的"有编排"分支留给 Go 验收用例 AC-32 覆盖')
+    } else {
+      const found = await step('POST /job/dag/find（有编排的任务）', () => mods.job.findJobDag(withPlan[0].id))
+      if (found.ok) {
+        const d = found.value || {}
+        check(
+          'POST /job/dag/find 有编排：steps/edges/层深与可执行标记齐全',
+          d.executable === true && d.plan?.steps?.length > 0 && Array.isArray(d.plan?.edges),
+          `job=${d.job_id} steps=${d.plan?.steps?.length} edges=${d.plan?.edges?.length} max_depth=${d.plan?.max_depth}`,
+        )
+      }
+    }
+
+    if (without) {
+      const none = await step('POST /job/dag/find（单步任务）', async () => {
+        try {
+          await mods.job.findJobDag(without.id)
+          return { code: 200 }
+        } catch (e) {
+          return { code: e?.code, msg: e?.message || String(e) }
+        }
+      })
+      if (none.ok) {
+        check(
+          'POST /job/dag/find 单步任务：返回 1022（"本来就没有编排"≠"编排是坏的"）',
+          none.value?.code === 1022,
+          `job=${without.id} code=${none.value?.code} msg=${summary(none.value?.msg, 60)}`,
+        )
+      }
+    }
+  }
+}
 
 console.log('\n===== 真实联调结果 =====')
 console.log(`通过 ${results.length - failed}/${results.length}，失败 ${failed}`)

@@ -264,6 +264,74 @@ check('阶段 4-A 经验库 Mock：统计口径自洽且分母只含执行过的
   assert.ok(d.definition.success_rate && d.definition.excluded.length >= 3, '统计必须自述口径与排除项')
 })
 
+check('阶段 4-B 编排 Mock：合法菱形给出步骤/边/层深，且层深按最长路径', async () => {
+  const res = mock.jobDagFind({ job_id: 1 })
+  assert.equal(res.code, 200, '默认样例必须是合法编排')
+  const plan = res.data.plan
+  assert.equal(plan.steps.length, 4)
+  assert.equal(plan.edges.length, 4, '菱形应有 4 条依赖边')
+  assert.equal(plan.max_depth, 2, 'extract → (archive|notify) → purge 的层深是 2')
+  const purge = plan.steps.find((s) => s.index === 3)
+  assert.deepEqual(purge.depends_on, [1, 2], 'purge 必须依赖两条分支')
+  assert.equal(purge.join, 'all_success')
+  assert.equal(res.data.executable, true)
+  // 边必须指向上游 → 下游，而不是反过来
+  for (const e of plan.edges) assert.ok(e.from < e.to, `边的方向不对: ${JSON.stringify(e)}`)
+})
+
+check('阶段 4-B 编排 Mock：依赖默认按书写顺序串联，并可显式声明 root', async () => {
+  const linear = mock.jobDagValidate({
+    steps_json: JSON.stringify({ steps: [{ index: 0, command: 'a' }, { index: 1, command: 'b' }, { index: 2, command: 'c' }] }),
+  })
+  assert.equal(linear.code, 200)
+  assert.deepEqual(linear.data.plan.steps.map((s) => s.depends_on), [[], [0], [1]], '不写依赖时必须串起来')
+
+  const withRoot = mock.jobDagValidate({
+    steps_json: JSON.stringify({ steps: [{ index: 0, command: 'a' }, { index: 1, command: 'b', depends_on: 'root' }] }),
+  })
+  assert.equal(withRoot.code, 200)
+  assert.deepEqual(withRoot.data.plan.steps[1].depends_on, [], 'root 表示没有上游')
+  assert.ok(
+    withRoot.data.plan.steps[1].warnings.join().includes('孤岛'),
+    '两个互不相干的步骤必须给出孤岛告警，而不是静默执行',
+  )
+})
+
+check('阶段 4-B 编排 Mock：坏图必须被拒（环 / 依赖不存在 / 未知字段 / 空编排）', () => {
+  const cycle = mock.jobDagValidate({
+    steps_json: JSON.stringify({
+      steps: [
+        { index: 0, command: 'a', depends_on: '2' },
+        { index: 1, command: 'b', depends_on: '0' },
+        { index: 2, command: 'c', depends_on: '1' },
+      ],
+    }),
+  })
+  assert.equal(cycle.code, 1021, '成环必须返回编排非法')
+  assert.ok(cycle.msg.includes('环'), `错误信息要指出环: ${cycle.msg}`)
+
+  const dangling = mock.jobDagValidate({
+    steps_json: JSON.stringify({ steps: [{ index: 0, command: 'a' }, { index: 1, command: 'b', depends_on: '9' }] }),
+  })
+  assert.equal(dangling.code, 1021)
+  assert.ok(dangling.msg.includes('不存在的步骤 9'), dangling.msg)
+
+  const typo = mock.jobDagValidate({
+    steps_json: JSON.stringify({ steps: [{ index: 0, command: 'a' }, { index: 1, command: 'b', depends_ons: '0' }] }),
+  })
+  assert.equal(typo.code, 1021, '拼错的字段名必须报错，不能被静默忽略')
+  assert.ok(typo.msg.includes('depends_ons'), typo.msg)
+
+  const empty = mock.jobDagValidate({ steps_json: '   ' })
+  assert.equal(empty.code, 1022, '没有编排是合法的"单步任务"状态，用独立业务码表达')
+})
+
+check('阶段 4-B 编排 Mock：单步任务查编排返回 1022，而不是一张空图', () => {
+  const res = mock.jobDagFind({ job_id: 2 })
+  assert.equal(res.code, 1022)
+  assert.ok(!res.data.plan, '没有编排时不应伪造 plan')
+})
+
 let failed = 0
 for (const { name, fn } of checks) {
   try {

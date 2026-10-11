@@ -70,6 +70,16 @@ const (
 	ErrorAgentMemoryNotFound = 1019
 	// ErrorAgentMemoryConflict 经验条目状态已变更（重复停用/启用，CAS 未生效）。
 	ErrorAgentMemoryConflict = 1020
+
+	// 阶段 4-B（多步骤编排）业务码。
+	//
+	// 为什么"编排非法"要单独一个码：它是**定义错误**（改定义可恢复），而不是
+	// 参数格式错误（1001）或任务不存在（1002 附近的老码），前端据此在编排编辑器里
+	// 标红具体步骤，而不是弹一句"参数错误"。
+	// ErrorJobPlanInvalid 编排定义非法（含成环/依赖不存在/JSON 结构错误等，消息里带定位）。
+	ErrorJobPlanInvalid = 1021
+	// ErrorJobPlanNotFound 该任务没有编排定义（steps_json 为空）。
+	ErrorJobPlanNotFound = 1022
 )
 
 func Result(code int, data interface{}, msg string, c *gin.Context) {

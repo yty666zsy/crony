@@ -190,6 +190,188 @@ export function jobDelete({ id }) {
   return { code: 200, data: { id }, msg: '删除成功（Mock）' }
 }
 
+/* ------------ 阶段 4-B：多步骤编排（DAG）只读控制面 ------------ */
+
+/**
+ * mockDagPlan 复刻后端 orchestration.BuildPlan 的裁决规则（只做"合法性 + 摘要"，
+ * 不真执行）。规则与 Go 侧保持一致的三点：
+ *   1. depends_on 不写 = 依赖索引顺序上的前一步；写 "root"/"none"/"-" = 没有上游；
+ *      写 "0,2" = 显式依赖；含非数字项直接报错。
+ *   2. 索引重复、自依赖、依赖不存在的步骤、成环、未知字段 → 非法（拒绝保存/执行）。
+ *   3. 层深按最长路径计算，摘要里给出步骤、边、深度与告警。
+ *
+ * 为什么 Mock 也要复刻：Mock 是控制台默认模式（USE_MOCK=true），如果这里一律回
+ * "合法"，那么前端在接真实后端之前根本发现不了自己画错了图。
+ */
+function mockDagPlan(raw) {
+  const text = String(raw ?? '').trim()
+  if (!text) return { code: 1022, data: { valid: false, error: '该任务没有编排定义（steps_json 为空）：单步任务不需要编排' }, msg: 'no orchestration defined' }
+
+  let spec
+  try {
+    spec = JSON.parse(text)
+  } catch (e) {
+    return bizErr(1021, `编排定义不是合法 JSON：${e.message}`)
+  }
+  if (!spec || typeof spec !== 'object' || Array.isArray(spec)) {
+    return bizErr(1021, '编排定义必须是 JSON 对象（{"steps":[...]}）')
+  }
+  const allowed = ['max_parallel', 'fail_fast', 'steps']
+  const unknown = Object.keys(spec).filter((k) => !allowed.includes(k))
+  if (unknown.length) return bizErr(1021, `存在未知字段：${unknown.join(',')}（拼错的字段不会被忽略）`)
+  const steps = Array.isArray(spec.steps) ? spec.steps : []
+  if (!steps.length) return bizErr(1021, '编排定义里没有任何步骤')
+
+  const stepAllowed = ['index', 'name', 'kind', 'command', 'args', 'depends_on', 'join', 'condition', 'continue_on_failure', 'timeout_seconds', 'retry_times', 'retry_interval', 'http_method']
+  const seen = new Set()
+  const byIndex = new Map()
+  for (const s of steps) {
+    const bad = Object.keys(s).filter((k) => !stepAllowed.includes(k))
+    if (bad.length) return bizErr(1021, `步骤 ${s.index} 存在未知字段：${bad.join(',')}`)
+    if (Number(s.index) < 0 || seen.has(Number(s.index))) return bizErr(1021, `步骤 index 非法或重复：${s.index}`)
+    seen.add(Number(s.index))
+    byIndex.set(Number(s.index), s)
+    if (!String(s.command ?? '').trim()) return bizErr(1021, `步骤 ${s.index} 缺少 command`)
+    if (s.join && !['all_success', 'any_success', 'all_done'].includes(s.join)) return bizErr(1021, `步骤 ${s.index} 的 join 非法：${s.join}`)
+    if (s.condition && !['on_success', 'on_failure', 'always'].includes(s.condition)) return bizErr(1021, `步骤 ${s.index} 的 condition 非法：${s.condition}`)
+  }
+
+  // 依赖解析（与 Go 侧同一套规则）
+  const depsOf = []
+  steps.forEach((s, pos) => {
+    const rawDep = String(s.depends_on ?? '').trim().toLowerCase()
+    if (rawDep === 'root' || rawDep === 'none' || rawDep === '-') return depsOf.push([])
+    if (rawDep === '') return depsOf.push(pos === 0 ? [] : [Number(steps[pos - 1].index)])
+    const parts = rawDep.split(',').map((p) => p.trim())
+    const deps = []
+    for (const p of parts) {
+      if (p === '') return depsOf.push({ err: `步骤 ${s.index} 的 depends_on 含有空的依赖项` })
+      if (!/^\d+$/.test(p)) return depsOf.push({ err: `步骤 ${s.index} 的 depends_on 含非数字项 ${p}（只支持 "0,2" 或 "root"）` })
+      const idx = Number(p)
+      if (idx === Number(s.index)) return depsOf.push({ err: `步骤 ${s.index} 依赖了自身` })
+      if (!byIndex.has(idx)) return depsOf.push({ err: `步骤 ${s.index} 依赖了不存在的步骤 ${idx}` })
+      if (!deps.includes(idx)) deps.push(idx)
+    }
+    depsOf.push(deps.sort((a, b) => a - b))
+  })
+  const depErr = depsOf.find((d) => d && !Array.isArray(d) && d.err)
+  if (depErr) return bizErr(1021, depErr.err)
+
+  // 环检测（返回完整环路，便于前端直接把环画出来）
+  const color = new Map()
+  const stack = []
+  let cyc = ''
+  const visit = (pos) => {
+    const idx = Number(steps[pos].index)
+    color.set(idx, 1)
+    stack.push(`${idx} ${steps[pos].name || `step-${idx}`}`)
+    for (const d of depsOf[pos]) {
+      const dpos = steps.findIndex((x) => Number(x.index) === d)
+      if (color.get(d) === 1) {
+        cyc = [...stack.slice(stack.indexOf(stack.find((t) => t.startsWith(`${d} `)))), `${d} ${byIndex.get(d).name || `step-${d}`}`].join(' → ')
+        return true
+      }
+      if (!color.get(d) && visit(dpos)) return true
+    }
+    stack.pop()
+    color.set(idx, 2)
+    return false
+  }
+  for (let pos = 0; pos < steps.length; pos++) {
+    if (!color.get(Number(steps[pos].index)) && visit(pos)) return bizErr(1021, `编排存在环：${cyc}`)
+  }
+
+  // 摘要（步骤 + 边 + 最长路径层深）
+  const depth = new Map(steps.map((s) => [Number(s.index), 0]))
+  for (let round = 0; round < steps.length; round++) {
+    let changed = false
+    steps.forEach((s, pos) => {
+      const best = depsOf[pos].reduce((acc, d) => Math.max(acc, (depth.get(d) ?? 0) + 1), 0)
+      if (best > depth.get(Number(s.index))) {
+        depth.set(Number(s.index), best)
+        changed = true
+      }
+    })
+    if (!changed) break
+  }
+  const hasDownstream = new Set(depsOf.flat())
+  const planSteps = steps.map((s, pos) => {
+    const warnings = []
+    if (!depsOf[pos].length && pos !== 0) warnings.push('该步骤没有上游，会被当作并排分支的起点执行')
+    if (!depsOf[pos].length && !hasDownstream.has(Number(s.index)) && steps.length > 1) {
+      warnings.push('该步骤既没有上游也没有下游：它是一座孤岛（确认这是有意为之）')
+    }
+    return {
+      index: Number(s.index),
+      name: s.name || `step-${s.index}`,
+      kind: s.kind || 'shell',
+      command: s.command,
+      depends_on: depsOf[pos],
+      join: s.join || 'all_success',
+      condition: s.condition || 'on_success',
+      depth: depth.get(Number(s.index)),
+      retry_times: Number(s.retry_times || 0),
+      timeout_seconds: Number(s.timeout_seconds || 0),
+      warnings,
+    }
+  })
+  const edges = []
+  steps.forEach((s, pos) => depsOf[pos].forEach((d) => edges.push({ from: d, to: Number(s.index) })))
+  return {
+    code: 200,
+    data: {
+      valid: true,
+      plan: {
+        max_parallel: Number(spec.max_parallel || 0) || 1,
+        fail_fast: Boolean(spec.fail_fast),
+        steps: planSteps,
+        edges,
+        max_depth: Math.max(0, ...planSteps.map((s) => s.depth)),
+      },
+    },
+    msg: 'orchestration is valid',
+  }
+}
+
+/** POST /job/dag/validate */
+export function jobDagValidate({ job_id: jobId, steps_json: stepsJSON } = {}) {
+  if (jobId) {
+    const job = jobs.find((j) => Number(j.id) === Number(jobId))
+    if (!job) return bizErr(1002, '任务不存在')
+    return mockDagPlan(job.steps_json)
+  }
+  return mockDagPlan(stepsJSON)
+}
+
+/** POST /job/dag/find */
+export function jobDagFind({ job_id: jobId } = {}) {
+  const job = jobs.find((j) => Number(j.id) === Number(jobId))
+  if (!job) return bizErr(1002, '任务不存在')
+  const res = mockDagPlan(job.steps_json)
+  if (res.code !== 200) {
+    // 与后端一致：非法定义也要能打开（否则用户看不到自己存进去的东西），
+    // 但必须标明"当前不可执行"。业务码原样透传——1022（本来就没有编排）与
+    // 1021（存着的定义是坏的）是两种完全不同的处置方式，合并会让前端误报。
+    return {
+      code: res.code,
+      data: { job_id: job.id, name: job.name, job_type: job.job_type, steps_json: job.steps_json || '', executable: false, error: res.data?.error || res.msg },
+      msg: res.msg,
+    }
+  }
+  return {
+    code: 200,
+    data: {
+      job_id: job.id,
+      name: job.name,
+      job_type: job.job_type,
+      steps_json: job.steps_json || '',
+      executable: true,
+      plan: res.data.plan,
+    },
+    msg: 'operation success',
+  }
+}
+
 /* --------------- 执行记录（后端已实现 /job/run/*） --------------- */
 
 export function runSearch(params = {}) {

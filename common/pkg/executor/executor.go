@@ -124,6 +124,14 @@ type Result struct {
 	FinishedAt time.Time
 	Duration   time.Duration
 	Err        error
+	// Condition / Join / DependsOn 是这一步的编排属性（阶段 4-B）。
+	//
+	// 为什么结果里要带它们：落库后的步骤行必须能**独立回答**"它为什么跑/没跑"。
+	// 只看 status=skipped 而不看 join 与 depends_on，运维无法区分
+	// "上游失败被 all_success 挡住"和"这条分支本来就不该在这个条件下跑"。
+	Condition StepCondition
+	Join      JoinPolicy
+	DependsOn []int
 	// Artifacts 结构化产物：HTTP 状态码、响应头、容器 ID 等，落库为 JSON。
 	Artifacts map[string]string
 }

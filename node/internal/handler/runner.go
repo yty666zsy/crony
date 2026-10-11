@@ -12,6 +12,7 @@ import (
 	"github.com/tmnhs/crony/common/models"
 	"github.com/tmnhs/crony/common/pkg/executor"
 	"github.com/tmnhs/crony/common/pkg/logger"
+	"github.com/tmnhs/crony/common/pkg/orchestration"
 	"github.com/tmnhs/crony/common/pkg/retry"
 	"github.com/tmnhs/crony/common/pkg/runpolicy"
 )
@@ -401,6 +402,39 @@ func (c *RunCoordinator) recordSkipped(job *Job, source models.TriggerSource, sc
 	return &RunOutcome{Run: run, Skipped: true, SkipReason: reason}
 }
 
+// recordInvalidPlan 记录一次"因编排定义非法而拒绝执行"。
+//
+// 与 recordSkipped 的区别：跳过是"策略决定不跑"（不是错误），这里是"定义是坏的"（是错误），
+// 因此状态是 failed 而不是 skipped，并且错误信息要能直接指导修复（含具体步骤/环）。
+func (c *RunCoordinator) recordInvalidPlan(job *Job, runID string, source models.TriggerSource, scheduled time.Time, policy runpolicy.ConcurrencyPolicy, cause error) *RunOutcome {
+	reason := fmt.Sprintf("任务编排定义非法，已拒绝执行：%v", cause)
+	logger.GetLogger().Error(fmt.Sprintf("job[%d] %s", job.ID, reason))
+	run := &models.JobRun{
+		RunID:          runID,
+		JobID:          job.ID,
+		JobName:        job.Name,
+		Spec:           job.Spec,
+		Command:        job.Command,
+		JobType:        int(job.Type),
+		NodeUUID:       job.RunOn,
+		Hostname:       job.Hostname,
+		IP:             job.Ip,
+		TriggerSource:  int(source),
+		Status:         int(models.RunStatusFailed),
+		Attempt:        1,
+		ScheduledTime:  scheduled.Unix(),
+		StepCount:      0,
+		ErrorMsg:       truncateText(reason, 1000),
+		PolicySnapshot: policySnapshot(job, policy),
+		Created:        time.Now().Unix(),
+	}
+	if err := c.store.InsertRun(run); err != nil {
+		logger.GetLogger().Warn(fmt.Sprintf("job[%d] 非法编排记录落库失败: %s", job.ID, err.Error()))
+		return &RunOutcome{Err: fmt.Errorf("%s（且记录落库失败: %v）", reason, err)}
+	}
+	return &RunOutcome{Run: run, Err: fmt.Errorf("%s", reason)}
+}
+
 // execute 落库 + 执行 + 收尾。
 func (c *RunCoordinator) execute(job *Job, runID string, source models.TriggerSource, scheduled time.Time, policy runpolicy.ConcurrencyPolicy) *RunOutcome {
 	// 幂等闸门 1：run_id 已存在 → 直接复用，不重复执行。
@@ -412,7 +446,13 @@ func (c *RunCoordinator) execute(job *Job, runID string, source models.TriggerSo
 		return &RunOutcome{Err: fmt.Errorf("幂等检查失败，已放弃本次执行: %w", err)}
 	}
 
-	plan := BuildPlan(job, runID)
+	plan, planErr := BuildPlan(job, runID)
+	if planErr != nil {
+		// 坏编排必须**拒绝执行并留下可查的记录**，而不是"跳过坏步骤、跑剩下的"。
+		// 保存任务时 admin 已经拒绝过一次（见 orchestration.ValidateJobPlan），
+		// 这里是对"库里已经存着一份坏定义"（手工改库、旧版本写入）的兜底。
+		return c.recordInvalidPlan(job, runID, source, scheduled, policy, planErr)
+	}
 	started := time.Now()
 	run := &models.JobRun{
 		RunID:          runID,
@@ -520,6 +560,11 @@ func (c *RunCoordinator) execute(job *Job, runID string, source models.TriggerSo
 }
 
 // persistStep 落库单个步骤结果。
+//
+// 阶段 4-B 起额外记录三件事，都是为了"跳过也说得清"：
+//   - condition/join：这一步的编排条件与汇聚策略（artifact 里也留一份，便于直接看 JSON）；
+//   - skipped 步骤的 error_msg：把 skip_reason 写进 error_msg，而不是留空——
+//     留空的 skipped 行在控制台上就是一句"跳过"，运维无法判断是策略还是故障。
 func (c *RunCoordinator) persistStep(runID string, res executor.Result) {
 	artifacts := ""
 	if len(res.Artifacts) > 0 {
@@ -527,12 +572,20 @@ func (c *RunCoordinator) persistStep(runID string, res executor.Result) {
 			artifacts = string(b)
 		}
 	}
+	condition := string(res.Condition)
+	if condition == "" {
+		condition = string(executor.ConditionOnSuccess)
+	}
+	errText := res.Error()
+	if errText == "" && res.Status == models.RunStatusSkipped {
+		errText = res.Artifacts["skip_reason"]
+	}
 	step := &models.JobRunStep{
 		RunID:      runID,
 		StepIndex:  res.StepIndex,
 		Name:       res.Name,
 		Kind:       string(res.Kind),
-		Condition:  string(executor.ConditionOnSuccess),
+		Condition:  condition,
 		Status:     int(res.Status),
 		ExitCode:   res.ExitCode,
 		RetryCount: res.RetryCount,
@@ -540,7 +593,7 @@ func (c *RunCoordinator) persistStep(runID string, res executor.Result) {
 		FinishedAt: res.FinishedAt.Unix(),
 		DurationMs: res.Duration.Milliseconds(),
 		Output:     truncateText(res.Output, 4000),
-		ErrorMsg:   truncateText(res.Error(), 1000),
+		ErrorMsg:   truncateText(errText, 1000),
 		Artifacts:  truncateText(artifacts, 2000),
 		Created:    time.Now().Unix(),
 	}
@@ -554,7 +607,12 @@ func (c *RunCoordinator) persistStep(runID string, res executor.Result) {
 
 // BuildPlan 把任务定义映射为执行计划。
 //
-// 兼容性（老任务零改动）：
+// 两条路径（阶段 4-B 起）：
+//   - `job.steps_json` 非空 → 多步骤编排：交给 orchestration.BuildPlan 编译 + 图校验；
+//     返回错误时调用方**必须拒绝执行**（见 RunCoordinator.execute 的 recordInvalidPlan）。
+//   - `job.steps_json` 为空 → 下面这段单步逻辑，与阶段 1 完全一致（老任务行为逐字不变）。
+//
+// 单步兼容性（老任务零改动）：
 //   - type=1（cmd）：沿用旧的 argv 语义（RawArgv=true），不做 shell 解析，
 //     避免升级后引号/空格行为变化导致命令跑错；
 //   - type=2（http）：沿用旧语义（GET 直接请求；POST 以 '?' 拆分 URL 与 body），
@@ -563,7 +621,19 @@ func (c *RunCoordinator) persistStep(runID string, res executor.Result) {
 //
 // 唯一的**有意行为变更**：type=1 在 timeout<=0 时，旧实现是"永不超时"，
 // 新实现兜底 30 分钟（executor.DefaultTimeout），避免卡死任务永久占用调度槽。
-func BuildPlan(job *Job, runID string) executor.Plan {
+func BuildPlan(job *Job, runID string) (executor.Plan, error) {
+	if strings.TrimSpace(job.StepsJSON) != "" {
+		plan, used, err := orchestration.BuildPlan(job.Job, runID)
+		if err != nil {
+			return executor.Plan{}, err
+		}
+		if !used {
+			// steps_json 非空却解析出"没有编排"：这是矛盾状态，宁可拒绝执行，
+			// 也不能退化成单步任务把 job.command 跑出去（那不是用户写的意图）。
+			return executor.Plan{}, fmt.Errorf("steps_json 非空但没有解析出任何步骤，已拒绝执行以免误跑单步任务")
+		}
+		return plan, nil
+	}
 	step := executor.Step{
 		Index:     0,
 		Name:      "main",
@@ -629,7 +699,7 @@ func BuildPlan(job *Job, runID string) executor.Plan {
 			Timeout: time.Duration(job.Timeout) * time.Second,
 		}
 	}
-	return executor.Plan{RunID: runID, JobID: job.ID, Steps: []executor.Step{step}}
+	return executor.Plan{RunID: runID, JobID: job.ID, Steps: []executor.Step{step}}, nil
 }
 
 // legacyStepPolicy 把旧的重试参数映射为步骤级重试策略。

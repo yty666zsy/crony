@@ -26,6 +26,7 @@ export const navGroups = [
     items: [
       { label: 'Scheduled Jobs', to: '/jobs', icon: 'Timer' },
       { label: 'Run History', to: '/runs', icon: 'DataLine' },
+      { label: 'Orchestration', to: '/orchestration', icon: 'Share' },
     ],
   },
   {

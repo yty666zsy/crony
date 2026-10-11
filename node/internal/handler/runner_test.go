@@ -513,12 +513,22 @@ func (f *failingFindStore) FindRun(string) (*models.JobRun, error) {
 	return nil, errors.New("dial tcp: connection refused")
 }
 
+// mustBuildPlan 断言编译成功（老任务路径不允许报错）。
+func mustBuildPlan(t *testing.T, job *Job, runID string) executor.Plan {
+	t.Helper()
+	plan, err := BuildPlan(job, runID)
+	if err != nil {
+		t.Fatalf("BuildPlan 意外失败: %v", err)
+	}
+	return plan
+}
+
 // TestBuildPlanLegacyCompatibility 老任务零改动兼容：type=1/2 的映射语义必须逐字保留。
 func TestBuildPlanLegacyCompatibility(t *testing.T) {
 	t.Run("cmd_argv语义", func(t *testing.T) {
 		job := testJob(41)
 		job.Timeout = 60
-		plan := BuildPlan(job, "j41-t1")
+		plan := mustBuildPlan(t, job, "j41-t1")
 		step := plan.Steps[0]
 		if step.Kind != executor.KindShell {
 			t.Fatalf("Kind = %s, want shell", step.Kind)
@@ -539,7 +549,7 @@ func TestBuildPlanLegacyCompatibility(t *testing.T) {
 
 	t.Run("cmd_未填超时使用兜底", func(t *testing.T) {
 		job := testJob(42)
-		plan := BuildPlan(job, "j42-t1")
+		plan := mustBuildPlan(t, job, "j42-t1")
 		// timeout=0 交给执行器兜底（30min），不再"永不超时"
 		if plan.Steps[0].Request.Timeout != 0 {
 			t.Fatalf("未填超时应保持 0 由执行器兜底，实际 %v", plan.Steps[0].Request.Timeout)
@@ -548,7 +558,7 @@ func TestBuildPlanLegacyCompatibility(t *testing.T) {
 
 	t.Run("http_get", func(t *testing.T) {
 		job := &Job{Job: &models.Job{ID: 43, Name: "健康检查", Command: "https://api.example.com/health", Type: models.JobTypeHttp, HttpMethod: models.HTTPMethodGet}}
-		step := BuildPlan(job, "j43-t1").Steps[0]
+		step := mustBuildPlan(t, job, "j43-t1").Steps[0]
 		if step.Kind != executor.KindHTTP || step.Request.Method != "GET" {
 			t.Fatalf("GET 映射不符: %s %s", step.Kind, step.Request.Method)
 		}
@@ -559,7 +569,7 @@ func TestBuildPlanLegacyCompatibility(t *testing.T) {
 
 	t.Run("http_post_按问号拆body", func(t *testing.T) {
 		job := &Job{Job: &models.Job{ID: 44, Name: "回调", Command: "https://api.example.com/hook?{\"a\":1}", Type: models.JobTypeHttp, HttpMethod: models.HTTPMethodPost, Timeout: 10}}
-		step := BuildPlan(job, "j44-t1").Steps[0]
+		step := mustBuildPlan(t, job, "j44-t1").Steps[0]
 		if step.Request.Method != "POST" {
 			t.Fatalf("Method = %s, want POST", step.Request.Method)
 		}
@@ -576,7 +586,7 @@ func TestBuildPlanLegacyCompatibility(t *testing.T) {
 
 	t.Run("http_超大超时被压到300s", func(t *testing.T) {
 		job := &Job{Job: &models.Job{ID: 45, Command: "https://api.example.com/health", Type: models.JobTypeHttp, Timeout: 99999}}
-		step := BuildPlan(job, "j45-t1").Steps[0]
+		step := mustBuildPlan(t, job, "j45-t1").Steps[0]
 		if step.Request.Timeout != time.Duration(HttpExecTimeout)*time.Second {
 			t.Fatalf("Timeout = %v, want %ds", step.Request.Timeout, HttpExecTimeout)
 		}

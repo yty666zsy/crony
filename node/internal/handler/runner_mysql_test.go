@@ -365,3 +365,249 @@ func TestMySQLRunCoordinatorConcurrentSameSlotOnRealDB(t *testing.T) {
 		t.Fatalf("库中应只有 1 条执行记录，实际 %d", count)
 	}
 }
+
+// ---------- 阶段 4-B：多步骤编排（DAG）的真实执行 ----------
+
+// dagStepJSON 生成一个步骤的编排 JSON。
+//
+// 用显式 args 而不是拼一条命令行：Windows/Linux 的解释器不同（cmd /C 与 sh -c），
+// 拼字符串既容易踩引号转义的坑，也掩盖了"编排里命令怎么切分"这件事。
+func dagStepJSON(index int, name string, cmd []string, dependsOn, join string) string {
+	args, _ := json.Marshal(cmd[1:])
+	dep := ""
+	if dependsOn != "" {
+		dep = fmt.Sprintf(`,"depends_on":%q`, dependsOn)
+	}
+	joinPart := ""
+	if join != "" {
+		joinPart = fmt.Sprintf(`,"join":%q`, join)
+	}
+	return fmt.Sprintf(`{"index":%d,"name":%q,"command":%q,"args":%s%s%s}`,
+		index, name, cmd[0], string(args), dep, joinPart)
+}
+
+func dagJob(id int, name, stepsJSON string) *Job {
+	return &Job{Job: &models.Job{
+		ID:      id,
+		Name:    name,
+		Command: "echo fallback-must-not-run",
+		Type:    models.JobTypeCmd,
+		Spec:    "*/5 * * * *",
+		RunOn:   "node-it-01",
+		Timeout: 30,
+		// 关键：StepsJSON 非空时 BuildPlan 必须走编排路径，绝不回退到这条 command。
+		StepsJSON: stepsJSON,
+	}}
+}
+
+func readRunSteps(t *testing.T, runID string) []models.JobRunStep {
+	t.Helper()
+	steps := make([]models.JobRunStep, 0)
+	if err := dbclient.GetMysqlDB().Table(models.CronyJobRunStepTableName).
+		Where("run_id = ?", runID).Order("step_index asc").Find(&steps).Error; err != nil {
+		t.Fatalf("查询步骤失败: %v", err)
+	}
+	return steps
+}
+
+// TestMySQLRunCoordinatorMultiStepDAG 真实 MySQL + 真实进程的菱形编排：
+// 两条分支并行执行，汇聚步骤在上游都成功后执行；库中必须落下 4 条步骤记录，
+// 且顺序按 step_index 而不是完成先后。
+func TestMySQLRunCoordinatorMultiStepDAG(t *testing.T) {
+	requireMySQLNode(t)
+
+	c := NewRunCoordinator(executor.DefaultRegistry(), MySQLRunStore{})
+	c.SetProcPublisher(nil) // 集成测试不连 etcd
+
+	stepsJSON := "{\"max_parallel\":2,\"steps\":[" + strings.Join([]string{
+		dagStepJSON(0, "extract", successCmd(), "", ""),
+		dagStepJSON(1, "transform", successCmd(), "0", ""),
+		dagStepJSON(2, "enrich", successCmd(), "0", ""),
+		dagStepJSON(3, "load", successCmd(), "1,2", "all_success"),
+	}, ",") + "]}"
+
+	slot := time.Now().Truncate(time.Minute).Unix()
+	job := dagJob(910010, "集成测试-DAG菱形", stepsJSON)
+	runID := models.RunIDForSlot(job.ID, slot)
+	cleanupNodeRun(t, runID)
+	defer cleanupNodeRun(t, runID)
+
+	outcome := c.RunJob(job, models.TriggerScheduler, time.Unix(slot, 0))
+	if outcome.Err != nil || !outcome.Succeeded() {
+		t.Fatalf("菱形编排应执行成功: err=%v outcome=%+v", outcome.Err, outcome)
+	}
+
+	stored := &models.JobRun{RunID: runID}
+	if err := stored.FindByRunID(); err != nil {
+		t.Fatalf("按 run_id 查不到执行记录: %v", err)
+	}
+	if stored.StepCount != 4 || stored.SuccessSteps != 4 || stored.FailedSteps != 0 {
+		t.Fatalf("执行记录计数不符: step_count=%d success=%d failed=%d",
+			stored.StepCount, stored.SuccessSteps, stored.FailedSteps)
+	}
+
+	steps := readRunSteps(t, runID)
+	if len(steps) != 4 {
+		t.Fatalf("应有 4 条步骤记录，实际 %d", len(steps))
+	}
+	wantNames := []string{"extract", "transform", "enrich", "load"}
+	for i, s := range steps {
+		if s.StepIndex != i || s.Name != wantNames[i] {
+			t.Fatalf("第 %d 行步骤错位: index=%d name=%q", i, s.StepIndex, s.Name)
+		}
+		if s.Status != int(models.RunStatusSuccess) || s.ExitCode != 0 {
+			t.Fatalf("步骤 %q 状态不符: status=%d exit=%d", s.Name, s.Status, s.ExitCode)
+		}
+		if s.Output == "" {
+			t.Fatalf("步骤 %q 输出未落库", s.Name)
+		}
+	}
+}
+
+// TestMySQLRunCoordinatorDAGSkipsDownstreamOnFailure all_success 汇聚在
+// 上游失败时必须跳过下游，且**跳过原因必须落库**（阶段 4-B 的核心可解释性要求）。
+func TestMySQLRunCoordinatorDAGSkipsDownstreamOnFailure(t *testing.T) {
+	requireMySQLNode(t)
+
+	c := NewRunCoordinator(executor.DefaultRegistry(), MySQLRunStore{})
+	c.SetProcPublisher(nil)
+
+	stepsJSON := "{\"steps\":[" + strings.Join([]string{
+		dagStepJSON(0, "extract", successCmd(), "", ""),
+		dagStepJSON(1, "transform", failCmd(), "0", ""),
+		dagStepJSON(2, "load", successCmd(), "1", "all_success"),
+	}, ",") + "]}"
+
+	slot := time.Now().Truncate(time.Minute).Unix()
+	job := dagJob(910011, "集成测试-DAG上游失败", stepsJSON)
+	runID := models.RunIDForSlot(job.ID, slot)
+	cleanupNodeRun(t, runID)
+	defer cleanupNodeRun(t, runID)
+
+	outcome := c.RunJob(job, models.TriggerScheduler, time.Unix(slot, 0))
+	if outcome.Err == nil {
+		t.Fatal("上游失败时整次执行必须失败（不能因为下游被跳过就报成功）")
+	}
+
+	stored := &models.JobRun{RunID: runID}
+	if err := stored.FindByRunID(); err != nil {
+		t.Fatalf("按 run_id 查不到执行记录: %v", err)
+	}
+	if stored.Status != int(models.RunStatusFailed) {
+		t.Fatalf("库中状态应为 failed，实际 %s", models.RunStatus(stored.Status))
+	}
+	if stored.ErrorMsg == "" {
+		t.Fatal("失败原因未落库")
+	}
+
+	steps := readRunSteps(t, runID)
+	if len(steps) != 3 {
+		t.Fatalf("被跳过的步骤也必须落库（否则没人知道它没跑），实际 %d 条", len(steps))
+	}
+	if steps[0].Status != int(models.RunStatusSuccess) {
+		t.Fatalf("extract 应成功，实际 %d", steps[0].Status)
+	}
+	if steps[1].Status != int(models.RunStatusFailed) || steps[1].ExitCode == 0 {
+		t.Fatalf("transform 应失败且有非零退出码: status=%d exit=%d", steps[1].Status, steps[1].ExitCode)
+	}
+	skipped := steps[2]
+	if skipped.Status != int(models.RunStatusSkipped) {
+		t.Fatalf("load 应被跳过（all_success 上游失败），实际 %s", models.RunStatus(skipped.Status))
+	}
+	if !strings.Contains(skipped.ErrorMsg, "上游") {
+		t.Fatalf("跳过原因必须写进 error_msg（否则控制台只是一句「跳过」）: %q", skipped.ErrorMsg)
+	}
+	if !strings.Contains(skipped.Artifacts, "all_success") || !strings.Contains(skipped.Artifacts, "depends_on") {
+		t.Fatalf("跳过步骤的 artifacts 必须带汇聚策略与依赖: %s", skipped.Artifacts)
+	}
+}
+
+// TestMySQLRunCoordinatorRejectsInvalidPlanOnRealDB 库里存着一份非法编排时，
+// 节点必须**拒绝执行并留下 failed 记录**，而不是"跳过坏步骤跑剩下的"。
+func TestMySQLRunCoordinatorRejectsInvalidPlanOnRealDB(t *testing.T) {
+	requireMySQLNode(t)
+
+	c := NewRunCoordinator(executor.DefaultRegistry(), MySQLRunStore{})
+	c.SetProcPublisher(nil)
+
+	// 成环：0 → 2 → 1 → 0
+	stepsJSON := "{\"steps\":[" + strings.Join([]string{
+		dagStepJSON(0, "a", successCmd(), "2", ""),
+		dagStepJSON(1, "b", successCmd(), "0", ""),
+		dagStepJSON(2, "c", successCmd(), "1", ""),
+	}, ",") + "]}"
+
+	slot := time.Now().Truncate(time.Minute).Unix()
+	job := dagJob(910012, "集成测试-非法编排", stepsJSON)
+	runID := models.RunIDForSlot(job.ID, slot)
+	cleanupNodeRun(t, runID)
+	defer cleanupNodeRun(t, runID)
+
+	outcome := c.RunJob(job, models.TriggerScheduler, time.Unix(slot, 0))
+	if outcome.Err == nil {
+		t.Fatal("非法编排必须返回错误")
+	}
+	if !strings.Contains(outcome.Err.Error(), "编排") {
+		t.Fatalf("错误信息应指出是编排问题: %q", outcome.Err.Error())
+	}
+
+	stored := &models.JobRun{RunID: runID}
+	if err := stored.FindByRunID(); err != nil {
+		t.Fatalf("拒绝执行也必须留痕（否则没人知道它没跑）: %v", err)
+	}
+	if stored.Status != int(models.RunStatusFailed) {
+		t.Fatalf("拒绝执行应记为 failed，实际 %s", models.RunStatus(stored.Status))
+	}
+	if !strings.Contains(stored.ErrorMsg, "编排") {
+		t.Fatalf("拒绝原因未落库: %q", stored.ErrorMsg)
+	}
+	if steps := readRunSteps(t, runID); len(steps) != 0 {
+		t.Fatalf("被拒绝的执行不应有任何步骤记录，实际 %d 条", len(steps))
+	}
+}
+
+// TestMySQLRunCoordinatorDAGFailFastStopsPendingBranches fail_fast 打开时，
+// 一条分支失败不再启动其它待启动步骤，但 all_done 收集步骤仍要执行。
+func TestMySQLRunCoordinatorDAGFailFastStopsPendingBranches(t *testing.T) {
+	requireMySQLNode(t)
+
+	c := NewRunCoordinator(executor.DefaultRegistry(), MySQLRunStore{})
+	c.SetProcPublisher(nil)
+
+	stepsJSON := "{\"max_parallel\":1,\"fail_fast\":true,\"steps\":[" + strings.Join([]string{
+		dagStepJSON(0, "root", successCmd(), "root", ""),
+		dagStepJSON(1, "branch-bad", failCmd(), "0", ""),
+		dagStepJSON(2, "branch-late", successCmd(), "0", ""),
+		dagStepJSON(3, "collector", successCmd(), "1,2", "all_done"),
+	}, ",") + "]}"
+
+	slot := time.Now().Truncate(time.Minute).Unix()
+	job := dagJob(910013, "集成测试-DAG急停", stepsJSON)
+	runID := models.RunIDForSlot(job.ID, slot)
+	cleanupNodeRun(t, runID)
+	defer cleanupNodeRun(t, runID)
+
+	outcome := c.RunJob(job, models.TriggerScheduler, time.Unix(slot, 0))
+	if outcome.Err == nil {
+		t.Fatal("有分支失败时整次执行必须失败")
+	}
+
+	steps := readRunSteps(t, runID)
+	if len(steps) != 4 {
+		t.Fatalf("急停也必须把每个步骤的结局落库，实际 %d 条", len(steps))
+	}
+	if steps[1].Status != int(models.RunStatusFailed) {
+		t.Fatalf("branch-bad 应失败，实际 %s", models.RunStatus(steps[1].Status))
+	}
+	// max_parallel=1 + fail_fast：branch-late 排在失败分支之后，必须被急停跳过
+	if steps[2].Status != int(models.RunStatusSkipped) {
+		t.Fatalf("branch-late 应因 fail_fast 被跳过，实际 %s（skip_reason=%s）",
+			models.RunStatus(steps[2].Status), steps[2].ErrorMsg)
+	}
+	if !strings.Contains(steps[2].ErrorMsg, "fail_fast") {
+		t.Fatalf("急停跳过必须说明原因: %q", steps[2].ErrorMsg)
+	}
+	if steps[3].Status != int(models.RunStatusSuccess) {
+		t.Fatalf("all_done 收集步骤必须照常执行，实际 %s", models.RunStatus(steps[3].Status))
+	}
+}
