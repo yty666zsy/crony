@@ -411,6 +411,12 @@ func (a *AgentRouter) NLJobConfirm(c *gin.Context) {
 }
 
 // applyDraftOverrides 应用白名单内的覆盖字段（纯函数，便于测试）。
+//
+// "不改"的表示法（契约 §5.2）：字符串空串、超时 <= 0、重试次数 < 0。
+// retry_times 用 *int 区分"没传"（nil）与"显式改成 0"（合法值）；
+// 负数一律视为"不改"——与 timeout_seconds 的 <= 0 保持一致。
+// （此前负数会被写进草案并触发 1009 校验失败，与契约/前端注释说法不符，
+//   真实联调时前端注释写着"空串 / 0 / -1 表示不改"，代码却不认 -1。）
 func applyDraftOverrides(d agent.JobDraft, ov request.AgentNLJobOverrides) agent.JobDraft {
 	out := d
 	if name := strings.TrimSpace(ov.Name); name != "" {
@@ -423,7 +429,7 @@ func applyDraftOverrides(d agent.JobDraft, ov request.AgentNLJobOverrides) agent
 		out.TimeoutSeconds = ov.TimeoutSeconds
 	}
 	// RetryTimes 是 *int：nil 表示未修改（0 是合法值，不能用零值判空）。
-	if ov.RetryTimes != nil {
+	if ov.RetryTimes != nil && *ov.RetryTimes >= 0 {
 		out.RetryTimes = *ov.RetryTimes
 	}
 	return out

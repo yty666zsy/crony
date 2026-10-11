@@ -45,6 +45,14 @@ const server = await createServer({
   appType: 'custom',
   esbuild: false,
   optimizeDeps: { noDiscovery: true, include: [] },
+  // 本脚本校验的是**Mock 契约**，必须钉死 Mock 模式：
+  // Vite 的 loadEnv 会读 .env/.env.local，如果开发者按 README 建了
+  // `.env.local`（VITE_USE_MOCK=false，真实联调用），这里就会静默切到真实 HTTP，
+  // 13 条断言全数失败（2026-10-11 实际踩到：1/13）。
+  // 自检脚本的行为不能依赖"开发者本地有没有 .env.local"。
+  define: {
+    'import.meta.env.VITE_USE_MOCK': JSON.stringify('true'),
+  },
 })
 
 const api = await server.ssrLoadModule('/src/api/agent.js')

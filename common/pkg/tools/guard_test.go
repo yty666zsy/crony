@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -202,6 +203,62 @@ func TestResolveReadPathBlocksSymlinkEscape(t *testing.T) {
 	}
 	if _, err := ResolveReadPath(normal, policy); err != nil {
 		t.Fatalf("白名单内文件应放行: %v", err)
+	}
+}
+
+// TestGuardReadPathAbsoluteIsOSAware 锁定"绝对路径判定必须是 OS 感知的"。
+//
+// 背景：guardReadPath 原来用 `strings.HasPrefix(p, "/")` 判绝对路径（Unix-only），
+// 导致 Windows 上 `C:\logs\a.log` 被当成相对路径直接拒绝——文件读取工具在 Windows
+// 上拒绝一切绝对路径。本用例在**任何平台**都必须过：白名单内的绝对路径放行、
+// 相对路径拒绝、白名单外的绝对路径拒绝。
+func TestGuardReadPathAbsoluteIsOSAware(t *testing.T) {
+	root := t.TempDir() // 在 Windows 上是 C:\...，在 Linux 上是 /...
+	policy := DefaultPolicy()
+	policy.ShellReadPaths = []string{filepath.ToSlash(root) + "/"}
+
+	inside := filepath.Join(root, "app.log")
+	if err := os.WriteFile(inside, []byte("x"), 0o644); err != nil {
+		t.Fatalf("写文件失败: %v", err)
+	}
+	if err := guardReadPath(inside, policy); err != nil {
+		t.Fatalf("白名单内的绝对路径必须放行（Windows 上曾因 Unix-only 判定被拒）: %v", err)
+	}
+
+	if err := guardReadPath(filepath.Join("rel", "app.log"), policy); !errors.Is(err, ErrInvalidArgs) {
+		t.Fatalf("相对路径必须以 ErrInvalidArgs 拒绝，实际 %v", err)
+	}
+	// Unix 风格绝对路径也必须被认作绝对（本项目策略默认值是 /var/log 这类 Unix 路径，
+	// 而 filepath.IsAbs 在 Windows 上对 "/var/log" 返回 false）
+	if err := guardReadPath("/var/log/syslog", Policy{ShellReadPaths: []string{"/var/log/"}}); err != nil {
+		t.Fatalf("Unix 风格绝对路径必须放行（Windows 上曾因 filepath.IsAbs 被误判）: %v", err)
+	}
+	outside := filepath.Join(t.TempDir(), "other.log")
+	if err := guardReadPath(outside, policy); !errors.Is(err, ErrToolDenied) {
+		t.Fatalf("白名单外的绝对路径必须以 ErrToolDenied 拒绝，实际 %v", err)
+	}
+	// 目录穿越：必须用**未 Clean 的原始字符串**测（filepath.Join 会自己消掉 `..`）。
+	// 含 `..` 一律以 ErrReadonlyViolation 拒绝，不进入白名单前缀比较。
+	traversal := root + string(os.PathSeparator) + ".." + string(os.PathSeparator) + "etc" + string(os.PathSeparator) + "shadow"
+	if err := guardReadPath(traversal, policy); !errors.Is(err, ErrReadonlyViolation) {
+		t.Fatalf("含 .. 的路径必须以 ErrReadonlyViolation 拒绝，实际 %v", err)
+	}
+	// Clean 之后落在白名单外的绝对路径 → ErrToolDenied（而不是被 Clean"洗白"）
+	if err := guardReadPath(filepath.Join(root, "..", "etc", "shadow"), policy); !errors.Is(err, ErrToolDenied) {
+		t.Fatalf("Clean 后仍在白名单外必须以 ErrToolDenied 拒绝，实际 %v", err)
+	}
+}
+
+// TestMatchPathPrefixCaseFoldingOnWindows Windows 路径大小写不敏感，白名单要能命中。
+func TestMatchPathPrefixCaseFoldingOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("仅在 Windows 上大小写不敏感")
+	}
+	if !matchPathPrefix("c:/logs/x.log", "C:/Logs/") {
+		t.Fatal("Windows 下白名单前缀应大小写不敏感")
+	}
+	if matchPathPrefix("c:/logs2/x.log", "C:/Logs/") {
+		t.Fatal("同前缀但不同目录不得命中")
 	}
 }
 

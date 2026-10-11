@@ -215,6 +215,17 @@ func TestApplyDraftOverridesWhitelist(t *testing.T) {
 	if got.RetryTimes != 0 {
 		t.Fatalf("显式 0 必须生效，实际 %d", got.RetryTimes)
 	}
+	// 负数 = "不改"（契约 §5.2；与 timeout_seconds 的 <= 0 一致）。
+	// 真实联调前这里会把 -1 写进草案，随后校验必然 1009。
+	neg := -1
+	got = applyDraftOverrides(base, request.AgentNLJobOverrides{RetryTimes: &neg})
+	if got.RetryTimes != 2 {
+		t.Fatalf("retry_times=-1 应表示不改（保持 2），实际 %d", got.RetryTimes)
+	}
+	got = applyDraftOverrides(base, request.AgentNLJobOverrides{TimeoutSeconds: -1})
+	if got.TimeoutSeconds != 1800 {
+		t.Fatalf("timeout_seconds=-1 应表示不改（保持 1800），实际 %d", got.TimeoutSeconds)
+	}
 	name, spec, timeout := "新名称", "0 30 3 * * *", int64(600)
 	got = applyDraftOverrides(base, request.AgentNLJobOverrides{Name: name, Spec: spec, TimeoutSeconds: timeout})
 	if got.Name != name || got.Spec != spec || got.TimeoutSeconds != timeout {

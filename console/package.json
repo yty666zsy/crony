@@ -8,7 +8,8 @@
     "dev": "node scripts/run-vite.mjs dev",
     "build": "node scripts/run-vite.mjs build",
     "preview": "node scripts/run-vite.mjs preview --port 4173 --strictPort",
-    "smoke": "node scripts/smoke-mock.mjs"
+    "smoke": "node scripts/smoke-mock.mjs",
+    "verify:live": "node scripts/verify-live.mjs"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.1",

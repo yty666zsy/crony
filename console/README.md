@@ -35,6 +35,11 @@ pnpm smoke
 # 逐条断言 §1–§5 的字段、分页/过滤、三种诊断样本、1007/1008/1009/1010/1011/1012 分支，
 # 以及 §9 的 SSE 帧解析器与订阅帧序列；当前 13/13）
 node verify-phase2.mjs
+
+# 真实联调自检（**需要后端已在跑**，VITE_USE_MOCK=false）：
+# Node 内加载控制台自己的 API 层（stores/auth.js → api/client.js 拦截器 → api/agent.js
+# → api/stream.js），对真实 admin 打全部 7 个 /agent/* 接口 + SSE；2026-10-11 实测 15/15
+pnpm verify:live
 ```
 
 > 受限/沙箱环境（无命名管道、禁止子进程管道）下，开发服务器需要显式绑定回环地址：
@@ -50,6 +55,36 @@ node verify-phase2.mjs
 
 `VITE_USE_MOCK=false` 时无需改任何页面代码：`src/api/*.js` 里每个函数都是
 `if (USE_MOCK) → mock` / `else → request`，Mock 返回结构与后端 DTO 同名同形。
+
+#### ⚠️ 真实联调必须用 `.env.local`，不能用命令行环境变量
+
+2026-10-11 实测：即使命令行设了 `$env:VITE_USE_MOCK='false'`，`pnpm dev` 注入浏览器的
+`import.meta.env` 仍然是 `"VITE_USE_MOCK": "true"` —— 页面看上去正常，实际全是 Mock 数据，
+**等于假联调**。
+
+根因在 Vite 6.4.4 的 `loadEnv`（`vite/dist/node/chunks/dep-*.js`）：
+
+1. 读 `.env*` 得到 `parsed`；
+2. `expand({ parsed, processEnv })` —— dotenv-expand **把 `parsed` 的值写回 `process.env`**
+   （`processEnv[key] = parsed[key]`）；
+3. 先放 `parsed`，再用 `process.env` 覆盖（设计意图是"行内环境变量优先"）。
+
+第 2 步已经把 `.env` 的 `VITE_USE_MOCK=true` 写进了 `process.env`，第 3 步"优先"覆盖回来的
+自然还是 `true`。所以 `.env` 里已有的键，命令行无法覆盖。
+
+正确做法（`.env.local` 优先级高于 `.env`，且已被 `console/.gitignore` 与根 `.gitignore` 忽略）：
+
+```bash
+printf 'VITE_USE_MOCK=false\nVITE_API_BASE=http://127.0.0.1:8089\n' > console/.env.local
+pnpm dev     # 打开 http://localhost:5273/，此时是真实后端数据
+```
+
+验证是否真的生效（不要凭页面观感判断）：
+
+```bash
+curl -s http://127.0.0.1:5273/src/api/client.js | head -c 400
+# 应看到 "VITE_USE_MOCK": "false"
+```
 
 ---
 
@@ -367,13 +402,86 @@ Mock 里**可达**的业务错误分支（不是装饰）：`1008`（未知 sess
    非沙箱回环 TCP 本身可用），显式指定后页面与模块均正常返回（40/40 模块 HTTP 200）。
 7. **`esbuild-wasm` 为环境遗留依赖**（见第 7 节），当前构建不依赖它。
 
-### 9.1 阶段 2 专项：未验证项（**未对真后端跑过**）
+### 9.1 阶段 2 专项：真实联调结果 + 剩余未验证项（2026-10-11 更新）
 
-1. **7 个契约接口已注册，但未对真后端联调过**：`admin` 层路由已在
-   `router.go:96–105` 注册（此前 README 写"没有这些路由"已更正），
-   本环境未同时起 admin + MySQL 做端到端联调，因此**前端 API 层的正确性依据仍是
-   `node verify-phase2.mjs`** —— 它验证的是**前端 API 层 + Mock 的契约一致性**，
-   **不能替代联调**。该脚本当前 13/13 通过，覆盖：
+> **本节结论已从"未对真后端跑过"推进为"API 层已真实联调通过，视觉/交互未验"。**
+> 联调环境：`admin`（Go，真实 MySQL 13306）+ 控制台 API 层，`VITE_USE_MOCK=false`，
+> 模型为 DashScope `qwen-plus`（真实凭据）。执行方式：`pnpm verify:live`，结果 **15/15 通过**。
+
+**新增：真实联调自检 `pnpm verify:live`（`scripts/verify-live.mjs`）**
+
+它在 Node 内通过 Vite SSR 加载器执行**控制台自己的代码路径**：`stores/auth.js` 的 `login`
+action → `api/auth.js` → `api/client.js` 的 axios 拦截器（真的往 localStorage 写 token、
+真的加 `Authorization: Bearer`）→ `api/agent.js` → `api/stream.js` 的 SSE 解析与订阅，
+对真实 admin 打全部 7 个 `/agent/*` 接口 + SSE。覆盖与实测结果：
+
+| # | 检查项 | 实测 |
+| --- | --- | --- |
+| 1 | `VITE_USE_MOCK=false` 真的生效（断言，不看观感） | `USE_MOCK=false` ✓ |
+| 2 | `POST /login`（走 `stores/auth.js`，含 `setToken` 与 `isLoggedIn`） | token 219 字符 ✓ |
+| 3 | `POST /agent/session/search` | `total=7`，首条 `kind=diagnose` ✓ |
+| 4 | `POST /agent/session/find`（轨迹回放） | 1 step / 4 evidence / 0 warnings ✓ |
+| 5 | `POST /agent/tool/list` | 4 个工具（`http_get`/`log_search`/`mysql_query_readonly`/`shell_readonly`），**无 `node_status`**，配额 12 ✓ |
+| 6 | `POST /agent/diagnosis/find` ×2 | `found=true`，`provider=openai`、`model=qwen-plus`、置信度 95、证据 2、`unverified_refs=0` ✓ |
+| 7 | `POST /agent/diagnosis/run(force=false)` ×2 | `replayed=true`、`persist_error` 为空（幂等不烧 token）✓ |
+| 8 | SSE 终态运行 | `snapshot → step → end(reason=final, status=failed)`，12ms ✓ |
+| 9 | SSE 未知 `run_id` | 只发 `heartbeat`、不报 1010、不提前 `end` ✓ |
+| 10 | **SSE 长连接 >20s** | 连接存活 **32.0s**，心跳 @7.0s/14.5s/22.0s/29.5s，客户端主动断开 ✓ |
+| 11 | `POST /agent/nljob/draft`（真跑一次模型） | `spec=0 0 3 * * *`、`argv=["/usr/bin/find","/tmp","-mtime","+7","-delete"]`、5 次触发时间 ✓ |
+| 12 | `POST /agent/nljob/confirm` | 落库 `job_id=4`、`status=0`（未分配）、`requires_assign=true` ✓ |
+
+**本条联调直接抓出并修掉的 3 个真实缺陷（Mock 与 `verify-phase2.mjs` 都测不到）**
+
+1. **`/agent/nljob/draft` 响应多一层 `data.draft`**：后端返回 `{draft:{…}, session_id}`，
+   而前端按扁平结构读 `draft.value.name`。修复：`api/agent.js` 新增并导出纯函数
+   `normalizeDraft()`（有 `draft` 就摊平、保留外层 `session_id`/`error`、草案同名字段优先）。
+   **修前**：向导页所有字段空白、确认拿不到 `session_id`。
+2. **axios 超时 15s < 真实模型耗时**：实测一次诊断 19.6–22.8s，原来前端会先被 axios 掐断，
+   用户只看到"无法连接到后端"，而后端其实还在正常推理。修复：`api/client.js` 默认超时 → **60s**
+   （注释里写明依据与"后端已取消全局 20s WriteTimeout"的配对关系）。
+3. **`overrides.retry_times=-1` 与"不改"语义不符**：前端注释/契约写"0 / -1 表示不改"，
+   但 `applyDraftOverrides` 只要非 `nil` 就写入，负数必然触发 1009。
+   修复：后端 `admin/internal/handler/agent.go` 改为 `*RetryTimes >= 0` 才生效
+   （与 `timeout_seconds <= 0` 保持一致），并补单测；同时更正前端注释。
+
+顺带确认为**正确设计、不是缺陷**的一点：草案产出 6 段表达式 `0 0 3 * * *`，
+而前端只对"恰好 5 段"弹红色告警——这是对的，底层 `jakecoffman/cron` 把 5 段解释为
+「秒 分 时 日 月」，6 段才是"每天 03:00:00"。该告警逻辑与后端 `nljob.go` 的
+`len(strings.Fields(spec)) == 5` 判断一致。
+
+**仍未验证（如实保留）**
+
+1. **视觉与交互没有人工点验**：本机没有可用浏览器/无头内核，`verify:live` 走的是
+   "控制台 API 层 + 真实后端"，**不覆盖**渲染、点击、路由跳转、二次确认弹窗。
+   开发服务器本身已验证：`pnpm dev` 首页 200（标题 `ITOps Agent · crony 控制台`）、
+   `/src/main.js`、`/src/App.vue`、`/src/views/{Dashboard,Agents,Runs}View.vue`、
+   `/src/components/NlJobWizard.vue` 均 HTTP 200 可编译，且注入的 env 为
+   `"VITE_USE_MOCK": "false"`（即 dev 服务器确实处于真实模式）。
+2. **SSE 断线重连的浏览器侧可见性未点验**：后端断线→前端退避重连→新快照收敛这条路径只有
+   代码与单测支撑；本次只验证了"连接能活过 20s（原缺陷已修）"与"未知 run 只发心跳"。
+3. **没有准确率评测**：真实 provider 只跑了 2 个播种用例（n=2），两个结论都与独立核验的
+   地面真值一致，但**样本量为 2，不构成任何准确率主张**；页面上也不显示准确率。
+4. **`confidence` 仍是模型自评**，前端展示的 `confidence_note` 明确写了
+   "模型自评置信度（未经验证，不代表准确率）"。
+5. **`advisory_only=true` 是阶段 2 的固有条**：UI 里"没有任何执行按钮"是按契约设计的，
+   不是漏做——阶段 3 才会出现变更类动作与审批流。
+6. **未实现 SSE / 流式**：契约里诊断与草案都是"一次请求拿到最终结果"，所以页面是请求-等待-渲染，
+   没有逐 token 流式输出，也没有"运行中"的进度回显。诊断按钮的 loading 是唯一的进行中反馈。
+7. **JSON Schema 展示为原文**：§4 的 `tools[].schema` 直接 `<pre>` 展示，未做表单化/校验器；
+   阶段 2 也没有前端触发工具调用的入口（工具由内核调度）。
+8. **`trigger_echo` / `next_trigger_text` 的边界情形未验证**：真实内核用 `cronnext` 库计算，
+   月末、闰年、时区夏令时等边界**未验证**（本次只看到近 5 次正常结果）。
+9. **admin 缺节点侧证据通道**：`tool/list` 实测只有 4 个工具、**没有 `node_status`**，
+   所以 admin 侧诊断拿不到节点本机事实——这也是诊断 A 出现 `evidence_sufficient=false`
+   的根因（结论仍然正确，但模型自己声明证据不足）。属于阶段 3 待补。
+10. **`pnpm smoke` 不受本期改动影响的部分**：`scripts/smoke-mock.mjs` 本期**不允许修改**，
+    它仍断言旧的 `agentChat` / `agentDispatch`，因此这两个垫片只能保留（见第 5.1 节末尾）。
+11. **无 lint 可跑**：`package.json` 没有 `lint` 脚本、也没有 eslint 依赖，本期未执行任何 lint，
+    只做了 `pnpm build`（编译期校验）与三个自检脚本。
+
+#### 附：`verify-phase2.mjs`（Mock 契约自检，仍然保留）
+
+它验证的是**前端 API 层 + Mock 的契约一致性**，当前 13/13 通过，覆盖：
 
    | # | 检查项 | 断言要点 |
    | --- | --- | --- |
@@ -395,21 +503,6 @@ Mock 里**可达**的业务错误分支（不是装饰）：`1008`（未知 sess
    与心跳可见性未人工点验（Mock 模式是模拟回放，不是实时能力）；
    后端侧的 SSE 行为有单元测试 9 例 + 真实 MySQL 集成 3 例（含真 HTTP + JWT 端到端）兜底，
    见契约 §9.6。
-2. **没有真实模型凭据**：所有 `provider='offline'`、`model=''` 都来自 Mock 的假设
-   （`offlineProvider()` 的 FakeProvider 只设 `Provider`、不设 `Model`）。真实 provider 的
-   `model` / token 计数 / `finish_reason` 表现未验证；**未做任何准确率评测，页面上也不声明准确率**。
-3. **`advisory_only=true` 是阶段 2 的固有条**：UI 里"没有任何执行按钮"是按契约设计的，
-   不是漏做——阶段 3 才会出现变更类动作与审批流。
-4. **未实现 SSE / 流式**：契约里诊断与草案都是"一次请求拿到最终结果"，所以页面是请求-等待-渲染，
-   没有逐 token 流式输出，也没有"运行中"的进度回显。诊断按钮的 loading 是唯一的进行中反馈。
-5. **JSON Schema 展示为原文**：§4 的 `tools[].schema` 直接 `<pre>` 展示，未做表单化/校验器；
-   阶段 2 也没有前端触发工具调用的入口（工具由内核调度）。
-6. **`trigger_echo` / `next_trigger_text` 取自 Mock**：5 次触发时间是 Mock 自己按 6 段/5 段规则算的；
-   真实内核用 `cronnext` 库计算，边界情形（月末、闰年、时区夏令时）**未验证**。
-7. **`pnpm smoke` 不受本期改动影响的部分**：`scripts/smoke-mock.mjs` 本期**不允许修改**，
-   它仍断言旧的 `agentChat` / `agentDispatch`，因此这两个垫片只能保留（见第 5.1 节末尾）。
-8. **无 lint 可跑**：`package.json` 没有 `lint` 脚本、也没有 eslint 依赖，本期未执行任何 lint，
-   只做了 `pnpm build`（编译期校验）与两个自检脚本。
 
 ---
 
@@ -440,6 +533,7 @@ Mock 里**可达**的业务错误分支（不是装饰）：`1008`（未知 sess
 | 9 | §5.1 `concurrency_policy` 取值 | 契约未列枚举 | `nljob.go`：`skip\|buffer_one\|buffer_all\|cancel_other\|terminate_other` | 与阶段 1 `dict.js` 的 `skip\|queue\|forbid` 不一致，**优先显示后端 `concurrency_policy_text`** |
 | 10 | §5.1 五段表达式语义 | 只要求给出警告 | `nljob.go` 的警告措辞与"库按秒/分/时/日/周解释"有关 | Mock 采用更准确的"「秒 分 时 日 月」→ `0 2 * * *` 是每小时第 2 分钟"表述；**真实文案以后端为准** |
 | 11 | 会话与 run 的关系 | §1 有 `job_id`/`run_id`（可为空） | `nljob` 会话没有 run_id | UI 对空值显示 `—`，不假设一定存在 |
+| 12 | §5.1 `/agent/nljob/draft` 响应形状 | 契约示例是**扁平**的草案字段 | handler 实际返回 `{ draft: {…}, error, session_id }`（多一层） | **2026-10-11 真实联调抓到**：前端按扁平读会全空。已在 `api/agent.js` 加 `normalizeDraft()` 摊平（保留外层 `session_id`）；契约与 Mock 未改 |
 
 另外两个"契约没写、但实现必须有"的点，前端按保守方式处理，建议契约后续补充说明：
 

@@ -66,7 +66,12 @@ export function unwrap(body) {
 
 const request = axios.create({
   baseURL: API_BASE,
-  timeout: 15000,
+  // 60s：Agent 接口（诊断 / 自然语言建任务）要真跑一次模型。
+  // 真实联调实测：qwen-plus 一次诊断 19.6~22.8s，原来的 15s 会先被 axios 掐断，
+  // 前端只看到"无法连接到后端"，而后端其实还在正常推理。
+  // 后端已取消全局 20s WriteTimeout（见 common/pkg/server/api.go），
+  // 真正的边界由应用层预算决定（llm.max-duration-seconds 等）。
+  timeout: 60000,
   headers: { 'Content-Type': 'application/json' },
 })
 

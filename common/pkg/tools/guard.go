@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -181,7 +182,7 @@ var shellRules = map[string]struct {
 			"help": {}, "human-readable": {}, "print-type": {}, "portability": {}, "inodes": {}, "all": {}, "local": {},
 		},
 		positionalCheck: func(arg string, _ Policy) error {
-			if !strings.HasPrefix(arg, "/") {
+			if !isAbsPath(arg) {
 				return fmt.Errorf("%w: df 的路径参数必须是绝对路径: %q", ErrInvalidArgs, arg)
 			}
 			return guardCleanPath(arg)
@@ -401,12 +402,30 @@ func guardCleanPath(p string) error {
 	return nil
 }
 
+// isAbsPath 判断"绝对路径"，同时接受 Unix 风格与当前 OS 风格。
+//
+// 为什么不能只用 filepath.IsAbs：本项目的只读策略默认值（`/var/log`、`/etc`）
+// 与白名单命令（tail/cat/df）都是 **Unix 语义**，而 filepath.IsAbs 在 Windows 上
+// 对 `/var/log` 返回 false —— 只用它会把所有 Unix 风格策略在 Windows 上判成相对路径。
+// 为什么不能只用 `strings.HasPrefix(p, "/")`：那会把 Windows 的 `C:\logs\a.log`
+// 判成相对路径（2026-10-11 真实暴露：文件读取工具在 Windows 上拒绝一切绝对路径）。
+// 两者都接受，才既不误判 Unix 策略、也不误判 Windows 路径。
+func isAbsPath(p string) bool {
+	return strings.HasPrefix(p, "/") || filepath.IsAbs(p)
+}
+
 // guardReadPath 校验可读路径落在白名单前缀内。
+//
+// 绝对路径判定见 isAbsPath 的说明：这里原来只认 `strings.HasPrefix(p, "/")`，
+// 在 Windows 上会把 `C:\logs\app.log` 当成"不是绝对路径"直接拒绝——文件读取工具
+// 在 Windows 上拒绝一切绝对路径。属于 fail-closed（越权读不到东西，不是绕过漏洞），
+// 但功能全废；该缺陷此前被"沙箱内 os.Symlink 失败 → 测试 t.Skip"掩盖，
+// 2026-10-11 放开沙箱后才由 TestResolveReadPathBlocksSymlinkEscape 暴露。
 func guardReadPath(p string, policy Policy) error {
 	if err := guardCleanPath(p); err != nil {
 		return err
 	}
-	if !strings.HasPrefix(p, "/") {
+	if !isAbsPath(p) {
 		return fmt.Errorf("%w: 路径 %q 必须是绝对路径", ErrInvalidArgs, p)
 	}
 	cleaned := filepath.ToSlash(filepath.Clean(p))
@@ -416,17 +435,27 @@ func guardReadPath(p string, policy Policy) error {
 		if prefix == "" {
 			continue
 		}
-		if strings.HasSuffix(prefix, "/") {
-			if strings.HasPrefix(cleaned, prefix) {
-				return nil
-			}
-			continue
-		}
-		if cleaned == prefix || strings.HasPrefix(cleaned, prefix+"/") {
+		if matchPathPrefix(cleaned, prefix) {
 			return nil
 		}
 	}
 	return fmt.Errorf("%w: 路径 %q 不在允许读取的目录 %v 内", ErrToolDenied, cleaned, prefixes)
+}
+
+// matchPathPrefix 判断 path 是否落在 prefix 之内（均为 ToSlash 后的路径）。
+//
+// Windows 文件系统大小写不敏感：比较前折叠大小写，否则白名单 `C:/Logs/` 配不上
+// 实际路径 `c:/logs/x.log`（同样 fail-closed，但会让白名单形同虚设地"永不命中"）。
+// 其它平台保持区分大小写，不在 Linux 上放松匹配。
+func matchPathPrefix(path, prefix string) bool {
+	if runtime.GOOS == "windows" {
+		path = strings.ToLower(path)
+		prefix = strings.ToLower(prefix)
+	}
+	if strings.HasSuffix(prefix, "/") {
+		return strings.HasPrefix(path, prefix)
+	}
+	return path == prefix || strings.HasPrefix(path, prefix+"/")
 }
 
 // ResolveReadPath 解析符号链接后再做一次白名单校验。

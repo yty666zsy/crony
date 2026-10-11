@@ -85,19 +85,33 @@ export function listAgentTools(params = {}) {
  * 入参：{ text, node_uuid, timezone }
  * 返回：草案字段 + next_triggers / next_trigger_text / trigger_echo
  *       + requires_confirmation（恒 true）/ confirmed（恒 false，本接口不落库）
+ *
+ * ⚠️ 真实后端的 data 是**多一层**的：{ draft: {...}, error?, session_id }，
+ *    而 Mock 与调用方按扁平结构读（draft.value.name / .spec / ...）。
+ *    这里统一抹平：有 draft 就把它摊平，并保留外层 error/session_id；
+ *    draft 自己的同名字段优先（避免外层覆盖真实草案字段）。
+ *    这个差异是 2026-10-11 真实联调（VITE_USE_MOCK=false）发现的：
+ *    不抹平则向导页所有字段显示为空、确认按钮拿不到 session_id。
  * ------------------------------------------------------------------ */
+export function normalizeDraft(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return data
+  if (!data.draft || typeof data.draft !== 'object') return data
+  return { ...data, ...data.draft }
+}
+
 export function draftNlJob(payload) {
   if (USE_MOCK)
     return mockResponse(mock.agentNlJobDraft(payload), {
       delay: 800, // 起草要跑模型，Mock 也慢一点，避免让人以为"没调模型"
     })
-  return request.post('/agent/nljob/draft', payload)
+  return request.post('/agent/nljob/draft', payload).then(normalizeDraft)
 }
 
 /* ------------------------------------------------------------------ *
  * §5.2 确认创建  POST /agent/nljob/confirm
  * 入参：{ session_id, confirmed: true, overrides: { name, spec, timeout_seconds, retry_times } }
- *   overrides 只允许这四个字段，空串 / 0 / -1 表示"不改"；服务端会重新复验
+ *   overrides 只允许这四个字段；空串 / timeout_seconds<=0 / retry_times<0 表示"不改"，
+ *   服务端会重新复验（见 admin/internal/handler/agent.go 的 applyDraftOverrides）。
  * 返回：{ job_id, spec, status, next_triggers, trigger_echo, created }
  *   注意 status 一律 0（未分配）：确认只落成任务定义，不会自动派发到节点
  * ------------------------------------------------------------------ */
