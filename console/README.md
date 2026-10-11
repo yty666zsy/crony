@@ -407,6 +407,11 @@ Mock 里**可达**的业务错误分支（不是装饰）：`1008`（未知 sess
 > **本节结论已从"未对真后端跑过"推进为"API 层已真实联调通过，视觉/交互未验"。**
 > 联调环境：`admin`（Go，真实 MySQL 13306）+ 控制台 API 层，`VITE_USE_MOCK=false`，
 > 模型为 DashScope `qwen-plus`（真实凭据）。执行方式：`pnpm verify:live`，结果 **15/15 通过**。
+>
+> 阶段 3 改动（`node_status` 工具 + `unverified_node_claims` 契约字段 + 诊断面板告警块）
+> 之后复跑：**17/17 通过**（同一后端，用例数随断言增加；`pnpm build` 亦通过）。
+> 注意 `verify:live` 是**控制台代码路径 + 真实 API**的联调，**不是浏览器 E2E**：
+> 诊断面板新增的告警块是否在浏览器里渲染正确，仍未验证（需要真实浏览器）。
 
 **新增：真实联调自检 `pnpm verify:live`（`scripts/verify-live.mjs`）**
 
