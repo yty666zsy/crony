@@ -79,9 +79,13 @@ func (r *Registry) Run(ctx context.Context, req Request) Result {
 	return exec.Execute(ctx, req)
 }
 
-// DefaultRegistry 默认注册表：shell + http。
+// DefaultRegistry 默认注册表：shell + http + agent。
+//
+// agent 执行器在这里注册但**没有运行器**：真正有模型能力的运行时由 node 启动时注入
+// （见 service 层的 RegisterAgentRunner）。这样单元测试可拿到完整 Kinds()，
+// 而未配置模型时 Agent 步骤会以明确错误失败，而不是"类型未注册"这种含糊报错。
 func DefaultRegistry() *Registry {
-	return NewRegistry(NewShellExecutor(), NewHTTPExecutor())
+	return NewRegistry(NewShellExecutor(), NewHTTPExecutor(), NewAgentExecutor(nil))
 }
 
 // KindOf 从字符串解析执行器类型（控制台/接口传入）。
@@ -91,6 +95,8 @@ func KindOf(raw string) (Kind, bool) {
 		return KindShell, true
 	case KindHTTP:
 		return KindHTTP, true
+	case KindAgent:
+		return KindAgent, true
 	default:
 		return "", false
 	}
@@ -116,6 +122,11 @@ func ValidateRequest(req Request) error {
 	case KindHTTP:
 		if strings.TrimSpace(req.URL) == "" {
 			return fmt.Errorf("%w: http url is required", ErrInvalidRequest)
+		}
+	case KindAgent:
+		// Agent 步骤必须有目标；上下文/工具有没有由具体运行时校验。
+		if strings.TrimSpace(req.AgentGoal) == "" {
+			return fmt.Errorf("%w: agent goal is required", ErrInvalidRequest)
 		}
 	default:
 		return fmt.Errorf("%w: unsupported kind %q", ErrInvalidRequest, req.Kind)

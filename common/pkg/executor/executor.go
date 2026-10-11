@@ -27,11 +27,13 @@ type Kind string
 const (
 	KindShell Kind = "shell"
 	KindHTTP  Kind = "http"
-	// 预留（阶段 1 之后逐个落地）：
+	// KindAgent 阶段 2 新增：一次 Agent 会话（有界 ReAct 循环 + 只读工具）。
+	// 由 node 侧注入的 AgentRunner 真正执行，executor 只负责编排/重试/落库。
+	KindAgent Kind = "agent"
+	// 预留（阶段 3 之后逐个落地）：
 	// KindContainer Kind = "container"
 	// KindSQL       Kind = "sql"
 	// KindPython    Kind = "python"
-	// KindAgent     Kind = "agent"
 )
 
 var (
@@ -80,6 +82,16 @@ type Request struct {
 	// 公共
 	Timeout        time.Duration
 	MaxOutputBytes int
+
+	// agent（阶段 2）
+	// AgentKind 会话类型：diagnose（失败诊断）/ inspect（巡检总结）/ nljob（草案）。
+	AgentKind string
+	// AgentGoal 目标（自然语言）。Agent 任务里它来自 job.command。
+	AgentGoal string
+	// AgentContext 附加上下文材料（每行一条），例如"本次运行的历史情况"。
+	AgentContext []string
+	// AgentSystem 场景提示词版本/系统提示（由调用方决定，执行器不解释）。
+	AgentPromptVersion string
 }
 
 // EffectiveTimeout 返回实际使用的超时（<=0 时用兜底值）。

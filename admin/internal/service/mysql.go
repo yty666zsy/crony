@@ -32,6 +32,11 @@ func RegisterTables(db *gorm.DB) error {
 		// job_run.run_id 上有唯一索引，是幂等"至多执行一次"的最后一道闸门。
 		models.JobRun{},
 		models.JobRunStep{},
+		// 阶段 2（Agent 内核）：会话 + 轨迹步骤。
+		// agent_session.session_id 上有唯一索引，保证"同一次执行只落一次会话结论"；
+		// 轨迹步骤按 (session_id, seq) 建联合索引，控制台按会话回放轨迹。
+		models.AgentSession{},
+		models.AgentStep{},
 	)
 	if err != nil {
 		return errors.Wrap(err, "register table failed")

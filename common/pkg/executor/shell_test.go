@@ -177,19 +177,36 @@ func TestShellExecutorRejectsInvalidRequest(t *testing.T) {
 // 未注册的类型/非法请求都返回结构化失败，而不是 panic 或静默成功。
 func TestRegistryRunValidatesAndDispatches(t *testing.T) {
 	registry := DefaultRegistry()
-	if kinds := registry.Kinds(); len(kinds) != 2 || kinds[0] != KindHTTP || kinds[1] != KindShell {
-		t.Fatalf("默认注册表应包含 http/shell（有序），实际 %v", kinds)
+	// 阶段 2 起默认注册表是 agent/http/shell（有序）：
+	// agent 执行器已注册但**未注入运行器**，这样"类型未注册"与"模型未配置"能被区分开。
+	if kinds := registry.Kinds(); len(kinds) != 3 || kinds[0] != KindAgent || kinds[1] != KindHTTP || kinds[2] != KindShell {
+		t.Fatalf("默认注册表应包含 agent/http/shell（有序），实际 %v", kinds)
 	}
 	if _, ok := KindOf("SHELL"); !ok {
 		t.Error("KindOf 应大小写不敏感")
 	}
+	if _, ok := KindOf("agent"); !ok {
+		t.Error("agent 是阶段 2 已落地的执行器类型，KindOf 应能解析")
+	}
 	if _, ok := KindOf("container"); ok {
 		t.Error("尚未落地的执行器类型不应被解析成功")
 	}
+	// 未注入运行器时，agent 步骤必须以明确错误失败，而不是"类型未注册"。
+	res := registry.Run(context.Background(), Request{RunID: "j1-t1", Kind: KindAgent, AgentGoal: "看看昨天的备份"})
+	if res.Status != models.RunStatusFailed || !strings.Contains(res.Error(), "Agent 运行时") {
+		t.Fatalf("未注入运行器应报明确的运行时缺失错误，实际 status=%s err=%s", res.Status, res.Error())
+	}
+	if !strings.Contains(res.Error(), "未注入") {
+		t.Fatalf("错误应说明是运行时未注入，实际 %s", res.Error())
+	}
 
-	res := registry.Run(context.Background(), Request{RunID: "j1-t1", Kind: Kind("docker")})
+	res = registry.Run(context.Background(), Request{RunID: "j1-t1", Kind: Kind("docker")})
 	if res.Status != models.RunStatusFailed {
 		t.Fatalf("未注册类型应失败，实际 %s", res.Status)
+	}
+	res = registry.Run(context.Background(), Request{RunID: "j1-t2", Kind: KindAgent, AgentGoal: "   "})
+	if res.Status != models.RunStatusFailed || !strings.Contains(res.Error(), "goal") {
+		t.Fatalf("agent 步骤缺少目标应被拒绝，实际 status=%s err=%s", res.Status, res.Error())
 	}
 	res = registry.Run(context.Background(), Request{Kind: KindShell, Command: "echo hi"})
 	if res.Status != models.RunStatusFailed || !strings.Contains(res.Error(), "run_id") {

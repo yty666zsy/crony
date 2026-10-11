@@ -15,5 +15,9 @@ func RegisterTables(db *gorm.DB) {
 		models.JobLog{},
 		models.JobRun{},
 		models.JobRunStep{},
+		// 阶段 2（Agent 内核）：节点侧执行 Agent 型任务时也要落会话与轨迹，
+		// 否则"节点侧跑了什么"在控制台上看不到。
+		models.AgentSession{},
+		models.AgentStep{},
 	)
 }

@@ -155,6 +155,15 @@ var defaultRunCoordinator = NewRunCoordinator(nil, nil)
 // DefaultRunCoordinator 返回全局协调器（供 service 层做取消操作）。
 func DefaultRunCoordinator() *RunCoordinator { return defaultRunCoordinator }
 
+// SetAgentRunner 注入 Agent 运行时（由 service 层在启动时调用）。
+//
+// 为什么是"注入"而不是让 executor 直接依赖 agent/llm：
+// 执行器抽象不应知道 ReAct/提示词；同时未配置模型时 Agent 步骤必须**明确失败**，
+// 而不是因为"类型没注册"给出含糊报错。
+func SetAgentRunner(r executor.AgentRunner) {
+	defaultRunCoordinator.registry.Register(executor.NewAgentExecutor(r))
+}
+
 // policyFor 解析任务的并发策略；未知取值回退到默认 skip（不允许静默放行）。
 func (c *RunCoordinator) policyFor(job *Job) runpolicy.ConcurrencyPolicy {
 	if job == nil {
@@ -584,6 +593,23 @@ func BuildPlan(job *Job, runID string) executor.Plan {
 			Body:    body,
 			Timeout: time.Duration(timeout) * time.Second,
 		}
+	case models.JobTypeAgent:
+		// type=3（Agent）：任务体是自然语言目标，执行过程由只读 ReAct 循环完成。
+		//
+		// 与 cmd 的两个关键差别：
+		//   - 不做 SplitCmd：目标里的空格是内容而不是参数分隔（"看看昨晚的备份任务为什么慢"），
+		//     按空格切分会破坏语义，这也是 Agent 类型必须独立存在的理由之一；
+		//   - 步骤级重试策略照旧生效，但 AgentExecutor 只在"模型限流/超时"时才真的重试
+		//     （见 executor.AgentExecutor.Execute 的说明），避免把确定性的失败重跑成账单。
+		step.Kind = executor.KindAgent
+		step.Request = executor.Request{
+			Kind:      executor.KindAgent,
+			AgentKind: models.AgentKindJob,
+			AgentGoal: job.Command,
+			Timeout:   time.Duration(job.Timeout) * time.Second,
+		}
+		// 巡检材料在运行时装配（见 service 层的 nodeAgentRunner）：只有节点侧才知道
+		// 本机日志目录与节点身份，编排层不该替它猜。
 	default:
 		cmd := job.Cmd
 		if len(cmd) == 0 {

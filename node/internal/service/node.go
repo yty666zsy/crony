@@ -150,6 +150,8 @@ func (srv *NodeServer) Run() (err error) {
 		logger.GetLogger().Error(fmt.Sprintf("node[%s] failed to load job error:%s", srv.UUID, err.Error()))
 		return
 	}
+	// 阶段 2：装配 Agent 运行时（未配置 llm 时只告警，不影响普通任务）。
+	srv.initAgentRuntime()
 	insertId, err := srv.Node.Insert()
 	if err != nil {
 		logger.GetLogger().Error(fmt.Sprintf("failed to create node[%s] into db error:%s", srv.UUID, err.Error()))

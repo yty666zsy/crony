@@ -14,6 +14,15 @@ type JobType int
 const (
 	JobTypeCmd  = JobType(1)
 	JobTypeHttp = JobType(2)
+	// JobTypeAgent 阶段 2 新增：任务体是一段"自然语言目标"，由节点上的 Agent 运行时
+	// 用只读工具去收集证据并给出结论（例如每日巡检总结）。
+	//
+	// 与 type=1 的关键区别（也是为什么它是新类型而不是给 cmd 加参数）：
+	//   - 执行体不是命令而是目标 + 输出 Schema，执行过程不确定（工具调用顺序由模型决定），
+	//     因此"命令字符串"不是可审计的执行凭据，轨迹才是；
+	//   - 因此 Agent 任务的所有副作用被限制在"只读工具 + 落迹"，
+	//     这也是它能直接排进现有调度器的前提（不需要新的权限模型）。
+	JobTypeAgent = JobType(3)
 
 	HTTPMethodGet  = 1
 	HTTPMethodPost = 2
