@@ -6,13 +6,13 @@ import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import AppSidebar from './AppSidebar.vue'
 import AppTopbar from './AppTopbar.vue'
-import AiChatWidget from './AiChatWidget.vue'
+import AiSessionWidget from './AgentSessionWidget.vue'
 
 /**
  * 控制台主布局。
  *
  * 两种形态：
- *   - 默认：左侧固定侧边栏 + 顶栏 + 内容区 + 右下角 AI 聊天入口；
+ *   - 默认：左侧固定侧边栏 + 顶栏 + 内容区 + 右下角 Agent 会话速查入口；
  *   - meta.bare = true（/big-screen）：全屏无外壳，页面自己管布局。
  *
  * 响应式：内容区左边距跟随侧边栏宽度（245px / 68px），由 store 的折叠态驱动。
@@ -69,7 +69,7 @@ onBeforeUnmount(() => {
 
         <footer class="shrink-0 px-5 pb-6 pt-1">
           <p class="text-[11px] text-ink-dim">
-            crony AI Agent 控制台 · 阶段 1（前端骨架 + Mock 数据层） ·
+            crony AI Agent 控制台 · 阶段 2（Agent 内核：会话 / 轨迹 / 诊断 / 自然语言建任务） ·
             <span :class="useMock === 'true' ? 'text-warn' : 'text-ok'">
               VITE_USE_MOCK={{ useMock }}
             </span>
@@ -79,7 +79,7 @@ onBeforeUnmount(() => {
         </footer>
       </div>
 
-      <AiChatWidget />
+      <AiSessionWidget />
     </template>
 
     <router-view v-else />

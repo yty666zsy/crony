@@ -94,3 +94,36 @@ export function truncate(text, len = 48) {
 export function isSlotRunId(runId) {
   return typeof runId === 'string' && /-t\d+$/.test(runId)
 }
+
+/** JSON 美化（展示只读工具的 Schema、工具入参 tool_args）；非对象返回原文本 */
+export function prettyJson(value) {
+  if (value === null || value === undefined || value === '') return '—'
+  if (typeof value === 'string') {
+    // 有些字段后端给的是 JSON 字符串（例如模型的 tool_calls[].arguments）
+    try {
+      return JSON.stringify(JSON.parse(value), null, 2)
+    } catch {
+      return value
+    }
+  }
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return String(value)
+  }
+}
+
+/**
+ * 诊断置信度 → 百分比数字（保留一位小数）。
+ *
+ * 为什么要兼容两种量纲：契约 §3.1 的响应示例是 `"confidence": 72`（0–100 整数），
+ * 而 Agent 内核落库的 `Diagnosis.Confidence` 是 `clamp01(percent/100)` 的 0–1 小数
+ * （common/pkg/agent/diagnose.go）。后端 handler 若直接透传内核结构，量纲就是 0–1。
+ * 这里两种都接受并按"小于等于 1 视为比例"换算，避免某一侧改了单位就显示成 0.7%。
+ */
+export function formatConfidence(value) {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return '—'
+  const pct = n <= 1 ? n * 100 : n
+  return Math.round(pct * 10) / 10
+}

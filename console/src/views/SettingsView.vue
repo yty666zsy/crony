@@ -305,32 +305,52 @@ onMounted(load)
         </el-tab-pane>
 
         <!-- Agent -->
-        <el-tab-pane label="AI Agent（规划中）" name="agent">
+        <el-tab-pane label="AI Agent（阶段 2 · 只读）" name="agent">
           <div class="space-y-4 pb-5">
             <div class="card card-pad">
               <div class="flex flex-wrap items-center justify-between gap-3">
                 <div>
-                  <p class="card-title">Agent 运行时</p>
-                  <p class="card-sub mt-0.5">阶段 2 交付，当前控制台中的 Agent 数据全部为 Mock</p>
+                  <p class="card-title">Agent 能力与预算</p>
+                  <p class="card-sub mt-0.5">
+                    阶段 2 的内核已落地（会话 / 轨迹 / 诊断 / 自然语言建任务），但本控制台的数据仍来自 Mock；
+                    **没有**真实的模型凭据，因此不声明任何准确率。
+                  </p>
                 </div>
                 <el-tag :type="agentConf.enabled ? 'success' : 'warning'" effect="dark">
-                  {{ agentConf.enabled ? '已启用' : '未启用' }}
+                  {{ agentConf.enabled ? '后端配置已启用' : '后端配置未启用' }}
                 </el-tag>
               </div>
 
               <el-descriptions :column="2" border size="small" class="mt-3">
-                <el-descriptions-item label="模型">{{ agentConf.model }}</el-descriptions-item>
+                <el-descriptions-item label="provider">
+                  {{ agentConf.provider || '—' }}
+                </el-descriptions-item>
+                <el-descriptions-item label="model">
+                  <span class="font-mono">{{ agentConf.model || '—（provider 未上报）' }}</span>
+                </el-descriptions-item>
                 <el-descriptions-item label="自治等级">{{ agentConf.autonomy_level }}</el-descriptions-item>
-                <el-descriptions-item label="最大并行 Agent">{{ agentConf.max_parallel_agents }}</el-descriptions-item>
-                <el-descriptions-item label="需要审批的动作">
-                  {{ (agentConf.require_approval_for || []).join('、') }}
+                <el-descriptions-item label="advisory_only">
+                  <span class="font-mono">{{ agentConf.advisory_only }}</span>
+                </el-descriptions-item>
+                <el-descriptions-item label="只读工具数">{{ agentConf.readonly_tools }}</el-descriptions-item>
+                <el-descriptions-item label="prompt 版本">
+                  {{ (agentConf.prompt_versions || []).join('、') }}
+                </el-descriptions-item>
+                <el-descriptions-item label="单会话工具调用上限">
+                  {{ agentConf.max_tool_calls_per_session }} 次
+                </el-descriptions-item>
+                <el-descriptions-item label="预算（调用 / token / 时长）">
+                  {{ agentConf.budget?.calls }} / {{ agentConf.budget?.tokens }} / {{ agentConf.budget?.duration }}
                 </el-descriptions-item>
               </el-descriptions>
 
               <ul class="mt-4 space-y-1.5 text-[11px] leading-5 text-ink-dim">
-                <li>· 阶段 2：Agent 运行时 + 工具网关（ssh_exec / prom_query / kb_search ...），每次工具调用写入 audit_event。</li>
-                <li>· 阶段 3：L2/L3 自治——变更类动作走审批流，审批通过后由 Agent 触发 job_run。</li>
-                <li>· 数据口径：Agent 的所有执行都必须能回到某个 run_id / trace_id，否则不写入知识库。</li>
+                <li>· 阶段 2 的工具**全部只读**（shell_readonly / http_get / node_status / log_search / mysql_query_readonly），
+                  allow_hosts 为空时 http_get 会被直接拒绝。</li>
+                <li>· 诊断结果 advisory_only=true：只输出建议，**没有**执行/应用按钮；唯一能做的动作是复制文本。</li>
+                <li>· 阶段 3 才会出现变更类动作与审批流；届时每次工具调用写入 audit_event，审批通过后才由 Agent 触发 job_run。</li>
+                <li>· 数据口径：Agent 的所有产物都必须能回到某个 session_id / run_id，否则不写知识库。</li>
+                <li>· 「需要审批的动作」当前列表为占位文案：阶段 2 根本不产生变更动作，所以这些审批项永远不会被触发。</li>
               </ul>
             </div>
           </div>

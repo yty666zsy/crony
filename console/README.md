@@ -1,12 +1,15 @@
 # crony AI Agent 控制台（console）
 
-阶段 1 前端交付：把 crony（企业级定时任务 / 运维平台）的控制台从"任务表格"升级为
-**ITOps Agent / Multi-Agent Automation Platform** 的观感——深色导航、总览 KPI、执行记录与
-步骤时间线、Agent 控制台、知识库与审计。
+阶段 2 前端交付：在阶段 1 的"信息架构 + Mock 骨架"之上，把 AI Agent 部分从**设想中的接口**
+换成**冻结契约**（`../PHASE2-接口契约.md` §1–§5）的真实实现——Agent 会话列表与轨迹回放、
+只读能力边界、AI 诊断（读 + 触发）、自然语言建任务（草案 → 二次确认）。
 
 - **技术栈**：Vue 3 + Vite + Element Plus + Tailwind CSS + Vue Router + Pinia（无 React / Nuxt / Ant Design）
 - **独立运行**：默认走内置 Mock，**不需要后端**即可完整浏览全部页面；关掉开关即切到真实接口
-- **写入范围**：本目录自包含，未改动 `crony/` 下任何 `.go`、`Dockerfile`、`docker-compose.yml`、`conf/*`、`go.mod`
+- **诚实标注**：阶段 2 的 7 个 Agent 接口后端 handler **尚未注册**（Go 内核已在 `crony/common/pkg/agent` 落地），
+  所以本控制台的 Agent 数据全部来自 Mock，页面上处处标注；`advisory_only=true`（只给建议、不执行）在 UI 里体现为**没有任何执行按钮**
+- **写入范围**：本目录自包含，未改动 `crony/` 下任何 `.go`、`Dockerfile`、`docker-compose.yml`、`conf/*`、`go.mod`，
+  也未改动 `../PHASE2-接口契约.md`（只读契约）
 
 ---
 
@@ -25,8 +28,12 @@ pnpm build
 # 预览构建产物（http://127.0.0.1:4173）
 pnpm preview
 
-# Mock 数据层冒烟测试（无需后端、无需浏览器，Node 内真实执行 api 层）
+# Mock 数据层冒烟测试（无需后端、无需浏览器，Node 内真实执行 mock 处理器）
 pnpm smoke
+
+# 阶段 2 契约自检（无需后端：Node 内真实执行 src/api/agent.js → mock 的完整调用链，
+# 逐条断言 §1–§5 的字段、分页/过滤、三种诊断样本与 1007/1008/1009/1010/1011/1012 分支）
+node verify-phase2.mjs
 ```
 
 > 受限/沙箱环境（无命名管道、禁止子进程管道）下，开发服务器需要显式绑定回环地址：
@@ -50,6 +57,7 @@ pnpm smoke
 ```
 console/
 ├── index.html                    # 入口（<html class="dark">，hash 路由）
+├── verify-phase2.mjs             # 阶段 2 契约自检（Node + Vite SSR 加载器，不需要浏览器/后端）
 ├── vite.config.js                # base:'./'、@ 别名、/api 代理、构建产物拆分
 ├── tailwind.config.js            # navy/brand 色板、sidebar 宽度、glow 阴影、动画
 ├── postcss.config.js
@@ -67,18 +75,23 @@ console/
     ├── App.vue                   # → components/AppLayout.vue
     ├── api/
     │   ├── client.js             # axios 实例、Token、{code,data,msg} 解包、业务错误弹窗
-    │   ├── mock/{index.js,data.js}  # Mock 处理器 + 可信中文样例数据
+    │   ├── mock/{index.js,data.js}  # Mock 处理器 + 可信中文样例数据（含阶段 2 §1–§5）
+    │   ├── agent.js              # ★ 阶段 2 契约接口：§1/§2/§3.1/§3.2/§4/§5.1/§5.2
     │   ├── auth.js job.js run.js node.js script.js statis.js
-    │   └── agent.js knowledge.js audit.js settings.js   # 规划中接口
+    │   └── knowledge.js audit.js settings.js   # 规划中接口（阶段 2 之后）
     ├── router/index.js           # 路由表（hash 模式）
     ├── config/nav.js             # 侧边栏导航分组（唯一导航来源）
-    ├── stores/{app,auth,chat}.js # 布局/视图宽度、登录态、AI 浮窗会话
+    ├── stores/{app,auth,agentPanel}.js   # 布局/视图宽度、登录态、右下角会话速查面板
     ├── styles/index.css          # Tailwind 入口 + Element Plus 深色变量覆盖
     ├── utils/{dict.js,format.js} # 枚举字典（与 Go 枚举逐项对应）、格式化
     ├── components/
     │   ├── AppLayout.vue AppSidebar.vue AppTopbar.vue
-    │   ├── AiChatWidget.vue      # 右下角紫色圆形入口 → 展开对话面板
-    │   ├── StatCard.vue Sparkline.vue StatusBadge.vue EmptyState.vue
+    │   ├── AgentSessionWidget.vue  # 右下角紫色圆形入口 → Agent 会话速查（§1，不是聊天）
+    │   ├── AgentStepCard.vue     # 单条轨迹步骤：model / tool / notice 视觉可分（§2）
+    │   ├── DiagnosisPanel.vue    # AI 诊断面板：只读只建议、模型自评、未观测引用告警（§3）
+    │   ├── NlJobWizard.vue       # 自然语言建任务向导：草案 → 5 次触发时间 → 确认（§5）
+    │   ├── MockBadge.vue         # 统一的 Mock/真实数据标注
+    │   └── StatCard.vue Sparkline.vue StatusBadge.vue EmptyState.vue
     └── views/                    # 见第 3 节页面清单
 ```
 
@@ -93,14 +106,15 @@ console/
 | --- | --- | --- |
 | `/dashboard` | 总览 | 4 张 KPI + Latest Alerts + Quick Actions + 三栏（服务器/在线 Agent/知识库）+ 最近任务表 |
 | `/big-screen` | 大屏 | 独立全屏布局（无侧栏/顶栏），等宽数字卡片与条形图（阶段 2 完善） |
-| `/jobs` | 定时任务 | 列表检索、cron 表达式、并发策略、重试策略、立即执行、增删改抽屉 |
-| `/runs` | 执行记录 | `job_run` 检索（状态/触发来源/节点/跟踪号）+ 抽屉内步骤时间线与取消执行 |
+| `/jobs` | 定时任务 | 列表检索、cron 表达式、并发策略、重试策略、立即执行、增删改抽屉；**用自然语言建任务向导**（§5.1 草案 → 5 次触发时间与警告 → §5.2 确认） |
+| `/runs` | 执行记录 | `job_run` 检索（状态/触发来源/节点/跟踪号）+ 抽屉内步骤时间线、取消执行；抽屉内 **AI 诊断面板**（§3.1 读 / §3.2 触发，force 需二次确认） |
 | `/servers` | 服务器管理 | 节点心跳、负载水位、任务分布、下线（管理员） |
 | `/terminal` | 终端 | 节点选择 + 命令回显型终端（阶段 2 接真实 PTY） |
-| `/agents` | Agent 控制台 | Agent 能力/状态、目标下发（Mock 编排过程与结果） |
+| `/agents` | Agent 会话 | **当前能力边界**（§4 真实只读工具 + 硬配额）、会话列表（§1：kind/status/job_id/run_id 过滤 + 分页）、就地"立即诊断"（§3.2） |
+| `/agents/:session_id` | 会话轨迹 | **轨迹回放**（§2）：model / tool / notice 三类步骤视觉可分，tool 步骤展示 `tool_args` 与 `observation`，顶部展示 `budget` 与 `warnings`，结论只读 |
 | `/knowledge` | 知识库 | Runbook / SOP / 复盘文档检索与正文预览 |
 | `/audit` | 审计日志 | 操作审计检索（操作者、动作、对象、结果） |
-| `/settings` | 设置 | 鉴权/改密、调度默认值、通知、Agent 开关、系统健康 |
+| `/settings` | 设置 | 鉴权/改密、调度默认值、通知、Agent 能力与预算（provider/model/配额，不写"支持 XX 种能力"） |
 | `/db-connections` `/ssh-keys` `/remote-desktop` `/containers` | 占位页 | 有目标说明、交付阶段与要点清单，**非空白页** |
 | `/:pathMatch(.*)*` | 404 | 兜底页 |
 
@@ -155,9 +169,6 @@ success_rate, skip_rate, by_status, since }`，其中
 | --- | --- | --- | --- |
 | 总览/大屏 · 节点与耗时 KPI、告警、最近任务 | `statis.fetchOverview` | `GET /statis/overview` | 阶段 1 |
 | 设置 · 系统健康组件 | `statis.fetchHealth` | `GET /statis/health` | 阶段 1 |
-| Agent 控制台 | `agent.searchAgents` | `POST /agent/search` | 阶段 2 |
-| Agent 控制台 / 右下角浮窗 | `agent.chatWithAgent` | `POST /agent/chat` | 阶段 2 |
-| Agent 控制台 · 目标下发 | `agent.dispatchAgentTask` | `POST /agent/dispatch` | 阶段 2 |
 | 知识库 | `knowledge.searchKnowledge` | `POST /knowledge/search` | 阶段 2 |
 | 审计日志 | `audit.searchAuditLogs` | `POST /audit/search` | 阶段 2 |
 | 设置 | `settings.fetchSettings` | `GET /settings` | 阶段 2 |
@@ -165,6 +176,32 @@ success_rate, skip_rate, by_status, since }`，其中
 页面中所有使用规划接口的位置都带 "Mock"/阶段标注（卡片 `planned` 徽标或副标题），
 不使用户误以为后端已具备该能力。切到真实后端时，未被实现的接口会返回 404/业务错误，
 解包层会弹错误提示——这是预期行为，路由补齐后即恢复正常。
+
+### 4.3 阶段 2 Agent 契约接口（冻结契约 `PHASE2-接口契约.md` §1–§5）
+
+这 7 个接口是**契约已冻结、前端已按其实现**的接口；Go 内核实现已在
+`crony/common/pkg/agent/{trace,diagnose,nljob,cronnext,agent,prompt}.go` 与
+`crony/common/pkg/llm`、`crony/common/pkg/tools` 落地，但 **admin 层 HTTP handler 尚未注册**
+（`router.go` 里没有这些路由），因此当前一律走 Mock。
+
+| 契约 | 前端 API（`src/api/agent.js`） | 路由 | 页面 |
+| --- | --- | --- | --- |
+| §1 会话检索 | `searchAgentSessions` | `POST /agent/session/search` | `/agents`（列表 + 过滤 + 分页）、右下角速查面板 |
+| §2 会话详情（轨迹） | `findAgentSession` | `POST /agent/session/find` | `/agents/:session_id` |
+| §3.1 读诊断 | `findAgentDiagnosis` | `POST /agent/diagnosis/find` | `/runs` 抽屉、`/agents` 就地诊断 |
+| §3.2 触发诊断 | `runAgentDiagnosis` | `POST /agent/diagnosis/run` | 同上（`force=true` 前有二次确认） |
+| §4 工具与配额 | `listAgentTools` | `POST /agent/tool/list` | `/agents` 顶部"当前能力边界" |
+| §5.1 草案 | `draftNlJob` | `POST /agent/nljob/draft` | `/jobs` 自然语言建任务向导 |
+| §5.2 确认创建 | `confirmNlJob` | `POST /agent/nljob/confirm` | 同上（二次确认步骤） |
+
+`src/api/agent.js` 导出 13 个符号：上表 7 个契约函数 + 2 个归一化视图
+（`budgetView`、`toolStatsView`，用于吸收"契约字段 vs Go 内核字段"差异）+ 4 个步骤取值兜底函数
+（`stepSeq` / `stepTime` / `stepError` / `stepTokens`）。字段差异清单见第 10 节。
+
+阶段 2 相关业务码（契约 §0）：`1007` 本节点未配置模型、`1008` 会话不存在、`1009` 草案本地复验不通过、
+`1010` 指定的运行记录不存在、`1011` Agent 能力被配置关闭、`1012` 节点离线/未注册。
+`src/utils/dict.js` 的 `AGENT_BIZ_HINT` 把它们翻译成"人话 + 该怎么办"，弹窗里同时给出 code，
+便于对着契约排查。
 
 ---
 
@@ -184,6 +221,31 @@ Mock 的行为约束（与真实后端一致，便于无感切换）：
 - `login` 的口令长度不足返回业务错误 `code: 1000`（HTTP 200），正常口令返回 `token`；
 - `GET /ping` 返回裸字符串（真实后端这条没有信封，故 Mock 也返回裸值）。
 
+### 5.1 阶段 2 的 Mock 样例（对应契约 §1–§5）
+
+`src/api/mock/data.js` 里的 Agent 数据**不是**编出来的好看数字，而是从既有 `runs` 派生
+（`runOf(job_id, status)`），因此会话的 `run_id / job_id / node_uuid / 时间` 与执行记录页一致：
+
+| 契约 | 样例 | 关键点 |
+| --- | --- | --- |
+| §1 | 8 条会话（3 种 kind × 3 种 status 全覆盖） | 字段与契约逐字对应，`provider='offline'`、`model=''`（离线 FakeProvider 从不上报 model，UI 显示"—"） |
+| §2 | 8 份完整轨迹 | model / tool / notice 三类步骤都有；tool 步骤带 `tool_args` + `observation`；边界样本含 `tool_budget` 与 schema 修复的 notice |
+| §3.1 | 3 份诊断样本 | ①证据充分（confidence 72，3 条证据）②证据不足（`evidence_sufficient=false`，列出还要采集什么）③**引用了未观测到的证据定位**（`unverified_refs=['syslog:999']` + 醒目警告） |
+| §3.2 | 即时诊断 | 未诊断过的 run 返回"证据不足"模板（confidence 35，标注 Mock），不复用已有诊断；`force=false` 幂等、`force=true` 新增会话 |
+| §4 | 5 个真实只读工具 | 名称/说明照抄 `common/pkg/tools/builtin.go`：`shell_readonly` / `http_get` / `node_status` / `log_search` / `mysql_query_readonly` |
+| §5.1 | 3 份草案 | cmd（每天 2 点清理）、http（健康检查探活）、**5 段表达式**（`0 2 * * *`，带"不是每天 2 点"的醒目警告） |
+| §5.2 | 确认创建 | 真的往 `jobs` 里插入一条 `status:0`（未分配节点）的任务，任务列表页立即可见；非法 spec / 越界 timeout / `confirmed=false` 一律 1009 |
+
+Mock 里**可达**的业务错误分支（不是装饰）：`1008`（未知 session_id）、`1009`（空文本草案 /
+非法覆盖项 / `confirmed!==true`）、`1010`（未知 run_id，需手工改参数）、
+`1011`/`1007`（把 `settingsSnapshot.agent.enabled` / `provider` 改掉才会命中）、
+`1012`（把 run 指到 `status=2` 的失联节点）。
+
+> 另外保留了 `agentChat` / `agentDispatch` 两个**兼容垫片**：阶段 1 的冒烟脚本
+> （`scripts/smoke-mock.mjs`，本期不允许改动）会断言它们返回可读文案。
+> 它们现在返回的是"阶段 2 没有 `/agent/chat`，Agent 的产物是会话与轨迹"的说明，
+> 不再假装存在对话/下发接口。
+
 ---
 
 ## 6. 设计取舍
@@ -194,8 +256,12 @@ Mock 的行为约束（与真实后端一致，便于无感切换）：
 - **无独立登录页**：本期 9 个必交付页面不含登录；底部用户栏展示当前用户（Mock 为 `admin`），
   真实登录链路已在 `client.js` 就绪（`Bearer` 头 + `localStorage` 的 `crony_token`），
   后续把登录页接到 `/login` 即可。
-- **侧边栏状态徽标为数据驱动**：显示 `System Normal · N Agent · M Job`，N/M 由
-  `/agent/search`、`/job/search` 的实际条数决定，而不是写死基线截图里的 `12 Agent · 10 Workflow`。
+- **侧边栏状态徽标不再编数字**：阶段 1 写死过 `6 Agent · 12 Job`（Go 侧没有 Agent 实体模型，无从核对）；
+  阶段 2 改为 `System Normal · N Agent 会话`，N 取契约 §1 `POST /agent/session/search` 的 `total`，
+  接口不可用时只显示 `System Normal`。
+- **不做聊天框**：阶段 1 右下角是"AI 对话"（`/agent/chat`），但契约里没有这个接口——Agent 的产物是
+  **会话 + 轨迹**。阶段 2 换成"Agent 会话速查"（按 run_id/job_id 检索会话 → 跳轨迹），删除了
+  `AiChatWidget.vue` 与 `stores/chat.js`，避免用一个不存在的接口撑交互。
 - **服务器页空状态**：`/statis/overview` 未实现时，服务器卡片展示"尚未接入资产台账"的引导态，
   而不是编造服务器列表。
 - **图表不引第三方库**：趋势用内联 SVG（`Sparkline.vue`），大屏条形图用 div 高度实现，
@@ -244,9 +310,12 @@ Mock 的行为约束（与真实后端一致，便于无感切换）：
 | lightningcss | ^1.29.1 | 1.33.0 |
 | esbuild-wasm（未使用，见第 7 节） | ^0.28.2 | 0.28.2 |
 
-构建产物 `dist/`（`pnpm build`，约 1.7 MB / 22 个文件）：`index.html` 0.8 kB、
-`assets/index-*.css` 394 kB（gzip 55.6 kB）、`element-plus-*.js` 1047 kB（gzip 318.7 kB，
-按需拆分后可显著下降）、`vue-*.js` 110 kB、`index-*.js` 130 kB，各页面独立 chunk。
+构建产物 `dist/`（`pnpm build`，实测 **24 个文件 / 1.81 MB**）：`index.html` 0.8 kB、
+`assets/index-*.css` 385 kB（构建日志 394.48 kB / gzip 55.7 kB）、`element-plus-*.js` 1023 kB
+（构建日志 1046.99 kB / gzip 318.7 kB，按需拆分后可显著下降）、`vue-*.js` 108 kB、
+`index-*.js` 167 kB（构建日志 170.91 kB），以及各页面独立 chunk：
+`JobsView` 30.1 kB、`DashboardView` 16.5 kB、`RunsView` 16.3 kB、`AgentSessionView` 16.3 kB、
+`SettingsView` 14.7 kB、`AgentsView` 14.2 kB、`DiagnosisPanel` 10.7 kB 等。
 
 ---
 
@@ -262,7 +331,7 @@ Mock 的行为约束（与真实后端一致，便于无感切换）：
    `--configLoader=runner`、`optimizeDeps` 关闭、esbuild 替代实现都只在沙箱探测命中时生效，
    正常开发机不需要也不受影响。若把本项目搬到标准环境，建议删除 `pnpm-workspace.yaml` 中的
    `nodeLinker`/`allowBuilds` 并恢复 esbuild 原链路。
-4. **规划接口未做联调**：第 4.2 节 8 个接口后端尚未实现，真实模式下会报错属预期。
+4. **规划接口未做联调**：第 4.2 节 5 个接口后端尚未实现，真实模式下会报错属预期。
    `/job/run/overview` 只按 `service.RunOverview` 的字段与口径对接（含成功率分母扣除 skipped），
    但**未与真实数据库联调过数值**。
 5. **鉴权链路未端到端验证**：没有登录页，`Bearer` 头与 401 处理只做了代码级实现与 Mock 验证。
@@ -270,9 +339,81 @@ Mock 的行为约束（与真实后端一致，便于无感切换）：
    非沙箱回环 TCP 本身可用），显式指定后页面与模块均正常返回（40/40 模块 HTTP 200）。
 7. **`esbuild-wasm` 为环境遗留依赖**（见第 7 节），当前构建不依赖它。
 
+### 9.1 阶段 2 专项：未验证项（**未对真后端跑过**）
+
+1. **7 个契约接口全部未对真后端跑过**：`admin` 层没有这些路由，`VITE_USE_MOCK=false` 时
+   `/agent/*` 会返回 404/业务错误（解包层会弹提示，这是预期）。本期的正确性依据是
+   `node verify-phase2.mjs` —— 它验证的是**前端 API 层 + Mock 的契约一致性**，
+   **不能替代联调**。该脚本当前 10/10 通过，覆盖：
+
+   | # | 检查项 | 断言要点 |
+   | --- | --- | --- |
+   | 1 | §1 会话列表 | `PageResult` 形状、20 个契约字段齐全、kind/status 过滤、分页 |
+   | 2 | §2 会话详情 | 8 个顶层字段 + `budget` 6 项 + `tool_stats` 4 项；tool 步骤必须有 `tool_args`/`observation`；notice 必须有文本 |
+   | 3 | §2 兜底详情 | 临时新增的会话也能取到可渲染详情（不依赖手工补数据） |
+   | 4 | §3.1 三种诊断样本 | 证据充分 / 证据不足（含 `next_data_to_collect`）/ 引用未观测定位（含警告）；未诊断的 run 返回 `found=false`、`session_id=""`、`diagnosis=null` |
+   | 5 | §3.2 触发诊断 | `force=false` 幂等返回同一条；`force=true` 新增会话且同一 run 不产生重复会话 |
+   | 6 | §4 工具与配额 | 工具全部 `readonly`、5 个字段齐全；policy 6 项齐全 |
+   | 7 | §5.1 草案 | cmd/http/五段三份样例字段齐全；`next_triggers` 与 `next_trigger_text` 各 5 条；`requires_confirmation=true`、`confirmed=false`；`trigger_echo` 含"确认前不会写入调度器"且列出 1)–5) 五次时间 |
+   | 8 | §5.2 确认创建 | 创建出的任务出现在任务列表且 `status=0`；非法 spec / 越界 timeout / `confirmed=false` 走 1009；空文本草案走 1009 |
+   | 9 | 错误码 | 1008（未知会话）、1010（未知 run）、1011（enabled=false）、1007（provider 为空） |
+   | 10 | 错误码 | 1012（把 run 指到失联节点） |
+2. **没有真实模型凭据**：所有 `provider='offline'`、`model=''` 都来自 Mock 的假设
+   （`offlineProvider()` 的 FakeProvider 只设 `Provider`、不设 `Model`）。真实 provider 的
+   `model` / token 计数 / `finish_reason` 表现未验证；**未做任何准确率评测，页面上也不声明准确率**。
+3. **`advisory_only=true` 是阶段 2 的固有条**：UI 里"没有任何执行按钮"是按契约设计的，
+   不是漏做——阶段 3 才会出现变更类动作与审批流。
+4. **未实现 SSE / 流式**：契约里诊断与草案都是"一次请求拿到最终结果"，所以页面是请求-等待-渲染，
+   没有逐 token 流式输出，也没有"运行中"的进度回显。诊断按钮的 loading 是唯一的进行中反馈。
+5. **JSON Schema 展示为原文**：§4 的 `tools[].schema` 直接 `<pre>` 展示，未做表单化/校验器；
+   阶段 2 也没有前端触发工具调用的入口（工具由内核调度）。
+6. **`trigger_echo` / `next_trigger_text` 取自 Mock**：5 次触发时间是 Mock 自己按 6 段/5 段规则算的；
+   真实内核用 `cronnext` 库计算，边界情形（月末、闰年、时区夏令时）**未验证**。
+7. **`pnpm smoke` 不受本期改动影响的部分**：`scripts/smoke-mock.mjs` 本期**不允许修改**，
+   它仍断言旧的 `agentChat` / `agentDispatch`，因此这两个垫片只能保留（见第 5.1 节末尾）。
+8. **无 lint 可跑**：`package.json` 没有 `lint` 脚本、也没有 eslint 依赖，本期未执行任何 lint，
+   只做了 `pnpm build`（编译期校验）与两个自检脚本。
+
 ---
 
-## 10. 与后端的衔接
+## 10. 阶段 2 契约问题与字段差异（只报告，未改契约）
+
+阅读 `crony/common/pkg/agent` 等 Go 实现后，发现契约与内核结构存在以下差异。
+**前端一律按契约字段渲染**，只在契约字段缺失时回落到内核字段（`src/api/agent.js` 的
+`budgetView` / `toolStatsView` / `stepSeq` / `stepTime` / `stepError` / `stepTokens`），
+契约本身**未做任何修改**。建议后端 handler 负责补齐这些字段（而不是让前端猜）：
+
+> **后续进展（后端已补齐 1~7）**：`admin/internal/handler/agent_view.go`（提交 `e2829cd`）
+> 已按契约 v1 在视图层统一补齐 `seq`/`created`/`error`/`total_tokens`、`status_text`、
+> `stop_reason_text`、`budget`（毫秒）、`tool_stats.truncated|remaining`、`category_text`/
+> `risk_text`/`concurrency_policy_text`/`confidence_note`/`explain`，并把 `confidence` 统一为
+> 0–100。**一旦接上真后端，表中的 1~7 项回落逻辑不会被触发**（保留它只为兼容 Mock 与旧后端）。
+> 第 8~11 项是文档/枚举约定，以 `*_text` 与后端告警文本为准。详见 `PHASE2-接口契约.md` §8.5。
+
+| # | 位置 | 契约（`PHASE2-接口契约.md`） | Go 内核实现 | 前端处理 |
+| --- | --- | --- | --- | --- |
+| 1 | §2 `steps[]` 标识 | `seq` / `created` / `error` | `Step.Index` / `Step.At` / `Step.Err`（`json:"err,omitempty"`） | 契约优先，缺失回落内核字段 |
+| 2 | §2 `steps[]` token | `total_tokens` | 嵌套 `usage.total_tokens`（`prompt_tokens`/`completion_tokens`） | 两级取值，都缺失则不显示（不写 0） |
+| 3 | §2 顶层 | `stop_reason_text` | `Trace.StopExplain` | 契约优先，`AGENT_STOP_REASON` 兜底 |
+| 4 | §2 `budget` | `{calls,tokens,duration_ms,max_calls,max_tokens,max_duration_ms}` | `BudgetSnapshot{budget,calls,tokens,prompt_tokens,completion_tokens,elapsed(纳秒),remaining_*,exceeded,reason}`，且 `llm.Budget` **没有 json tag**（会序列化成 `MaxCalls/MaxTokens/MaxDuration`） | `budgetView` 同时认两套命名并把纳秒换算成毫秒 |
+| 5 | §2 `tool_stats` | `{calls,denied,truncated,remaining}` | `SessionStats` 只有 `calls/denied/evidence/per_tool/…`，**没有** `truncated`/`remaining` | 缺失时显示 `—`，**不编造 0** |
+| 6 | §1/§3 的 `*_text` | `category_text` / `risk_text` / `concurrency_policy_text` / `explain` | 内核结构里没有这些字段（应是 handler 层附加） | 缺失时用 `dict.js` 的枚举中文兜底 |
+| 7 | §3.1 `confidence` | 示例 `72`（0–100 整数） | `clamp01(percent/100)`，即 0–1 小数 | `formatConfidence` 两种量纲都接受 |
+| 8 | `stop_reason_text` 文案 | 示例写 `"正常完成"` | `Explain()` 返回 `已得到结构化结论` | 以契约文案为准（`AGENT_STOP_REASON.completed`），后端原文优先 |
+| 9 | §5.1 `concurrency_policy` 取值 | 契约未列枚举 | `nljob.go`：`skip\|buffer_one\|buffer_all\|cancel_other\|terminate_other` | 与阶段 1 `dict.js` 的 `skip\|queue\|forbid` 不一致，**优先显示后端 `concurrency_policy_text`** |
+| 10 | §5.1 五段表达式语义 | 只要求给出警告 | `nljob.go` 的警告措辞与"库按秒/分/时/日/周解释"有关 | Mock 采用更准确的"「秒 分 时 日 月」→ `0 2 * * *` 是每小时第 2 分钟"表述；**真实文案以后端为准** |
+| 11 | 会话与 run 的关系 | §1 有 `job_id`/`run_id`（可为空） | `nljob` 会话没有 run_id | UI 对空值显示 `—`，不假设一定存在 |
+
+另外两个"契约没写、但实现必须有"的点，前端按保守方式处理，建议契约后续补充说明：
+
+- **§2 的 `system` / `context` 是原文字段**：可能很长（含完整 prompt）。页面默认折叠，点击才展开，
+  避免首屏被 prompt 淹没。
+- **§3.2 的 `force` 语义**：契约只写"是否强制重新诊断"，未写是否新增会话。Mock 按
+  "`force=false` 已有则原样返回、`force=true` 新增一条会话"实现，UI 的二次确认文案也按这个语义写。
+
+---
+
+## 11. 与后端的衔接
 
 `crony-admin` 当前在 `configNoRoute`（`router.go:134`）中挂载旧版 Vue2 产物 `./dist`；
 AI Agent 控制台的产物可直接放到 `admin` 的静态目录并在 `/console` 下挂载：

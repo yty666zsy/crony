@@ -5,6 +5,8 @@ import { searchJobs, saveJob, deleteJob, runJobOnce, findJob } from '@/api/job'
 import { searchNodes } from '@/api/node'
 import StatusBadge from '@/components/StatusBadge.vue'
 import EmptyState from '@/components/EmptyState.vue'
+import NlJobWizard from '@/components/NlJobWizard.vue'
+import MockBadge from '@/components/MockBadge.vue'
 import { CONCURRENCY_POLICY, JOB_STATUS, JOB_TYPE } from '@/utils/dict'
 import { formatRelative, formatSeconds, truncate } from '@/utils/format'
 
@@ -182,6 +184,9 @@ async function onDelete(row) {
 
 const activeCount = computed(() => rows.value.filter((j) => j.status === 1).length)
 
+/** 自然语言建任务向导（阶段 2 契约 §5）：草案 → 核对 5 次触发时间 → 确认创建 */
+const nlOpen = ref(false)
+
 onMounted(() => {
   load()
   loadNodes()
@@ -250,9 +255,15 @@ onMounted(() => {
           <el-button type="primary" @click="onSearch">查询</el-button>
           <el-button @click="reset">重置</el-button>
         </div>
-        <el-button type="primary" @click="openCreate">
-          <el-icon class="mr-1"><Plus /></el-icon>新建任务
-        </el-button>
+        <div class="flex flex-wrap items-center gap-2">
+          <MockBadge text="Mock 任务数据" />
+          <el-button @click="nlOpen = true">
+            <el-icon class="mr-1"><MagicStick /></el-icon>用自然语言建任务
+          </el-button>
+          <el-button type="primary" @click="openCreate">
+            <el-icon class="mr-1"><Plus /></el-icon>新建任务
+          </el-button>
+        </div>
       </div>
 
       <el-table v-loading="loading" :data="rows" style="width: 100%">
@@ -373,6 +384,9 @@ onMounted(() => {
         />
       </div>
     </section>
+
+    <!-- 自然语言建任务向导（阶段 2 契约 §5.1 草案 / §5.2 确认） -->
+    <NlJobWizard v-model="nlOpen" @created="load" />
 
     <!-- 新建 / 编辑抽屉 -->
     <el-drawer v-model="drawer.visible" :size="520" :title="drawer.mode === 'create' ? '新建定时任务' : `编辑任务 #${form.id}`">

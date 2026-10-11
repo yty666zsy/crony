@@ -3,12 +3,12 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { fetchOverview } from '@/api/statis'
 import { fetchRunOverview } from '@/api/run'
-import { searchAgents } from '@/api/agent'
+import { searchAgentSessions } from '@/api/agent'
 import { searchKnowledge } from '@/api/knowledge'
 import StatCard from '@/components/StatCard.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import EmptyState from '@/components/EmptyState.vue'
-import { ALERT_LEVEL, CONCURRENCY_POLICY, TRIGGER_SOURCE } from '@/utils/dict'
+import { ALERT_LEVEL, AGENT_SESSION_KIND, CONCURRENCY_POLICY, TRIGGER_SOURCE } from '@/utils/dict'
 import { formatDuration, formatRelative, formatTime, formatNumber } from '@/utils/format'
 
 /**
@@ -23,27 +23,32 @@ import { formatDuration, formatRelative, formatTime, formatNumber } from '@/util
  * 数据来源：
  *   - GET /job/run/overview（后端已实现，近 24h 聚合）→ 前两张 KPI 卡（执行次数、成功率）
  *   - GET /statis/overview（规划中，阶段 1）→ 节点/耗时 KPI、告警、最近任务 → 当前走 Mock
- *   - GET /agent/search、GET /knowledge/search（规划中）→ 右侧两栏 → 当前走 Mock
+ *   - POST /agent/session/search（阶段 2 契约 §1）→ 右下 "Recent Agent Sessions" 栏
+ *   - GET /knowledge/search（规划中）→ 右侧栏 → 当前走 Mock
+ *
+ * 注意：阶段 1 这里显示的是 6 个编造的 "Agent 实体"（名字/角色/今日运行次数）。
+ * Go 侧没有 Agent 实体模型，所以阶段 2 换成**真实存在的会话记录**（consumes token、
+ * 调只读工具、有 stop_reason 的那种），避免用假实体撑版面。
  */
 const router = useRouter()
 const loading = ref(true)
 const data = ref(null)
 const runOverview = ref(null)
-const agents = ref([])
+const agentSessions = ref([])
 const docs = ref([])
 
 onMounted(async () => {
   try {
-    const [overview, runOv, agentRes, kbRes] = await Promise.all([
+    const [overview, runOv, sessionRes, kbRes] = await Promise.all([
       fetchOverview(),
       // 该接口后端已实现；Mock 关闭且后端未启动时不应该拖垮整页，因此单独兜底。
       fetchRunOverview().catch(() => null),
-      searchAgents({ page: 1, page_size: 5 }),
+      searchAgentSessions({ page: 1, page_size: 5 }),
       searchKnowledge({ page: 1, page_size: 4 }),
     ])
     data.value = overview
     runOverview.value = runOv
-    agents.value = (agentRes?.list || []).slice(0, 5)
+    agentSessions.value = (sessionRes?.list || []).slice(0, 5)
     docs.value = kbRes?.list || []
   } finally {
     loading.value = false
@@ -54,7 +59,9 @@ const kpi = computed(() => data.value?.kpi || {})
 const trends = computed(() => data.value?.trends || {})
 const alerts = computed(() => data.value?.alerts || [])
 const recentTasks = computed(() => data.value?.recent_tasks || [])
-const onlineAgents = computed(() => agents.value.filter((a) => a.status !== 'offline'))
+
+/** 有警告的会话数：会话列表里最需要被看见的信号（模型引用未观测证据、预算耗尽等都会进 warn_count） */
+const warnedSessions = computed(() => agentSessions.value.filter((s) => (s.warn_count || 0) > 0).length)
 
 /** 执行概览卡：优先用 /job/run/overview 的真实口径，缺失时回落到概览 Mock */
 const runsCard = computed(() => {
@@ -93,7 +100,8 @@ const quickActions = [
   { key: 'runs', label: '查看执行记录', desc: '按状态检索 run 与步骤', icon: 'DataLine', to: '/runs' },
   { key: 'servers', label: '服务器状态', desc: '节点心跳与任务分布', icon: 'Monitor', to: '/servers' },
   { key: 'terminal', label: '打开终端', desc: '交互式终端（阶段 2）', icon: 'Monitor', to: '/terminal' },
-  { key: 'agent', label: '下发 Agent 任务', desc: '自然语言描述运维目标', icon: 'MagicStick', to: '/agents' },
+  { key: 'agent', label: '用自然语言建任务', desc: '描述需求 → 核对 5 次触发时间 → 确认', icon: 'MagicStick', to: '/jobs' },
+  { key: 'agent-session', label: '查看 Agent 会话', desc: '轨迹回放与只读能力边界', icon: 'MagicStick', to: '/agents' },
   { key: 'kb', label: '检索知识库', desc: 'Runbook / SOP / 复盘', icon: 'Search', to: '/knowledge' },
 ]
 
@@ -253,38 +261,51 @@ function goRunDetail(row) {
         </div>
       </div>
 
-      <!-- Online Agents -->
+      <!-- Recent Agent Sessions（阶段 2 契约 §1：真实会话，不是编造的 Agent 实体） -->
       <div class="card flex flex-col">
         <div class="panel-head">
           <div class="flex items-center gap-2">
-            <span class="card-title">Online Agents</span>
-            <span class="chip border-ok/40 text-ok">{{ onlineAgents.length }} 在线</span>
+            <span class="card-title">Recent Agent Sessions</span>
+            <span v-if="warnedSessions" class="chip border-danger/40 text-danger">{{ warnedSessions }} 条有警告</span>
           </div>
           <router-link to="/agents" class="text-[11px] text-brand-300 hover:underline">
-            Agent 控制台
+            全部会话
           </router-link>
         </div>
         <ul class="divide-y divide-navy-600">
-          <li v-for="a in onlineAgents" :key="a.id" class="flex items-center gap-3 px-5 py-3">
-            <span class="relative flex h-2 w-2 shrink-0">
+          <li v-for="s in agentSessions" :key="s.session_id" class="px-5 py-3">
+            <div class="flex flex-wrap items-center gap-1.5">
               <span
-                v-if="a.status === 'online'"
-                class="absolute inline-flex h-full w-full rounded-full bg-ok opacity-70 animate-pulse-ring"
-              />
-              <span
-                class="relative inline-flex h-2 w-2 rounded-full"
-                :style="{ backgroundColor: a.status === 'offline' ? '#ef4444' : a.status === 'busy' ? '#6366f1' : '#22c55e' }"
-              />
-            </span>
-            <div class="min-w-0 flex-1">
-              <p class="truncate text-xs font-medium text-ink">{{ a.name }}</p>
-              <p class="truncate text-[10px] text-ink-dim">{{ a.current_task }}</p>
+                class="chip"
+                :style="{
+                  color: AGENT_SESSION_KIND[s.kind]?.color || '#7c8aa8',
+                  backgroundColor: (AGENT_SESSION_KIND[s.kind]?.color || '#7c8aa8') + '1f',
+                }"
+              >{{ AGENT_SESSION_KIND[s.kind]?.text || s.kind }}</span>
+              <StatusBadge kind="session" :value="s.status" size="small" />
+              <span v-if="s.warn_count" class="chip border-warn/40 text-warn">警告 {{ s.warn_count }}</span>
+              <span class="ml-auto text-[10px] text-ink-dim">{{ formatRelative(s.created_ms || s.created) }}</span>
             </div>
-            <StatusBadge kind="agent" :value="a.status" size="small" />
+            <p class="mt-1 truncate text-[11px] text-ink-muted">{{ s.goal || '（无目标描述）' }}</p>
+            <div class="mt-1 flex items-center gap-2 text-[10px] text-ink-dim">
+              <span class="font-mono">{{ s.provider || '—' }}</span>
+              <span>tokens {{ formatNumber(s.total_tokens) }}</span>
+              <span>工具 {{ s.tool_calls }}</span>
+              <router-link :to="`/agents/${s.session_id}`" class="ml-auto text-brand-300 hover:underline">
+                看轨迹 →
+              </router-link>
+            </div>
           </li>
         </ul>
+        <EmptyState
+          v-if="!agentSessions.length"
+          compact
+          icon="MagicStick"
+          title="暂无 Agent 会话"
+          desc="会话由诊断、自然语言建任务或任务内嵌 Agent 产生。"
+        />
         <p class="mt-auto border-t border-navy-600 px-5 py-2.5 text-[10px] text-ink-dim">
-          Agent 运行时为阶段 2 交付，当前为 Mock 数据
+          POST /agent/session/search（契约 §1）· 阶段 2 契约接口
         </p>
       </div>
 

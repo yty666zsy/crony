@@ -111,8 +111,18 @@ export function mockDelay(ms = 180) {
 /**
  * Mock 响应包装：构造与后端一致的信封，再走 unwrap，
  * 因此 Mock 模式下 code!==200 同样会弹 ElMessage。
+ *
+ * 为什么要识别"已经是信封"的入参：
+ *   mock/*.js 的处理器一律返回**完整信封** { code, data, msg }（与后端响应体逐字一致，
+ *   便于 smoke 直接断言），而这里再包一层就会得到
+ *   { code:200, data:{code,data,msg} } → unwrap 只拆一层 → 调用方拿到的是**信封本身**，
+ *   `res.list` 恒为 undefined。阶段 1 的页面因此在 Mock 模式下全部渲染空列表。
+ *   现在：入参是信封就原样拆它的 data；code!==200 仍然抛 BizError（人话提示不变）。
  */
 export async function mockResponse(data, { code = 200, msg = 'operation success', delay = 180 } = {}) {
   if (delay > 0) await mockDelay(delay)
+  if (data && typeof data === 'object' && !Array.isArray(data) && 'code' in data && 'msg' in data) {
+    return unwrap({ code: data.code, data: data.data, msg: data.msg || msg })
+  }
   return unwrap({ code, data, msg })
 }

@@ -1,9 +1,10 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
+import { searchAgentSessions } from '@/api/agent'
 import navGroups from '@/config/nav'
 
 /**
@@ -14,6 +15,10 @@ import navGroups from '@/config/nav'
  *   - 顶部按钮 "Collapse All" 一次性收成图标栏并关闭所有分组；
  *   - 视口 <=1024px 时由 store 强制折叠（硬性要求）；
  *   - 折叠态下点击分组图标 = 展开侧边栏并打开该分组。
+ *
+ * 底部状态徽标：阶段 1 这里写死过 "6 Agent · 12 Job"，而 Go 侧**没有** Agent 实体模型，
+ * 那些数字是无从核对的。阶段 2 改成显示真实存在的 Agent 会话条数（契约 §1 的 total），
+ * 取不到就只显示 System Normal —— 宁可不显示，也不编数字。
  */
 const app = useAppStore()
 const auth = useAuthStore()
@@ -21,6 +26,16 @@ const route = useRoute()
 const { collapsed } = storeToRefs(app)
 
 const statusText = computed(() => 'System Normal')
+const sessionTotal = ref(null)
+
+onMounted(async () => {
+  try {
+    const res = await searchAgentSessions({ page: 1, page_size: 1 })
+    sessionTotal.value = Number(res?.total || 0)
+  } catch {
+    sessionTotal.value = null // 取不到就不显示数字
+  }
+})
 
 function onGroupIconClick(key) {
   app.userCollapsed = false
@@ -169,11 +184,14 @@ function isActiveGroup(group) {
           <span class="relative inline-flex h-2 w-2 rounded-full bg-ok" />
         </span>
         <span class="truncate text-[10px] leading-4 text-ok/90">
-          {{ statusText }} · 6 Agent · 12 Job
+          {{ statusText }}<template v-if="sessionTotal !== null"> · {{ sessionTotal }} Agent 会话</template>
         </span>
       </div>
       <div v-else class="mt-2 flex justify-center">
-        <el-tooltip :content="`${statusText} · 6 Agent · 12 Job`" placement="right">
+        <el-tooltip
+          :content="sessionTotal !== null ? `${statusText} · ${sessionTotal} Agent 会话` : statusText"
+          placement="right"
+        >
           <span class="inline-flex h-2 w-2 rounded-full bg-ok" />
         </el-tooltip>
       </div>

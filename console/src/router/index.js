@@ -146,7 +146,25 @@ const routes = [
     path: '/agents',
     name: 'agents',
     component: () => import('@/views/AgentsView.vue'),
-    meta: { title: 'Agent Console', subtitle: 'Agent 控制台 · 能力、状态与任务下发（Mock）', group: 'AI Agent', icon: 'MagicStick' },
+    meta: {
+      title: 'Agent Console',
+      subtitle: 'Agent 会话 · 只读能力边界与轨迹（阶段 2 契约 §1/§3/§4）',
+      group: 'AI Agent',
+      icon: 'MagicStick',
+    },
+  },
+  {
+    // 阶段 2 新增：会话轨迹回放（契约 §2）。
+    // 命名参数用 session_id（不是 id），与契约字段一致，避免复制链接时对不上号。
+    path: '/agents/:session_id',
+    name: 'agent-session',
+    component: () => import('@/views/AgentSessionView.vue'),
+    meta: {
+      title: 'Agent Session',
+      subtitle: '轨迹回放 · 只渲染后端记录的步骤（阶段 2 契约 §2）',
+      group: 'AI Agent',
+      icon: 'MagicStick',
+    },
   },
   {
     path: '/knowledge',

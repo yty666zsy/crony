@@ -4,21 +4,19 @@ import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { searchRuns, fetchRunSteps, findRun } from '@/api/run'
 import { killRun } from '@/api/run'
+import { findAgentDiagnosis, runAgentDiagnosis } from '@/api/agent'
 import StatusBadge from '@/components/StatusBadge.vue'
 import EmptyState from '@/components/EmptyState.vue'
-import { CONCURRENCY_POLICY, RUN_STATUS, TRIGGER_SOURCE } from '@/utils/dict'
+import DiagnosisPanel from '@/components/DiagnosisPanel.vue'
+import { CONCURRENCY_POLICY, RUN_STATUS, TRIGGER_SOURCE, bizHint } from '@/utils/dict'
 import { formatDuration, formatRelative, formatTime } from '@/utils/format'
 
 /**
  * /runs —— 执行记录（Recent Tasks 的完整版）。
  *
- * ⚠️ 本页所有接口均为**规划中**（阶段 1 任务模型 2.0）：
- *   POST /job/run/search、GET /job/run/find、POST /job/run/steps、POST /job/kill
- * 对应的数据模型（job_run / job_run_step）已经在 Go 侧落库
- * （crony/common/models/run.go），但还没有 HTTP 路由。
- *
- * 点击行 → 执行详情抽屉：job_run 概要 + 步骤时间线
- * （每步：名称、类型、状态、退出码、耗时、重试次数、输出片段、结构化产物）。
+ * job_run / job_run_step 列表：阶段 1 的规划接口（POST /job/run/search 等），数据来自 Mock。
+ * 详情抽屉里的「AI 诊断」面板：**阶段 2 契约接口**（§3.1 读 / §3.2 触发），
+ * 只读、只给建议（advisory_only=true），没有执行按钮。
  */
 const route = useRoute()
 
@@ -41,6 +39,17 @@ const detail = reactive({
   loading: false,
   run: null,
   steps: [],
+})
+
+/** AI 诊断面板状态（契约 §3.1/§3.2） */
+const diag = reactive({
+  runId: '',
+  sessionId: '',
+  found: false,
+  diagnosis: null,
+  loading: false,
+  busy: false,
+  error: null,
 })
 
 const stepStatusText = {
@@ -106,6 +115,7 @@ async function openDetail(row) {
   detail.loading = true
   detail.run = row
   detail.steps = []
+  openDiag(row.run_id)
   try {
     try {
       detail.run = await findRun(row.run_id)
@@ -116,6 +126,55 @@ async function openDetail(row) {
     detail.steps = stepRes?.list || []
   } finally {
     detail.loading = false
+  }
+}
+
+/* ---------------------- AI 诊断（契约 §3.1 读 / §3.2 触发） ---------------------- */
+
+/**
+ * 打开抽屉时先读已有诊断（§3.1）。
+ * found=false 是**正常返回**（这条 run 还没诊断过），不是错误——所以不弹 toast，
+ * 只在面板里显示"立即诊断"入口；只有真出错（1007/1010/1012…）才提示。
+ */
+async function openDiag(runId) {
+  diag.runId = runId || ''
+  diag.found = false
+  diag.diagnosis = null
+  diag.error = null
+  diag.loading = true
+  try {
+    const res = await findAgentDiagnosis(runId)
+    diag.found = !!res?.found
+    diag.diagnosis = res?.diagnosis || null
+    diag.sessionId = res?.session_id || res?.diagnosis?.session_id || ''
+  } catch (err) {
+    diag.error = bizHint(err)
+  } finally {
+    diag.loading = false
+  }
+}
+
+/**
+ * 触发诊断（§3.2）。
+ * @param {boolean} force 面板二次确认后传 true，表示"重新诊断"（会新增会话并真实消耗 token）
+ */
+async function triggerDiagnosis(force = false) {
+  if (!diag.runId) return
+  diag.busy = true
+  diag.error = null
+  try {
+    const res = await runAgentDiagnosis(diag.runId, { force })
+    diag.found = true
+    diag.diagnosis = res?.diagnosis || null
+    diag.sessionId = res?.session_id || res?.diagnosis?.session_id || ''
+    ElMessage.success(force ? '已重新诊断（新增一条会话，token 已消耗）' : '诊断完成')
+    // 诊断会产生新的 Agent 会话，列表里的会话数列需要刷新
+    load()
+  } catch (err) {
+    diag.error = bizHint(err)
+    ElMessage.error(`${diag.error.title}（code=${diag.error.code}）`)
+  } finally {
+    diag.busy = false
   }
 }
 
@@ -395,6 +454,29 @@ onMounted(async () => {
                 </div>
               </div>
             </div>
+          </div>
+
+          <!-- ============ AI 诊断（契约 §3.1 读 + §3.2 触发） ============ -->
+          <div class="card mt-4 card-pad">
+            <DiagnosisPanel
+              :diagnosis="diag.diagnosis"
+              :found="diag.found"
+              :loading="diag.loading"
+              :busy="diag.busy"
+              :session-id="diag.sessionId"
+              :error="diag.error"
+              @run="triggerDiagnosis"
+            />
+            <p class="mt-3 border-t border-navy-600 pt-3 text-[10px] leading-5 text-ink-dim">
+              数据来源：POST /agent/diagnosis/find（§3.1，找不到时 found=false）与
+              POST /agent/diagnosis/run（§3.2，会真实消耗模型 token）。
+              Agent 的完整工具调用轨迹在
+              <router-link v-if="diag.sessionId" :to="`/agents/${diag.sessionId}`" class="text-brand-300 hover:underline">
+                会话详情
+              </router-link>
+              <span v-else>会话详情</span>
+              里可逐条回放。
+            </p>
           </div>
 
           <!-- 步骤时间线 -->

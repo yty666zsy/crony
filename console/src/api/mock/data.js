@@ -1218,90 +1218,1128 @@ export const jobLogs = runs
   }))
 
 /* ------------------------------------------------------------------ *
- * 5. Agent（规划中：阶段 2 才接入真实 Agent 运行时）
+ * 5. Agent 内核（阶段 2 · 《PHASE2-接口契约.md》§1–§5）
+ *
+ * 设计原则：
+ *  - 字段名**逐字**对齐契约（seq / created / total_tokens / tool_args …），
+ *    Mock 与真后端共用同一套字段，页面里没有任何"Mock 专用分支"；
+ *  - run_id / node_uuid / job_id 全部从上面的 runs / nodes 派生，保证"会话里出现的 run
+ *    在 /runs 里真的存在"，不另造一套平行假数据；
+ *  - provider 一律 'offline'：本机只有确定性假 provider（agentconfig.ProviderOffline），
+ *    它**不是模型**、也不上报 model 名。契约 §7 要求如实展示 provider，这里不写任何品牌名；
+ *  - 时间用带本地偏移的 RFC3339（契约 §0），阶段 1 的 Unix 秒字段保持不变。
  * ------------------------------------------------------------------ */
 
-export const agents = [
+const p2 = (n) => String(n).padStart(2, '0')
+
+/** 本地时区名（IANA）。契约里的 next_trigger_text 用 "CST" 这种缩写，这里给更明确的 IANA 名。 */
+export const AGENT_TZ = (() => {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'Local'
+  } catch {
+    return 'Local'
+  }
+})()
+
+/** Unix 毫秒 → RFC3339（带本地偏移，如 2026-03-02T02:05:00+08:00） */
+export function rfc3339(ms) {
+  const d = new Date(ms)
+  const off = -d.getTimezoneOffset()
+  const sign = off >= 0 ? '+' : '-'
+  const abs = Math.abs(off)
+  return (
+    `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}` +
+    `T${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}` +
+    `${sign}${p2(Math.floor(abs / 60))}:${p2(abs % 60)}`
+  )
+}
+
+/** 'YYYY-MM-DD HH:mm:ss (Asia/Shanghai)' —— 对应 Go agent.FormatTriggers 的可读形态 */
+function triggerText(d) {
+  return (
+    `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ` +
+    `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())} (${AGENT_TZ})`
+  )
+}
+
+/** 接下来 count 次"每小时第 minute 分" */
+function hourlyTriggers(minute, count = 5, fromMs = NOW) {
+  const out = []
+  const base = new Date(fromMs)
+  base.setSeconds(0, 0)
+  base.setMinutes(minute)
+  if (base.getTime() <= fromMs) base.setHours(base.getHours() + 1)
+  for (let i = 0; i < count; i += 1) {
+    out.push(new Date(base.getTime() + i * 3600 * 1000))
+  }
+  return out
+}
+
+/** 接下来 count 次"每天 hour:minute:00" */
+function dailyTriggers(hour, minute, count = 5, fromMs = NOW) {
+  const out = []
+  const base = new Date(fromMs)
+  base.setHours(hour, minute, 0, 0)
+  if (base.getTime() <= fromMs) base.setDate(base.getDate() + 1)
+  for (let i = 0; i < count; i += 1) {
+    out.push(new Date(base.getTime() + i * 24 * 3600 * 1000))
+  }
+  return out
+}
+
+/** 与 Go agent.TriggerEcho 同形的确认文本（契约 §5.1 trigger_echo） */
+export function triggerEcho(spec, times) {
+  const lines = times.map((t, i) => `  ${i + 1}) ${triggerText(t)}`).join('\n')
+  return (
+    `表达式 "${spec}" 接下来 ${times.length} 次触发时间：\n` +
+    lines +
+    '\n确认无误后再创建任务；确认前不会写入调度器。'
+  )
+}
+
+/**
+ * 按**本库语义**估算接下来 count 次触发时间（确认页要用：用户改了 spec 之后必须重算）。
+ *
+ * 只覆盖日常会写的两种形态：6 段（秒 分 时 日 月 周）与 5 段（本库会解释成 秒 分 时 日 月）。
+ * 其它形态（带步长、区间、枚举的字段）Mock 不去猜——真实实现由后端 cron 库计算，
+ * 页面展示的永远是接口返回的 next_triggers，这里只服务于 Mock 的即时重算。
+ */
+export function specTriggers(spec, count = 5, fromMs = NOW) {
+  const parts = String(spec ?? '').trim().split(/\s+/)
+  const isInt = (s) => /^\d+$/.test(String(s ?? ''))
+  if (parts.length === 6 && isInt(parts[1]) && isInt(parts[2])) {
+    return dailyTriggers(Number(parts[2]), Number(parts[1]), count, fromMs)
+  }
+  // 5 段：第 2 段是"分"
+  const minute = isInt(parts[1]) ? Number(parts[1]) : 0
+  return hourlyTriggers(minute, count, fromMs)
+}
+
+/**
+ * 停止原因的人话文案。与 Go agent.StopReason.Explain() 同义；
+ * completed 用契约示例里的"正常完成"。
+ */
+export const AGENT_STOP_TEXT = {
+  completed: '正常完成',
+  max_steps: '达到最大步数上限（保护性终止，结论可能不完整）',
+  tool_budget: '达到工具调用次数上限（保护性终止）',
+  llm_budget: '模型预算耗尽（保护性终止）',
+  canceled: '被主动取消',
+  schema_invalid: '多次尝试后输出仍不符合要求的结构',
+  no_provider: '没有可用的模型 provider',
+  error: '执行过程中出现错误',
+}
+
+/** 会话级模型预算（llm.DefaultBudget：20 次调用 / 200000 token / 30 分钟） */
+export const AGENT_BUDGET_MAX = { max_calls: 20, max_tokens: 200000, max_duration_ms: 1800000 }
+
+/** 单会话工具调用额度（tools.DefaultPolicy：MaxCallsPerSession=12） */
+export const AGENT_MAX_TOOL_CALLS = 12
+
+/** 从既有 runs 里取样本，保证会话与 /runs 指向同一批记录 */
+const runOf = (jobId, status) => runs.find((r) => r.job_id === jobId && r.status === status)
+const RUN_DIAG_FULL = runOf(2, 3) // 失败：慢查询巡检连接超时 → 诊断证据充分
+const RUN_DIAG_THIN = runOf(6, 6) // 超时：pg_dumpall 等锁 → 诊断证据不足
+const RUN_DIAG_UNVERIFIED = runOf(1, 4) // 取消：人工取消 → 诊断引用了未观测证据
+const RUN_JOB_OK = runOf(12, 2) // 成功：安全基线巡检（任务内嵌 Agent）
+const RUN_JOB_BUDGET = runOf(5, 2) // 成功：磁盘水位巡检（内嵌 Agent 工具预算触顶）
+
+/* ---------------- §2 轨迹步骤构造器（字段名对齐契约） ---------------- */
+
+function modelStep(seq, ms, s) {
+  return {
+    seq,
+    kind: 'model',
+    provider: 'offline',
+    model: '',
+    prompt_preview: s.prompt_preview,
+    prompt_bytes: s.prompt_bytes,
+    content: s.content || '',
+    tool_calls: s.tool_calls || [],
+    total_tokens: s.total_tokens,
+    latency_ms: s.latency_ms,
+    finish_reason: s.finish_reason,
+    truncated: false,
+    created: rfc3339(ms),
+  }
+}
+
+function toolStep(seq, ms, s) {
+  return {
+    seq,
+    kind: 'tool',
+    tool_name: s.tool_name,
+    tool_args: s.tool_args,
+    observation: s.observation,
+    evidence: s.evidence || [],
+    duration_ms: s.duration_ms,
+    error: s.error || '',
+    truncated: !!s.truncated,
+    created: rfc3339(ms),
+  }
+}
+
+function noticeStep(seq, ms, notice) {
+  return { seq, kind: 'notice', notice, created: rfc3339(ms) }
+}
+
+/* ---------------- 诊断结果（§3.1 的 diagnosis 字段） ---------------- */
+
+/** 样本 A：证据充分、置信度中等 */
+const DIAG_FULL = {
+  summary: 'MySQL 慢查询巡检连不上 10.20.31.51:3306：目标实例不可达（connect timeout）',
+  category: 'network',
+  category_text: '网络问题',
+  cause:
+    '任务在第 2 次重试后仍 connect timeout，节点日志显示 TCP 连接无响应，' +
+    '且目标实例所在节点 node-db-01 的心跳已中断 23 分钟——两处观测互相印证"不是鉴权问题而是不可达"。',
+  confidence: 72,
+  evidence: [
+    {
+      ref: 'node.log:12',
+      quote: 'mysqlslow: connect to 10.20.31.51:3306 timeout after 30000ms',
+      why: '直连超时（而非鉴权失败）指向网络或实例不可达',
+    },
+    {
+      ref: `run:${RUN_DIAG_FULL.run_id}#step-2`,
+      quote: '步骤 2（采集慢查询）退出码 2，已重试 2 次',
+      why: '失败稳定复现在采集阶段，说明不是偶发抖动',
+    },
+    {
+      ref: 'node:n-7be2a904-01',
+      quote: 'node-db-01 conn=NodeConnFail，down=23m',
+      why: '目标实例所在节点已失联，与连接超时相互印证',
+    },
+  ],
+  assumptions: ['实例侧可能正在重启或网络策略正在变更（本节点无法验证）'],
+  ruled_out: [
+    { hypothesis: '任务没有触发', reason: '本次 run 记录存在且状态为 failed，attempt=2' },
+    { hypothesis: '命令写错', reason: `同一命令在 5 小时前的手动 run（${runOf(2, 2).run_id}）里执行成功` },
+  ],
+  suggested_actions: [
+    {
+      title: '确认 node-db-01 心跳与 3306 端口连通性',
+      detail:
+        '在 node-prod-02 上用 node_status 复核 node-db-01 状态，并在变更窗口内确认实例是否重启；' +
+        '恢复心跳后再手动触发一次该任务，观察是否仍超时。',
+      risk: 'low',
+      risk_text: '低风险',
+      rollback: '无（只读排查）',
+    },
+  ],
+  evidence_sufficient: true,
+  next_data_to_collect: [],
+  unverified_refs: [],
+  warnings: [],
+  advisory_only: true,
+  provider: 'offline',
+  model: '',
+  prompt_version: 'diagnose-v1',
+  stop_reason: 'completed',
+  stop_reason_text: '正常完成',
+  duration_ms: 4210,
+  tool_calls: 1,
+  total_tokens: 1834,
+}
+
+DIAG_FULL.run_id = RUN_DIAG_FULL.run_id
+DIAG_FULL.job_id = RUN_DIAG_FULL.job_id
+DIAG_FULL.session_id = `diag-j${RUN_DIAG_FULL.job_id}-${RUN_DIAG_FULL.run_id}`
+DIAG_FULL.created = rfc3339(RUN_DIAG_FULL.finished_at * 1000 + 60 * 1000)
+DIAG_FULL.explain =
+  `【诊断】任务 ${RUN_DIAG_FULL.job_id}（run ${RUN_DIAG_FULL.run_id}）\n` +
+  `结论: ${DIAG_FULL.summary}\n` +
+  `分类: ${DIAG_FULL.category_text}  置信度: ${DIAG_FULL.confidence}%（模型自评）  证据充分: 是\n` +
+  `原因: ${DIAG_FULL.cause}\n` +
+  '证据链:\n' +
+  DIAG_FULL.evidence.map((e, i) => `  ${i + 1}. [${e.ref}] ${e.quote}\n     作用: ${e.why}`).join('\n') +
+  '\n未验证假设:\n' +
+  DIAG_FULL.assumptions.map((a) => `  - ${a}`).join('\n') +
+  '\n已排除:\n' +
+  DIAG_FULL.ruled_out.map((r) => `  - ${r.hypothesis}（${r.reason}）`).join('\n') +
+  '\n建议动作（需人工执行）:\n' +
+  DIAG_FULL.suggested_actions
+    .map((a, i) => `  ${i + 1}. [${a.risk_text}] ${a.title} —— ${a.detail}\n     回滚: ${a.rollback}`)
+    .join('\n') +
+  `\n终止原因: ${DIAG_FULL.stop_reason}（${DIAG_FULL.stop_reason_text}）`
+
+/** 样本 B：证据不足（evidence_sufficient=false，必须给出还要采集什么） */
+const DIAG_THIN = {
+  summary: 'PostgreSQL 全量备份在 timeout=1800s 被强制终止；现有证据只能定位到"等锁"，无法确认持锁来源',
+  category: 'dependency',
+  category_text: '依赖不可用',
+  cause:
+    'run 输出显示 public.audit_log 在等待 ACCESS SHARE 锁；但本节点没有数据库长事务视图，' +
+    '无法确认是谁在持锁、持了多久，因此不能断言根因。',
+  confidence: 41,
+  evidence: [
+    {
+      ref: `run:${RUN_DIAG_THIN.run_id}`,
+      quote: '超过 timeout=1800s 被强制终止（pg_dumpall 等待锁释放）',
+      why: '只能说明"在等锁"，不能说明"谁在持锁"',
+    },
+  ],
+  assumptions: ['存在长事务持有 audit_log 的锁（本次观测无法验证）'],
+  ruled_out: [{ hypothesis: '备份盘写满', reason: '同节点其它写入类任务在同一时段正常完成' }],
+  suggested_actions: [
+    {
+      title: '采集 pg_locks / pg_stat_activity 快照',
+      detail:
+        '在实例上执行只读查询，记录持锁 pid、query、事务开始时间；' +
+        '拿到持锁会话后再决定是 kill 会话还是调整备份时间窗。',
+      risk: 'low',
+      risk_text: '低风险',
+      rollback: '无（只读查询）',
+    },
+  ],
+  evidence_sufficient: false,
+  next_data_to_collect: [
+    '目标实例的 pg_locks 快照（含 pid / query / 事务持续时长）',
+    '本次 run 结束前后 5 分钟的数据库日志',
+    '同一时间窗内该实例上的长事务审计记录',
+  ],
+  unverified_refs: [],
+  warnings: ['证据不足以支撑明确结论：已按 evidence_sufficient=false 处理，未给出根因断言'],
+  advisory_only: true,
+  provider: 'offline',
+  model: '',
+  prompt_version: 'diagnose-v1',
+  stop_reason: 'completed',
+  stop_reason_text: '正常完成',
+  duration_ms: 5120,
+  tool_calls: 1,
+  total_tokens: 2106,
+}
+
+DIAG_THIN.run_id = RUN_DIAG_THIN.run_id
+DIAG_THIN.job_id = RUN_DIAG_THIN.job_id
+DIAG_THIN.session_id = `diag-j${RUN_DIAG_THIN.job_id}-${RUN_DIAG_THIN.run_id}`
+DIAG_THIN.created = rfc3339(RUN_DIAG_THIN.finished_at * 1000 + 90 * 1000)
+DIAG_THIN.explain =
+  `【诊断】任务 ${RUN_DIAG_THIN.job_id}（run ${RUN_DIAG_THIN.run_id}）\n` +
+  `结论: ${DIAG_THIN.summary}\n` +
+  `分类: ${DIAG_THIN.category_text}  置信度: ${DIAG_THIN.confidence}%（模型自评）  证据充分: 否\n` +
+  `原因: ${DIAG_THIN.cause}\n` +
+  '证据链:\n' +
+  DIAG_THIN.evidence.map((e, i) => `  ${i + 1}. [${e.ref}] ${e.quote}\n     作用: ${e.why}`).join('\n') +
+  '\n还需要采集:\n' +
+  DIAG_THIN.next_data_to_collect.map((n) => `  - ${n}`).join('\n') +
+  `\n终止原因: ${DIAG_THIN.stop_reason}（${DIAG_THIN.stop_reason_text}）`
+
+/** 样本 C：模型引用了本次并未观测到的证据定位（unverified_refs 非空，必须醒目告警） */
+const DIAG_UNVERIFIED = {
+  summary: '日志清理任务被人工取消；现存观测只覆盖"取消"这一事实，取消原因不在本节点数据里',
+  category: 'unknown',
+  category_text: '未归类',
+  cause:
+    'run 记录为 status=canceled / exit_code=130，错误信息写明"运维人员手动取消（审计单 AUD-2201）"；' +
+    '该审计单与取消原因都不在本节点可观测范围内。',
+  confidence: 63,
+  evidence: [
+    {
+      ref: `run:${RUN_DIAG_UNVERIFIED.run_id}`,
+      quote: '运维人员手动取消（审计单 AUD-2201）',
+      why: '这是取消事实的直接来源，但其中不含取消理由',
+    },
+    {
+      ref: 'crony.log:88',
+      quote: 'step 1 finished: removed 210 files',
+      why: '取消发生在执行中途，说明前半段是正常执行的',
+    },
+  ],
+  assumptions: ['存在对应的变更/审计单据（本节点无法读取审计系统）'],
+  ruled_out: [{ hypothesis: '任务自身报错退出', reason: 'exit_code=130 是取消信号而非业务错误码' }],
+  suggested_actions: [
+    {
+      title: '回填取消原因到知识库',
+      detail: '从审计系统拉取 AUD-2201 的处理说明，补进本任务的复盘文档，避免下次重复排查。',
+      risk: 'low',
+      risk_text: '低风险',
+      rollback: '无（文档操作）',
+    },
+  ],
+  evidence_sufficient: true,
+  next_data_to_collect: [],
+  unverified_refs: ['syslog:999'],
+  warnings: [
+    '模型引用了 1 处本次并未观测到的证据定位：syslog:999',
+    '取消原因不在本节点可观测范围内，结论按"未知"处理，未推断动机',
+  ],
+  advisory_only: true,
+  provider: 'offline',
+  model: '',
+  prompt_version: 'diagnose-v1',
+  stop_reason: 'completed',
+  stop_reason_text: '正常完成',
+  duration_ms: 3980,
+  tool_calls: 1,
+  total_tokens: 1760,
+}
+
+DIAG_UNVERIFIED.run_id = RUN_DIAG_UNVERIFIED.run_id
+DIAG_UNVERIFIED.job_id = RUN_DIAG_UNVERIFIED.job_id
+DIAG_UNVERIFIED.session_id = `diag-j${RUN_DIAG_UNVERIFIED.job_id}-${RUN_DIAG_UNVERIFIED.run_id}`
+DIAG_UNVERIFIED.created = rfc3339(RUN_DIAG_UNVERIFIED.finished_at * 1000 + 120 * 1000)
+DIAG_UNVERIFIED.explain =
+  `【诊断】任务 ${RUN_DIAG_UNVERIFIED.job_id}（run ${RUN_DIAG_UNVERIFIED.run_id}）\n` +
+  `结论: ${DIAG_UNVERIFIED.summary}\n` +
+  `分类: ${DIAG_UNVERIFIED.category_text}  置信度: ${DIAG_UNVERIFIED.confidence}%（模型自评）  证据充分: 是\n` +
+  `原因: ${DIAG_UNVERIFIED.cause}\n` +
+  '证据链:\n' +
+  DIAG_UNVERIFIED.evidence.map((e, i) => `  ${i + 1}. [${e.ref}] ${e.quote}\n     作用: ${e.why}`).join('\n') +
+  '\n警告:\n' +
+  DIAG_UNVERIFIED.warnings.map((w) => `  - ${w}`).join('\n') +
+  '\n未观测到的证据定位（模型引用了但本次没观测到，不能采信）:\n' +
+  DIAG_UNVERIFIED.unverified_refs.map((r) => `  - ${r}`).join('\n') +
+  `\n终止原因: ${DIAG_UNVERIFIED.stop_reason}（${DIAG_UNVERIFIED.stop_reason_text}）`
+
+/** 已存诊断（§3.1 的查询源）。键是 run_id，值是该 run 的会话与诊断。 */
+export const agentDiagnoses = {
+  [RUN_DIAG_FULL.run_id]: { session_id: DIAG_FULL.session_id, diagnosis: DIAG_FULL },
+  [RUN_DIAG_THIN.run_id]: { session_id: DIAG_THIN.session_id, diagnosis: DIAG_THIN },
+  [RUN_DIAG_UNVERIFIED.run_id]: { session_id: DIAG_UNVERIFIED.session_id, diagnosis: DIAG_UNVERIFIED },
+}
+
+/* ---------------- §5.1 草案样例（cmd / http / 五段警告） ---------------- */
+
+const NL_BASE = Math.floor((NOW - 6 * MIN) / 1000)
+
+const DRAFT_CMD_SPEC = '0 0 2 * * *'
+const DRAFT_CMD_TIMES = dailyTriggers(2, 0, 5, NOW - 6 * MIN)
+
+/** 草案 1：cmd（argv 模式，绝不拼接字符串） */
+export const DRAFT_CMD = {
+  session_id: `nl-job-${NL_BASE}-1`,
+  name: '清理 /tmp 陈旧文件',
+  description: '删除 /tmp 下 7 天未修改的文件，避免临时目录涨满',
+  job_type: 'cmd',
+  spec: DRAFT_CMD_SPEC,
+  command: ['/usr/bin/find', '/tmp', '-type', 'f', '-mtime', '+7', '-delete'],
+  raw_argv: true,
+  http: null,
+  timeout_seconds: 300,
+  retry_times: 1,
+  retry_interval: 60,
+  concurrency_policy: 'skip',
+  concurrency_policy_text: '上一次未跑完则跳过本次',
+  concurrency_value: 0,
+  rationale: '用户说"每天凌晨 2 点"，因此用 6 段表达式 0 0 2 * * *（秒 分 时 日 月 周）。',
+  warnings: ['删除操作不可撤销：建议先去掉 -delete 跑一轮，确认文件清单无误后再创建正式任务'],
+  next_triggers: DRAFT_CMD_TIMES.map((t) => rfc3339(t.getTime())),
+  next_trigger_text: DRAFT_CMD_TIMES.map((t, i) => `${i + 1}) ${triggerText(t)}`),
+  trigger_echo: triggerEcho(DRAFT_CMD_SPEC, DRAFT_CMD_TIMES),
+  requires_confirmation: true,
+  confirmed: false,
+  timezone: AGENT_TZ,
+  provider: 'offline',
+  model: '',
+  prompt_version: 'nljob-v1',
+  stop_reason: 'completed',
+  stop_reason_text: '正常完成',
+  repairs: 0,
+  duration_ms: 3120,
+  total_tokens: 1420,
+}
+
+const DRAFT_HTTP_SPEC = '0 5 * * * *'
+const DRAFT_HTTP_TIMES = hourlyTriggers(5, 5, NOW - 20 * MIN)
+
+/** 草案 2：http 类型 */
+export const DRAFT_HTTP = {
+  session_id: `nl-job-${NL_BASE}-2`,
+  name: '巡检内部健康检查接口',
+  description: '每小时第 5 分钟请求一次健康检查接口，返回非 200 时记录下来',
+  job_type: 'http',
+  spec: DRAFT_HTTP_SPEC,
+  command: [],
+  raw_argv: false,
+  http: { method: 'GET', url: 'http://10.20.31.11:8089/ping' },
+  timeout_seconds: 30,
+  retry_times: 0,
+  retry_interval: 30,
+  concurrency_policy: 'skip',
+  concurrency_policy_text: '上一次未跑完则跳过本次',
+  concurrency_value: 0,
+  rationale: '用户说"每小时检查一次"，映射为每小时第 5 分钟触发（避开整点高峰）。',
+  warnings: ['该地址是 crony-admin 自己的 /ping；确认这就是你要巡检的目标，否则请改成业务健康检查地址'],
+  next_triggers: DRAFT_HTTP_TIMES.map((t) => rfc3339(t.getTime())),
+  next_trigger_text: DRAFT_HTTP_TIMES.map((t, i) => `${i + 1}) ${triggerText(t)}`),
+  trigger_echo: triggerEcho(DRAFT_HTTP_SPEC, DRAFT_HTTP_TIMES),
+  requires_confirmation: true,
+  confirmed: false,
+  timezone: AGENT_TZ,
+  provider: 'offline',
+  model: '',
+  prompt_version: 'nljob-v1',
+  stop_reason: 'completed',
+  stop_reason_text: '正常完成',
+  repairs: 1,
+  duration_ms: 5240,
+  total_tokens: 2980,
+}
+
+/**
+ * 草案 3：**五段表达式陷阱**样本。
+ * 底层 cron 库把 5 段解释为「秒 分 时 日 月」，于是 '0 2 * * *' 是"每小时第 2 分钟"，
+ * 而不是 Unix 的"每天 02:00"——下面的触发时间按本库真实语义算，肉眼一眼能看出不对。
+ */
+const DRAFT_FIVESEG_SPEC = '0 2 * * *'
+const DRAFT_FIVESEG_TIMES = hourlyTriggers(2, 5, NOW - 40 * MIN)
+
+export const DRAFT_FIVESEG = {
+  session_id: `nl-job-${NL_BASE}-3`,
+  name: '未命名任务',
+  description: '执行日报脚本 /opt/scripts/report.sh',
+  job_type: 'cmd',
+  spec: DRAFT_FIVESEG_SPEC,
+  command: ['/opt/scripts/report.sh'],
+  raw_argv: true,
+  http: null,
+  timeout_seconds: 600,
+  retry_times: 1,
+  retry_interval: 60,
+  concurrency_policy: 'skip',
+  concurrency_policy_text: '上一次未跑完则跳过本次',
+  concurrency_value: 0,
+  rationale: '按用户原话"每天凌晨 2 点"直接采用了模型给出的表达式。',
+  warnings: [
+    '表达式 "0 2 * * *" 只有 5 段：本系统底层库把 5 段解释为「秒 分 时 日 月」，' +
+      '不是 Unix 的「分 时 日 月 周」。请改用 6 段格式（例如每天 02:00 应写 "0 0 2 * * *"）。' +
+      '下方触发时间按本库真实语义计算，请核对。',
+    '模型未给出任务名，已使用占位名，请创建前修改',
+  ],
+  next_triggers: DRAFT_FIVESEG_TIMES.map((t) => rfc3339(t.getTime())),
+  next_trigger_text: DRAFT_FIVESEG_TIMES.map((t, i) => `${i + 1}) ${triggerText(t)}`),
+  trigger_echo: triggerEcho(DRAFT_FIVESEG_SPEC, DRAFT_FIVESEG_TIMES),
+  requires_confirmation: true,
+  confirmed: false,
+  timezone: AGENT_TZ,
+  provider: 'offline',
+  model: '',
+  prompt_version: 'nljob-v1',
+  stop_reason: 'completed',
+  stop_reason_text: '正常完成',
+  repairs: 1,
+  duration_ms: 6180,
+  total_tokens: 3350,
+}
+
+/** 草案会话（§1 列表里的 nljob 会话，同时也是 §5.1 的返回体） */
+export const agentDrafts = [DRAFT_CMD, DRAFT_HTTP, DRAFT_FIVESEG]
+
+/* ---------------- §1 会话列表 ---------------- */
+
+/** 按 run 生成一条诊断会话概要（§1 的单条字段） */
+function diagSession(run, diag, { status, warnCount, evidenceCount, durationMs }) {
+  const ms = run.finished_at * 1000 + 60 * 1000
+  return {
+    session_id: diag.session_id,
+    kind: 'diagnose',
+    job_id: run.job_id,
+    run_id: run.run_id,
+    node_uuid: run.node_uuid,
+    goal: `诊断任务「${run.job_name}」（run ${run.run_id}）的失败原因`,
+    status,
+    stop_reason: diag.stop_reason,
+    stop_reason_text: diag.stop_reason_text,
+    provider: diag.provider,
+    model: diag.model,
+    prompt_version: diag.prompt_version,
+    model_calls: 2,
+    tool_calls: diag.tool_calls,
+    total_tokens: diag.total_tokens,
+    duration_ms: durationMs,
+    warn_count: warnCount,
+    evidence_count: evidenceCount,
+    created: rfc3339(ms),
+    created_ms: ms,
+  }
+}
+
+/** 按草案生成一条 nljob 会话概要 */
+function nljobSession(draft, warnCount, evidenceCount, toolCalls) {
+  const ms = NOW - 6 * MIN
+  return {
+    session_id: draft.session_id,
+    kind: 'nljob',
+    job_id: 0,
+    run_id: '',
+    node_uuid: 'n-8f3d1c2a-01',
+    goal: `把自然语言描述翻译成定时任务定义：${draft.description}`,
+    status: 'completed',
+    stop_reason: draft.stop_reason,
+    stop_reason_text: draft.stop_reason_text,
+    provider: draft.provider,
+    model: draft.model,
+    prompt_version: draft.prompt_version,
+    model_calls: 1 + draft.repairs,
+    tool_calls: toolCalls,
+    total_tokens: draft.total_tokens,
+    duration_ms: draft.duration_ms,
+    warn_count: warnCount,
+    evidence_count: evidenceCount,
+    created: rfc3339(ms),
+    created_ms: ms,
+  }
+}
+
+/** 任务内嵌 Agent 会话概要（kind=job） */
+function jobSession(run, { status, stopReason, warnCount, evidenceCount, toolCalls, tokens, durationMs, goal }) {
+  const ms = run.finished_at * 1000 + 30 * 1000
+  return {
+    session_id: `agent-job-${run.run_id}`,
+    kind: 'job',
+    job_id: run.job_id,
+    run_id: run.run_id,
+    node_uuid: run.node_uuid,
+    goal,
+    status,
+    stop_reason: stopReason,
+    stop_reason_text: AGENT_STOP_TEXT[stopReason],
+    provider: 'offline',
+    model: '',
+    prompt_version: 'diagnose-v1',
+    model_calls: 3,
+    tool_calls: toolCalls,
+    total_tokens: tokens,
+    duration_ms: durationMs,
+    warn_count: warnCount,
+    evidence_count: evidenceCount,
+    created: rfc3339(ms),
+    created_ms: ms,
+  }
+}
+
+export const agentSessions = [
+  diagSession(RUN_DIAG_FULL, DIAG_FULL, { status: 'completed', warnCount: 0, evidenceCount: 3, durationMs: 4210 }),
+  diagSession(RUN_DIAG_THIN, DIAG_THIN, { status: 'completed', warnCount: 1, evidenceCount: 1, durationMs: 5120 }),
+  diagSession(RUN_DIAG_UNVERIFIED, DIAG_UNVERIFIED, {
+    status: 'canceled',
+    warnCount: 2,
+    evidenceCount: 2,
+    durationMs: 3980,
+  }),
+  nljobSession(DRAFT_CMD, 1, 0, 1),
+  nljobSession(DRAFT_HTTP, 1, 1, 1),
+  nljobSession(DRAFT_FIVESEG, 2, 0, 1),
+  jobSession(RUN_JOB_OK, {
+    status: 'completed',
+    stopReason: 'completed',
+    warnCount: 0,
+    evidenceCount: 3,
+    toolCalls: 4,
+    tokens: 3620,
+    durationMs: 8600,
+    goal: `在任务「${RUN_JOB_OK.job_name}」执行后给出未通过项的整改建议（只读、只建议）`,
+  }),
+  jobSession(RUN_JOB_BUDGET, {
+    status: 'failed',
+    stopReason: 'tool_budget',
+    warnCount: 1,
+    evidenceCount: 2,
+    toolCalls: 12,
+    tokens: 15800,
+    durationMs: 96000,
+    goal: `在任务「${RUN_JOB_BUDGET.job_name}」报出 /data 91% 后下钻目录占用`,
+  }),
+]
+
+/* ---------------- §2 会话详情（轨迹回放） ---------------- */
+
+/** 组装 §2 的完整详情：会话概要 + system/context/budget/warnings/evidence/tool_stats/steps/result */
+function sessionDetail(session, extra) {
+  return {
+    ...session,
+    system: extra.system,
+    context: extra.context || [],
+    budget: {
+      calls: session.model_calls,
+      tokens: session.total_tokens,
+      duration_ms: session.duration_ms,
+      ...AGENT_BUDGET_MAX,
+    },
+    warnings: extra.warnings || [],
+    evidence: extra.evidence || [],
+    tool_stats: {
+      calls: session.tool_calls,
+      denied: extra.denied || 0,
+      truncated: extra.truncated || 0,
+      remaining: Math.max(0, AGENT_MAX_TOOL_CALLS - session.tool_calls),
+    },
+    steps: extra.steps || [],
+    result: extra.result ?? null,
+  }
+}
+
+const SYSTEM_DIAGNOSE =
+  '你是 crony 的失败诊断助手。只依据工具观测到的证据下结论；没有证据就明说"证据不足"并列出还需要采集什么。' +
+  '每条结论必须挂上观测里出现过的证据定位（ref），不得引用未观测到的定位。'
+
+const t0 = (run) => run.finished_at * 1000 - 4000
+
+const DETAIL_DIAG_FULL = sessionDetail(agentSessions[0], {
+  system: SYSTEM_DIAGNOSE,
+  context: [
+    `任务：${RUN_DIAG_FULL.job_name}（id=${RUN_DIAG_FULL.job_id}，job_type=cmd）`,
+    `运行：run_id=${RUN_DIAG_FULL.run_id}，status=failed，exit_code=${RUN_DIAG_FULL.exit_code}，attempt=${RUN_DIAG_FULL.attempt}`,
+    `节点：${RUN_DIAG_FULL.hostname}（${RUN_DIAG_FULL.node_uuid}）`,
+    `命令：${RUN_DIAG_FULL.command}`,
+    `输出尾部：${RUN_DIAG_FULL.output}`,
+    `错误：${RUN_DIAG_FULL.error_msg}`,
+  ],
+  evidence: [
+    {
+      source: 'log',
+      ref: 'node.log:12',
+      quote: 'mysqlslow: connect to 10.20.31.51:3306 timeout after 30000ms',
+    },
+    { source: 'step', ref: `${RUN_DIAG_FULL.run_id}#step-2`, quote: '步骤 2 退出码 2，已重试 2 次' },
+    { source: 'node', ref: 'node:n-7be2a904-01', quote: 'node-db-01 conn=NodeConnFail，down=23m' },
+  ],
+  steps: [
+    modelStep(1, t0(RUN_DIAG_FULL), {
+      prompt_preview: '你是 crony 的失败诊断助手……（任务上下文 + 可用只读工具清单）',
+      prompt_bytes: 2140,
+      content: '',
+      tool_calls: [{ id: 'call_log_1', name: 'log_search', arguments: '{"run_id":"' + RUN_DIAG_FULL.run_id + '","level":"error"}' }],
+      total_tokens: 880,
+      latency_ms: 1180,
+      finish_reason: 'tool_calls',
+    }),
+    toolStep(2, RUN_DIAG_FULL.finished_at * 1000 - 2800, {
+      tool_name: 'log_search',
+      tool_args: { run_id: RUN_DIAG_FULL.run_id, level: 'error' },
+      observation:
+        '命中 2 条\nnode.log:12 mysqlslow: connect to 10.20.31.51:3306 timeout after 30000ms\n' +
+        'node.log:13 retry 2/2 failed, giving up',
+      evidence: [
+        {
+          source: 'log',
+          ref: 'node.log:12',
+          quote: 'mysqlslow: connect to 10.20.31.51:3306 timeout after 30000ms',
+        },
+      ],
+      duration_ms: 31,
+    }),
+    modelStep(3, RUN_DIAG_FULL.finished_at * 1000 - 900, {
+      prompt_preview: '（第二轮：附上 log_search 观测）你是 crony 的失败诊断助手……',
+      prompt_bytes: 3720,
+      content: '',
+      tool_calls: [],
+      total_tokens: 954,
+      latency_ms: 1520,
+      finish_reason: 'stop',
+    }),
+  ],
+  result: DIAG_FULL,
+})
+
+const DETAIL_DIAG_THIN = sessionDetail(agentSessions[1], {
+  system: SYSTEM_DIAGNOSE,
+  context: [
+    `任务：${RUN_DIAG_THIN.job_name}（id=${RUN_DIAG_THIN.job_id}，job_type=cmd）`,
+    `运行：run_id=${RUN_DIAG_THIN.run_id}，status=timeout，exit_code=${RUN_DIAG_THIN.exit_code}`,
+    `命令：${RUN_DIAG_THIN.command}`,
+    `输出尾部：${RUN_DIAG_THIN.output}`,
+  ],
+  warnings: DIAG_THIN.warnings,
+  evidence: [
+    {
+      source: 'log',
+      ref: `run:${RUN_DIAG_THIN.run_id}`,
+      quote: '超过 timeout=1800s 被强制终止（pg_dumpall 等待锁释放）',
+    },
+  ],
+  steps: [
+    modelStep(1, t0(RUN_DIAG_THIN), {
+      prompt_preview: '你是 crony 的失败诊断助手……（超时类失败）',
+      prompt_bytes: 2050,
+      content: '',
+      tool_calls: [{ id: 'call_log_2', name: 'log_search', arguments: '{"job_id":' + RUN_DIAG_THIN.job_id + ',"level":"warn"}' }],
+      total_tokens: 1020,
+      latency_ms: 1260,
+      finish_reason: 'tool_calls',
+    }),
+    toolStep(2, RUN_DIAG_THIN.finished_at * 1000 - 3000, {
+      tool_name: 'log_search',
+      tool_args: { job_id: RUN_DIAG_THIN.job_id, level: 'warn' },
+      observation: '命中 1 条\ncrony.log:241 step 3 (pg_dumpall) still waiting for lock on public.audit_log',
+      evidence: [
+        {
+          source: 'log',
+          ref: 'crony.log:241',
+          quote: 'step 3 (pg_dumpall) still waiting for lock on public.audit_log',
+        },
+      ],
+      duration_ms: 27,
+    }),
+    modelStep(3, RUN_DIAG_THIN.finished_at * 1000 - 1200, {
+      prompt_preview: '（第二轮：附上 log_search 观测）……',
+      prompt_bytes: 3510,
+      content: '',
+      tool_calls: [],
+      total_tokens: 1086,
+      latency_ms: 1380,
+      finish_reason: 'stop',
+    }),
+  ],
+  result: DIAG_THIN,
+})
+
+const DETAIL_DIAG_UNVERIFIED = sessionDetail(agentSessions[2], {
+  system: SYSTEM_DIAGNOSE,
+  context: [
+    `任务：${RUN_DIAG_UNVERIFIED.job_name}（id=${RUN_DIAG_UNVERIFIED.job_id}）`,
+    `运行：run_id=${RUN_DIAG_UNVERIFIED.run_id}，trigger_source=self_heal，status=canceled`,
+    `错误：${RUN_DIAG_UNVERIFIED.error_msg}`,
+    `输出尾部：${RUN_DIAG_UNVERIFIED.output}`,
+  ],
+  warnings: DIAG_UNVERIFIED.warnings,
+  evidence: [
+    { source: 'log', ref: `run:${RUN_DIAG_UNVERIFIED.run_id}`, quote: '运维人员手动取消（审计单 AUD-2201）' },
+    { source: 'log', ref: 'crony.log:88', quote: 'step 1 finished: removed 210 files' },
+  ],
+  steps: [
+    modelStep(1, t0(RUN_DIAG_UNVERIFIED), {
+      prompt_preview: '你是 crony 的失败诊断助手……（取消类记录）',
+      prompt_bytes: 1990,
+      content: '',
+      tool_calls: [{ id: 'call_log_3', name: 'log_search', arguments: '{"run_id":"' + RUN_DIAG_UNVERIFIED.run_id + '"}' }],
+      total_tokens: 860,
+      latency_ms: 1120,
+      finish_reason: 'tool_calls',
+    }),
+    toolStep(2, RUN_DIAG_UNVERIFIED.finished_at * 1000 - 2600, {
+      tool_name: 'log_search',
+      tool_args: { run_id: RUN_DIAG_UNVERIFIED.run_id },
+      observation: '命中 2 条\ncrony.log:88 step 1 finished: removed 210 files\ncrony.log:90 canceled by operator (AUD-2201)',
+      evidence: [{ source: 'log', ref: 'crony.log:88', quote: 'step 1 finished: removed 210 files' }],
+      duration_ms: 24,
+    }),
+    // 这一条 notice 是"修复轮"的真实记录：模型输出了未观测到的定位，被本地校验打回重写
+    noticeStep(3, RUN_DIAG_UNVERIFIED.finished_at * 1000 - 1800, '输出未通过结构校验，已发起第 1 次修复：$.evidence[2].ref "syslog:999" 不在本次观测集合内'),
+    modelStep(4, RUN_DIAG_UNVERIFIED.finished_at * 1000 - 1400, {
+      prompt_preview: '（修复轮：请只引用观测里出现过的 ref）……',
+      prompt_bytes: 3110,
+      content: '',
+      tool_calls: [],
+      total_tokens: 900,
+      latency_ms: 1310,
+      finish_reason: 'stop',
+    }),
+  ],
+  result: DIAG_UNVERIFIED,
+})
+
+const DETAIL_NLJOB_CMD = sessionDetail(agentSessions[3], {
+  system:
+    '你是 crony 的任务翻译助手。把用户的口语描述翻译成字段完整的任务定义；cron 表达式必须符合本系统的 6 段格式' +
+    '（秒 分 时 日 月 周），命令一律输出 argv 数组，不要拼接 shell 字符串。',
+  context: [`用户原话：每天凌晨 2 点清理 /tmp 下 7 天前的文件`, '目标节点：n-8f3d1c2a-01'],
+  warnings: DRAFT_CMD.warnings,
+  evidence: [],
+  steps: [
+    modelStep(1, NOW - 6 * MIN - 3200, {
+      prompt_preview: '你是 crony 的任务翻译助手……（用户原话 + 节点白名单）',
+      prompt_bytes: 1680,
+      content: '',
+      tool_calls: [{ id: 'call_node_1', name: 'node_status', arguments: '{"node":"n-8f3d1c2a-01"}' }],
+      total_tokens: 700,
+      latency_ms: 980,
+      finish_reason: 'tool_calls',
+    }),
+    toolStep(2, NOW - 6 * MIN - 2400, {
+      tool_name: 'node_status',
+      tool_args: { node: 'n-8f3d1c2a-01' },
+      observation: 'node-prod-01 status=online up=6h disk=73% mem=61% jobs=5',
+      evidence: [{ source: 'node', ref: 'node:n-8f3d1c2a-01', quote: 'status=online disk=73%' }],
+      duration_ms: 12,
+    }),
+    modelStep(3, NOW - 6 * MIN - 900, {
+      prompt_preview: '（第二轮：附上节点状态）……请输出 JSON 任务定义',
+      prompt_bytes: 2980,
+      content: '',
+      tool_calls: [],
+      total_tokens: 720,
+      latency_ms: 1240,
+      finish_reason: 'stop',
+    }),
+  ],
+  result: DRAFT_CMD,
+})
+
+const DETAIL_NLJOB_HTTP = sessionDetail(agentSessions[4], {
+  system:
+    '你是 crony 的任务翻译助手。把用户的口语描述翻译成字段完整的任务定义；' +
+    'http 类型必须给出 method 与完整 URL，不要编造不存在的域名。',
+  context: ['用户原话：每小时检查一次内部健康检查接口', '目标节点：n-8f3d1c2a-01'],
+  warnings: DRAFT_HTTP.warnings,
+  evidence: [
+    { source: 'http', ref: 'http://10.20.31.11:8089/ping', quote: '200 pong' },
+  ],
+  steps: [
+    modelStep(1, NOW - 20 * MIN - 5200, {
+      prompt_preview: '你是 crony 的任务翻译助手……（http 类任务）',
+      prompt_bytes: 1720,
+      content: '',
+      tool_calls: [{ id: 'call_http_1', name: 'http_get', arguments: '{"url":"http://10.20.31.11:8089/ping"}' }],
+      total_tokens: 760,
+      latency_ms: 1040,
+      finish_reason: 'tool_calls',
+    }),
+    toolStep(2, NOW - 20 * MIN - 4200, {
+      tool_name: 'http_get',
+      tool_args: { url: 'http://10.20.31.11:8089/ping' },
+      observation: '状态: 成功\n摘要: HTTP 200\n证据:\n- [http] http://10.20.31.11:8089/ping 「200 pong」',
+      evidence: [{ source: 'http', ref: 'http://10.20.31.11:8089/ping', quote: '200 pong' }],
+      duration_ms: 46,
+    }),
+    noticeStep(3, NOW - 20 * MIN - 3000, '第 1 次起草不可用：$.spec "0 * * * *" 只有 5 段，无法按本库语义解释（已自动重试）'),
+    modelStep(4, NOW - 20 * MIN - 1500, {
+      prompt_preview: '（修复轮：请改用 6 段表达式）……',
+      prompt_bytes: 3260,
+      content: '',
+      tool_calls: [],
+      total_tokens: 1040,
+      latency_ms: 1480,
+      finish_reason: 'stop',
+    }),
+  ],
+  result: DRAFT_HTTP,
+})
+
+const DETAIL_NLJOB_FIVESEG = sessionDetail(agentSessions[5], {
+  system:
+    '你是 crony 的任务翻译助手。把用户的口语描述翻译成字段完整的任务定义；' +
+    '注意本系统的 cron 是 6 段（秒 分 时 日 月 周），5 段会被解释成完全不同的时间。',
+  context: ['用户原话：每天凌晨 2 点执行日报脚本 /opt/scripts/report.sh'],
+  warnings: DRAFT_FIVESEG.warnings,
+  evidence: [],
+  steps: [
+    modelStep(1, NOW - 40 * MIN - 6400, {
+      prompt_preview: '你是 crony 的任务翻译助手……（用户原话）',
+      prompt_bytes: 1650,
+      content: '',
+      tool_calls: [{ id: 'call_shell_1', name: 'shell_readonly', arguments: '{"command":"ls","args":["/opt/scripts"]}' }],
+      total_tokens: 820,
+      latency_ms: 1180,
+      finish_reason: 'tool_calls',
+    }),
+    toolStep(2, NOW - 40 * MIN - 5200, {
+      tool_name: 'shell_readonly',
+      tool_args: { command: 'ls', args: ['/opt/scripts'] },
+      observation: 'report.sh\ncleanup.sh',
+      evidence: [{ source: 'shell', ref: 'shell:ls /opt/scripts', quote: 'report.sh' }],
+      duration_ms: 18,
+    }),
+    noticeStep(3, NOW - 40 * MIN - 3600, '第 1 次起草不可用：$.spec "0 2 * * *" 只有 5 段，按本库语义是"每小时第 2 分钟"，与用户意图不符（已自动重试）'),
+    modelStep(4, NOW - 40 * MIN - 1800, {
+      prompt_preview: '（修复轮：请改用 6 段表达式；若无法确定就保留原式并给出警告）……',
+      prompt_bytes: 3420,
+      content: '',
+      tool_calls: [],
+      total_tokens: 1210,
+      latency_ms: 1620,
+      finish_reason: 'stop',
+    }),
+  ],
+  result: DRAFT_FIVESEG,
+})
+
+const DETAIL_JOB_OK = sessionDetail(agentSessions[6], {
+  system: '你是 crony 的巡检结果解读助手。只依据任务输出与只读工具观测给建议，不执行任何变更。',
+  context: [
+    `任务：${RUN_JOB_OK.job_name}（id=${RUN_JOB_OK.job_id}）`,
+    `输出：${RUN_JOB_OK.output}`,
+  ],
+  evidence: [
+    { source: 'log', ref: `run:${RUN_JOB_OK.run_id}`, quote: '基线检查 68 项：通过 65，未通过 3' },
+    { source: 'sql', ref: 'mysql_query_readonly:LIMIT 3', quote: '3 条未通过项（SSH 空口令登录 / 内核参数 / 日志权限）' },
+    { source: 'node', ref: 'node:n-8f3d1c2a-01', quote: 'status=online disk=73%' },
+  ],
+  steps: [
+    modelStep(1, t0(RUN_JOB_OK), {
+      prompt_preview: '你是 crony 的巡检结果解读助手……（基线巡检输出）',
+      prompt_bytes: 2260,
+      content: '',
+      tool_calls: [{ id: 'call_sql_1', name: 'mysql_query_readonly', arguments: '{"query":"SELECT item,result FROM audit_item WHERE run_id=\'...\' LIMIT 3"}' }],
+      total_tokens: 1140,
+      latency_ms: 1420,
+      finish_reason: 'tool_calls',
+    }),
+    toolStep(2, RUN_JOB_OK.finished_at * 1000 - 4200, {
+      tool_name: 'mysql_query_readonly',
+      tool_args: { query: "SELECT item,result FROM audit_item WHERE run_id='...' LIMIT 3" },
+      observation: '3 行\nSSH 空口令登录: fail\n内核参数 net.ipv4.tcp_syncookies: fail\n/var/log/app 权限 0777: fail',
+      evidence: [{ source: 'sql', ref: 'mysql_query_readonly:LIMIT 3', quote: '3 条未通过项（SSH 空口令登录 / 内核参数 / 日志权限）' }],
+      duration_ms: 38,
+    }),
+    modelStep(3, RUN_JOB_OK.finished_at * 1000 - 2400, {
+      prompt_preview: '（第二轮：附上未通过项）……',
+      prompt_bytes: 4020,
+      content: '',
+      tool_calls: [{ id: 'call_node_2', name: 'node_status', arguments: '{"node":"n-8f3d1c2a-01"}' }],
+      total_tokens: 1180,
+      latency_ms: 1360,
+      finish_reason: 'tool_calls',
+    }),
+    toolStep(4, RUN_JOB_OK.finished_at * 1000 - 1400, {
+      tool_name: 'node_status',
+      tool_args: { node: 'n-8f3d1c2a-01' },
+      observation: 'node-prod-01 status=online up=6h disk=73% mem=61% jobs=5',
+      evidence: [{ source: 'node', ref: 'node:n-8f3d1c2a-01', quote: 'status=online disk=73%' }],
+      duration_ms: 11,
+    }),
+    modelStep(5, RUN_JOB_OK.finished_at * 1000 - 500, {
+      prompt_preview: '（第三轮：给出整改优先级建议，不执行）……',
+      prompt_bytes: 4480,
+      content: '',
+      tool_calls: [],
+      total_tokens: 1300,
+      latency_ms: 1520,
+      finish_reason: 'stop',
+    }),
+  ],
+  result: null,
+})
+
+const DETAIL_JOB_BUDGET = sessionDetail(agentSessions[7], {
+  system: '你是 crony 的巡检结果解读助手。只依据任务输出与只读工具观测给建议，不执行任何变更。',
+  context: [
+    `任务：${RUN_JOB_BUDGET.job_name}（id=${RUN_JOB_BUDGET.job_id}）`,
+    `输出：${RUN_JOB_BUDGET.output}`,
+  ],
+  warnings: [
+    '达到工具调用次数上限（12 次/会话）：下钻目录占用时反复尝试同一查询，已按保护性策略终止',
+  ],
+  evidence: [
+    { source: 'log', ref: `run:${RUN_JOB_BUDGET.run_id}`, quote: '/data 91% /var 88% —— 已上报告警（2 条）' },
+    { source: 'shell', ref: 'shell:df -h /data', quote: '/data 91%' },
+  ],
+  steps: [
+    modelStep(1, t0(RUN_JOB_BUDGET), {
+      prompt_preview: '你是 crony 的巡检结果解读助手……（磁盘告警输出）',
+      prompt_bytes: 2180,
+      content: '',
+      tool_calls: [{ id: 'call_shell_2', name: 'shell_readonly', arguments: '{"command":"df","args":["-h","/data"]}' }],
+      total_tokens: 980,
+      latency_ms: 1180,
+      finish_reason: 'tool_calls',
+    }),
+    toolStep(2, RUN_JOB_BUDGET.finished_at * 1000 - 80000, {
+      tool_name: 'shell_readonly',
+      tool_args: { command: 'df', args: ['-h', '/data'] },
+      observation: 'Filesystem Size Used Avail Use% Mounted on\n/dev/vdb1 500G 455G 45G 91% /data',
+      evidence: [{ source: 'shell', ref: 'shell:df -h /data', quote: '/data 91%' }],
+      duration_ms: 22,
+    }),
+    noticeStep(3, RUN_JOB_BUDGET.finished_at * 1000 - 20000, '达到工具调用次数上限（12 次/会话），已按保护性策略终止本次会话'),
+  ],
+  result: null,
+})
+
+/** §2 会话详情表（键为 session_id）；未列出的会话由 index.js 返回兜底详情 */
+export const agentSessionDetails = {
+  [DETAIL_DIAG_FULL.session_id]: DETAIL_DIAG_FULL,
+  [DETAIL_DIAG_THIN.session_id]: DETAIL_DIAG_THIN,
+  [DETAIL_DIAG_UNVERIFIED.session_id]: DETAIL_DIAG_UNVERIFIED,
+  [DETAIL_NLJOB_CMD.session_id]: DETAIL_NLJOB_CMD,
+  [DETAIL_NLJOB_HTTP.session_id]: DETAIL_NLJOB_HTTP,
+  [DETAIL_NLJOB_FIVESEG.session_id]: DETAIL_NLJOB_FIVESEG,
+  [DETAIL_JOB_OK.session_id]: DETAIL_JOB_OK,
+  [DETAIL_JOB_BUDGET.session_id]: DETAIL_JOB_BUDGET,
+}
+
+/* ---------------- §4 只读工具清单 ---------------- */
+
+/**
+ * 工具名与描述取自 common/pkg/tools/builtin.go（逐字对应，不要美化）。
+ * 注意：真实部署里数据源为 nil 的工具**不会注册**（NewReadonlyRegistry），
+ * 因此这个清单是"上限"；实际以 /agent/tool/list 的返回为准。
+ */
+export const agentTools = [
   {
-    id: 'agent-observe-01',
-    name: '观测 Agent',
-    role: 'observe',
-    status: 'online',
-    model: 'deepseek-v4.1-flash',
-    capabilities: ['指标巡检', '日志检索', '异常检测', '拓扑发现'],
-    current_task: '正在巡检 node-edge-01 磁盘水位',
-    last_active: isoAgo(40 * SEC),
-    success_rate: 98.4,
-    runs_today: 142,
-    tools: ['ssh_exec', 'prom_query', 'log_search'],
+    name: 'shell_readonly',
+    description:
+      '在 crony 节点上执行**只读**诊断命令并返回输出。允许的命令：df、ps、tail、journalctl' +
+      '（df=磁盘使用率，ps=进程列表，tail=看日志尾部，journalctl=systemd 日志）。' +
+      '不接受管道、重定向或其他命令；tail 只能读取 /var/log 下的文件。',
+    readonly: true,
+    timeout_ms: 15000,
+    schema: {
+      type: 'object',
+      properties: {
+        command: { type: 'string', description: '命令名' },
+        args: { type: 'array', items: { type: 'string' }, description: '参数' },
+      },
+      required: ['command'],
+      additionalProperties: false,
+    },
   },
   {
-    id: 'agent-rca-01',
-    name: '根因分析 Agent',
-    role: 'rca',
-    status: 'busy',
-    model: 'deepseek-v4.1-flash',
-    capabilities: ['故障树推理', '变更关联', '指标下钻', '知识检索'],
-    current_task: '分析 run j2-t… 的 MySQL 连接超时根因',
-    last_active: isoAgo(12 * SEC),
-    success_rate: 91.2,
-    runs_today: 26,
-    tools: ['sql_query', 'kb_search', 'prom_query'],
+    name: 'http_get',
+    description: '发起只读 HTTP GET 请求做健康检查（当前未配置 AllowHosts，**所有请求都会被拒绝**）',
+    readonly: true,
+    timeout_ms: 15000,
+    schema: {
+      type: 'object',
+      properties: { url: { type: 'string', description: '目标地址' } },
+      required: ['url'],
+      additionalProperties: false,
+    },
   },
   {
-    id: 'agent-remediate-01',
-    name: '自动修复 Agent',
-    role: 'remediate',
-    status: 'online',
-    model: 'deepseek-v4.1-flash',
-    capabilities: ['重启服务', '清理磁盘', '扩容副本', '回滚发布'],
-    current_task: '空闲（等待 L2 审批）',
-    last_active: isoAgo(5 * MIN),
-    success_rate: 87.5,
-    runs_today: 9,
-    tools: ['ssh_exec', 'k8s_scale', 'job_once'],
-    guardrail: 'L2：变更类动作需人工确认（阶段 3）',
+    name: 'node_status',
+    description: '查询 crony 节点的在线状态、心跳时间、正在运行的任务数与资源水位（CPU/内存/磁盘）。',
+    readonly: true,
+    timeout_ms: 5000,
+    schema: {
+      type: 'object',
+      properties: { node: { type: 'string', description: '节点 UUID；留空表示查询当前节点' } },
+      additionalProperties: false,
+    },
   },
   {
-    id: 'agent-report-01',
-    name: '报表 Agent',
-    role: 'report',
-    status: 'online',
-    model: 'deepseek-v4.1-flash',
-    capabilities: ['日报生成', '趋势归因', 'SLO 核算'],
-    current_task: '生成 7 日执行成功率周报',
-    last_active: isoAgo(3 * MIN),
-    success_rate: 99.6,
-    runs_today: 4,
-    tools: ['statis_query', 'report_render'],
+    name: 'log_search',
+    description: '按关键字/任务/运行 ID 检索任务日志。至少给出 keyword、job_id、run_id 之一，避免全量拉取。',
+    readonly: true,
+    timeout_ms: 10000,
+    schema: {
+      type: 'object',
+      properties: {
+        keyword: { type: 'string', description: '关键字（子串匹配）' },
+        job_id: { type: 'integer', description: '任务 ID' },
+        run_id: { type: 'string', description: '运行 ID（形如 j12-t1791708060）' },
+        level: { type: 'string', enum: ['debug', 'info', 'warn', 'error'] },
+      },
+      additionalProperties: false,
+    },
   },
   {
-    id: 'agent-kb-01',
-    name: '知识沉淀 Agent',
-    role: 'knowledge',
-    status: 'idle',
-    model: 'deepseek-v4.1-flash',
-    capabilities: ['故障复盘', 'Runbook 生成', '文档去重', '标签治理'],
-    current_task: '空闲',
-    last_active: isoAgo(52 * MIN),
-    success_rate: 95.0,
-    runs_today: 3,
-    tools: ['kb_write', 'kb_search'],
-  },
-  {
-    id: 'agent-guard-01',
-    name: '安全合规 Agent',
-    role: 'compliance',
-    status: 'offline',
-    model: 'deepseek-v4.1-flash',
-    capabilities: ['基线核查', '越权检测', '审计巡检'],
-    current_task: '离线（阶段 2 上线）',
-    last_active: isoAgo(28 * HOUR),
-    success_rate: 0,
-    runs_today: 0,
-    tools: ['baseline_scan', 'audit_query'],
+    name: 'mysql_query_readonly',
+    description:
+      '对 crony 元数据库执行**只读 SELECT** 查询（必须带 LIMIT，且不超过 100 行）。' +
+      '禁止任何写操作、DDL、注释与多语句。',
+    readonly: true,
+    timeout_ms: 10000,
+    schema: {
+      type: 'object',
+      properties: { query: { type: 'string', description: '单条 SELECT 语句，必须以 LIMIT n 结尾' } },
+      required: ['query'],
+      additionalProperties: false,
+    },
   },
 ]
+
+/** tools.DefaultPolicy() 的默认值 + 当前生效的收窄项 */
+export const agentToolPolicy = {
+  max_calls_per_session: AGENT_MAX_TOOL_CALLS,
+  max_calls_per_tool: 4,
+  max_output_bytes: 65536,
+  sql_max_rows: 100,
+  allow_hosts: [],
+  shell_read_paths: ['/var/log/', '/var/log/crony/'],
+}
 
 /* ------------------------------------------------------------------ *
  * 6. 知识库（规划中：阶段 2 接入向量检索）
@@ -1795,12 +2833,21 @@ export const settingsSnapshot = {
       { key: 'wechat', label: '企业微信', enabled: false, supported: false },
     ],
   },
+  // 阶段 2 真实口径：Agent 内核已落地，但本机只有确定性离线 provider，
+  // 且工具全部只读、诊断恒为 advisory_only（《契约》§7）。这里不再写模型品牌名。
   agent: {
-    enabled: false,
-    model: 'deepseek-v4.1-flash',
-    autonomy_level: 'L1（仅建议，不自动执行）',
-    max_parallel_agents: 4,
-    require_approval_for: ['变更类动作', '删除类动作', '跨节点批量执行'],
+    enabled: true,
+    provider: 'offline',
+    model: '',
+    autonomy_level: 'L1（只读工具 + 只给建议，不自动执行）',
+    advisory_only: true,
+    readonly_tools: 5,
+    prompt_versions: ['diagnose-v1', 'nljob-v1'],
+    // 阶段 2 是"单会话 ReAct 循环"，没有多 Agent 并行编排
+    max_parallel_agents: 1,
+    budget: { max_calls: 20, max_tokens: 200000, max_duration_ms: 1800000 },
+    max_tool_calls_per_session: 12,
+    require_approval_for: ['变更/删除类动作（阶段 3 才存在，当前不会产生）'],
   },
 }
 
