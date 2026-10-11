@@ -103,6 +103,19 @@ func configRoute(r *gin.Engine) {
 		agentGroup.POST("/tool/list", defaultAgentRouter.ToolList)
 		agentGroup.POST("/nljob/draft", defaultAgentRouter.NLJobDraft)
 		agentGroup.POST("/nljob/confirm", defaultAgentRouter.NLJobConfirm)
+
+		// 阶段 4.2（写动作审批 + 工具审计）。
+		//
+		// 审批是**人的动作**：这里刻意只要求"登录即可"，而不要求 RequireAdmin——
+		// 因为运维值班账号通常不是管理员；但操作人一定取自 token（见 handler 文件头），
+		// 且写动作本身已被"模型不能自批"（审批单由模型侧发起、决策只能由本接口做）约束住。
+		// 若部署方要求"只有管理员能批"，把下面四条挪进 RequireAdmin 组即可（一行改动）。
+		agentGroup.POST("/approval/search", defaultAgentRouter.ApprovalSearch)
+		agentGroup.POST("/approval/find", defaultAgentRouter.ApprovalFind)
+		agentGroup.POST("/approval/approve", defaultAgentRouter.ApprovalApprove)
+		agentGroup.POST("/approval/reject", defaultAgentRouter.ApprovalReject)
+		agentGroup.POST("/approval/cancel", defaultAgentRouter.ApprovalCancel)
+		agentGroup.POST("/audit/search", defaultAgentRouter.AuditSearch)
 	}
 
 	user := r.Group("/user")

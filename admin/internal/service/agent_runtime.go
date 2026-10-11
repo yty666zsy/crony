@@ -26,6 +26,9 @@ import (
 var (
 	agentRuntimeMu sync.RWMutex
 	agentRuntime   *agentruntime.Runtime
+	// approvalService 审批控制面单例（未启用 Agent 能力时为 nil）。
+	approvalMu      sync.RWMutex
+	approvalService *ApprovalService
 )
 
 // InitAgentRuntime 按配置装配 Agent 运行时（幂等；未配置/未启用时返回 nil 且不报错）。
@@ -90,9 +93,33 @@ func InitAgentRuntime() (*agentruntime.Runtime, error) {
 		return nil, err
 	}
 	SetAgentRuntime(rt)
+
+	// 阶段 4.2：把写动作能力面接上去（审批通道 + 重跑执行器）。
+	//
+	// 顺序说明（这是一个环，必须分两步装配）：
+	//  1. 先建运行时（此时只有只读能力面，写工具**不存在**，模型看不到）；
+	//  2. 用"已建好的运行时"当执行方建审批服务（审批执行必须经它走工具网关）；
+	//  3. 把审批服务当审批通道接回运行时，此时才按策略决定是否注册写工具。
+	// 这样"写工具在接入前不存在"与"策略没开就不注册"两条都成立。
+	approvalStore := NewGormApprovalStore()
+	approvalService := NewApprovalService(approvalStore, rt, toolsPolicy)
+	SetApprovalService(approvalService)
+	writeNames, werr := rt.ConfigureWrites(approvalService, tools.WriteSources{Retry: NewJobRetryExecutor()})
+	if werr != nil {
+		// 写工具装配失败不拖垮整个 Agent 能力（只读诊断仍然可用），但必须显式告警：
+		// 静默降级会让"我明明开了 allow_write"变成一个查不出的谜。
+		logger.GetLogger().Error("[agent] 写工具装配失败（写动作不可用，只读能力不受影响）: " + werr.Error())
+		writeNames = nil
+	}
 	logger.GetLogger().Info(fmt.Sprintf(
 		"[agent] Agent 运行时已就绪：provider=%s offline=%v model=%s 工具=%s（诊断证据来源：数据库 + 节点水位 + 节点本机只读探测）",
 		rt.ProviderName(), rt.Offline(), rt.Model(), strings.Join(rt.ToolNames(), ",")))
+	if len(writeNames) > 0 {
+		logger.GetLogger().Info(fmt.Sprintf("[agent] 写动作能力已开启：%s（每次写动作都会生成审批单，人批准后才执行）",
+			strings.Join(writeNames, ",")))
+	} else {
+		logger.GetLogger().Info("[agent] 写动作能力未开启（allow_write=false 或自治级别不允许或缺少执行器）：模型只能建议，不能动手")
+	}
 	// 生效策略必须打日志：安全边界的"可读性"和正确性一样重要——
 	// 出事后第一件事就是确认"当时到底放开了什么"。
 	logger.GetLogger().Info(fmt.Sprintf(
@@ -115,4 +142,18 @@ func DefaultAgentRuntime() *agentruntime.Runtime {
 	agentRuntimeMu.RLock()
 	defer agentRuntimeMu.RUnlock()
 	return agentRuntime
+}
+
+// SetApprovalService 注入审批控制面（启动流程与测试用）。
+func SetApprovalService(s *ApprovalService) {
+	approvalMu.Lock()
+	defer approvalMu.Unlock()
+	approvalService = s
+}
+
+// DefaultApprovalService 返回审批控制面（可能为 nil，调用方必须处理）。
+func DefaultApprovalService() *ApprovalService {
+	approvalMu.RLock()
+	defer approvalMu.RUnlock()
+	return approvalService
 }

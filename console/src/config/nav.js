@@ -49,6 +49,7 @@ export const navGroups = [
       { label: 'Agent Console', to: '/agents', icon: 'MagicStick' },
       { label: 'Knowledge Base', to: '/knowledge', icon: 'Notebook' },
       { label: 'Audit Trail', to: '/audit', icon: 'Files' },
+      { label: 'Approvals', to: '/approvals', icon: 'CircleCheck' },
     ],
   },
   {

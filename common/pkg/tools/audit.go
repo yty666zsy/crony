@@ -30,9 +30,12 @@ const (
 	ReasonConcurrencyLimit  = "并发调用超限（进程级）"
 	ReasonBlastRadius       = "爆炸半径预算超限（单会话可影响的写动作/主机数）"
 	ReasonApprovalNoChannel = "需要人工审批，但审批通道未接入（按安全默认：拒绝而不是放行）"
-	ReasonToolPanic         = "工具实现 panic（已兜住）"
-	ReasonTimeout           = "工具执行超时"
-	ReasonExecuteFailed     = "工具执行失败"
+	// ReasonApprovalMissed 审批单与本次动作不匹配：工具已不是写工具、参数哈希对不上等。
+	// 这条原因的存在本身就是"批准 A 执行 B"（TOCTOU）被拦下来的证据。
+	ReasonApprovalMissed = "审批单与本次动作品类不匹配（工具/参数已变）"
+	ReasonToolPanic      = "工具实现 panic（已兜住）"
+	ReasonTimeout        = "工具执行超时"
+	ReasonExecuteFailed  = "工具执行失败"
 )
 
 // runMetaKey 上下文键（未导出，避免与其他包的 context 值冲突）。

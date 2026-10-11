@@ -111,6 +111,61 @@ check('鉴权：口令长度不足走业务错误信封，正常口令返回 tok
   assert.ok(ok.data.token && ok.data.is_admin === true)
 })
 
+check('阶段 4.2 审批 Mock：六种状态齐全，且与后端字段同形', async () => {
+  const all = (await mock.approvalSearch({ page: 1, page_size: 50 })).data
+  assert.equal(all.total, 6, '样例应覆盖 6 张单子')
+  const statuses = new Set(all.list.map((r) => r.status))
+  for (const s of ['pending', 'executed', 'execution_failed', 'blocked', 'rejected', 'expired']) {
+    assert.ok(statuses.has(s), `缺少状态样例：${s}`)
+  }
+  // 时间字段类型必须与后端一致：created/expires_at 是 Unix 秒，decided_at/executed_at 是 RFC3339。
+  const executed = all.list.find((r) => r.status === 'executed')
+  assert.equal(typeof executed.created, 'number')
+  assert.equal(typeof executed.expires_at, 'number')
+  assert.ok(!Number.isNaN(Date.parse(executed.decided_at)), 'decided_at 应是可解析的时间字符串')
+  assert.ok(!Number.isNaN(Date.parse(executed.executed_at)))
+  // blocked 的核心事实：动作从未发生（没有执行时间戳）。
+  const blocked = all.list.find((r) => r.status === 'blocked')
+  assert.equal(blocked.executed_at, '', 'blocked 不得有执行时间戳')
+  assert.equal(blocked.executed, false)
+  assert.ok(blocked.status_text.includes('未执行'), 'blocked 的文案必须自述"未执行"')
+  // pending 的剩余有效期必须是"剩下的秒数"，不能是负数或天文数字。
+  const pending = all.list.find((r) => r.status === 'pending')
+  assert.ok(pending.remain_seconds > 0 && pending.remain_seconds <= 15 * 60, `剩余有效期异常：${pending.remain_seconds}`)
+})
+
+check('阶段 4.2 审批 Mock：状态过滤与"已处理不能再决策"的错误码', async () => {
+  const pendingOnly = (await mock.approvalSearch({ page: 1, page_size: 50, status: 'pending' })).data
+  assert.ok(pendingOnly.list.every((r) => r.status === 'pending'), 'status 过滤必须生效')
+
+  const pending = pendingOnly.list[0]
+  const first = mock.approvalDecide({ approval_id: pending.approval_id, action: 'approve', note: '同意' })
+  assert.equal(first.code, 200)
+  assert.equal(first.data.executed, true, '批准应标记为已执行')
+  assert.equal(first.data.approval.status, 'executed')
+
+  // 第二次决策必须被拒（复刻后端 CAS：只有 pending 能被决策）。
+  const second = mock.approvalDecide({ approval_id: pending.approval_id, action: 'approve' })
+  assert.equal(second.code, 1014, '已处理的单子再决策应返回 1014')
+  // 单号不存在 → 1013；这与真实后端的错误码必须一致，否则前端提示会走错分支。
+  assert.equal(mock.approvalDecide({ approval_id: 'ap-none' }).code, 1013)
+  assert.equal(mock.approvalFind({ approval_id: 'ap-none' }).code, 1013)
+})
+
+check('阶段 4.2 工具审计 Mock：四种决策齐全且都有中文解释', async () => {
+  const all = (await mock.toolAuditSearch({ page: 1, page_size: 50 })).data
+  const decisions = new Set(all.list.map((r) => r.decision))
+  for (const d of ['allowed', 'denied', 'approval_required', 'approval_executed']) {
+    assert.ok(decisions.has(d), `缺少决策样例：${d}`)
+  }
+  assert.ok(
+    all.list.every((r) => r.decision_text && r.risk && r.created_ms > 0),
+    '每条审计都要有中文决策文案 / 风险级别 / 毫秒时间戳',
+  )
+  const filtered = (await mock.toolAuditSearch({ page: 1, page_size: 50, decision: 'approval_required' })).data
+  assert.ok(filtered.list.length > 0 && filtered.list.every((r) => r.decision === 'approval_required'))
+})
+
 let failed = 0
 for (const { name, fn } of checks) {
   try {

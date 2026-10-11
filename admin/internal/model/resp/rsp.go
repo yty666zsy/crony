@@ -46,6 +46,21 @@ const (
 	ErrorAgentDisabled = 1011
 	// ErrorAgentUnavailable 目标节点不存在/未注册，无法在其上执行或取节点侧上下文。
 	ErrorAgentUnavailable = 1012
+
+	// 阶段 4.2（写动作审批）业务码。1013 起，按"哪一种拒绝"分类——
+	// 写动作的失败必须可解释：只说"失败"会让运维只能猜是权限、过期还是并发。
+	// ErrorAgentApprovalNotFound 审批单不存在（单号无效或已被清理）。
+	ErrorAgentApprovalNotFound = 1013
+	// ErrorAgentApprovalConflict 审批单状态已变更：已被别人决策/已执行/不可再撤。
+	ErrorAgentApprovalConflict = 1014
+	// ErrorAgentApprovalExpired 审批单已过期（写动作的合理性依赖当时的现场）。
+	ErrorAgentApprovalExpired = 1015
+	// ErrorAgentApprovalMismatch 参数与审批单不一致（批准 A 执行 B 的 TOCTOU 尝试）。
+	ErrorAgentApprovalMismatch = 1016
+	// ErrorAgentApprovalBlocked 执行前复核未通过：工具已下线/策略已收紧/执行器未装配。
+	ErrorAgentApprovalBlocked = 1017
+	// ErrorAgentApprovalExecFailed 已执行但失败（含业务失败 Result.OK=false）。
+	ErrorAgentApprovalExecFailed = 1018
 )
 
 func Result(code int, data interface{}, msg string, c *gin.Context) {

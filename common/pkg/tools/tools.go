@@ -162,7 +162,7 @@ type CallRecord struct {
 	RunID     string `json:"run_id,omitempty"`
 	Tool      string `json:"tool"`
 	// Risk 本次调用的风险级别（即使工具未知也会填 read 兜底值）。
-	Risk RiskLevel `json:"risk,omitempty"`
+	Risk RiskLevel              `json:"risk,omitempty"`
 	Args map[string]interface{} `json:"args,omitempty"`
 	// Decision 见 Decision* 常量：allowed / denied / approval_required / approval_executed。
 	Decision string `json:"decision"`
@@ -172,8 +172,8 @@ type CallRecord struct {
 	ApprovalID string `json:"approval_id,omitempty"`
 	// Targets 本次调用影响/观测的目标（写动作必填）。
 	Targets []string `json:"targets,omitempty"`
-	OK      bool   `json:"ok"`
-	Err     string `json:"err,omitempty"`
+	OK      bool     `json:"ok"`
+	Err     string   `json:"err,omitempty"`
 	// Denied 兼容旧口径：等价于 Decision == DecisionDenied。
 	Denied      bool  `json:"denied,omitempty"`
 	DurationMS  int64 `json:"duration_ms"`
@@ -569,6 +569,32 @@ func (r *Registry) Specs() []llm.ToolSpec {
 	return specs
 }
 
+// SetApprover 后置装配审批通道（见 agentruntime.ConfigureWrites 的"环"说明）。
+//
+// 允许后置装配是因为装配顺序上审批服务依赖运行时；不允许**换**审批通道，
+// 因为"审批人是谁"必须是进程生命周期内唯一的事实。
+func (r *Registry) SetApprover(a Approver) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.approver != nil && a != nil && r.approver != a {
+		// 换通道是配置错误：保留原通道（宁可拒绝，也不要静默改判）。
+		return
+	}
+	r.approver = a
+}
+
+// HasWriteTools 当前能力面里是否**有**写工具（含被策略拒绝但已注册的）。
+func (r *Registry) HasWriteTools() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, t := range r.tools {
+		if t.Risk().IsWrite() {
+			return true
+		}
+	}
+	return false
+}
+
 // Policy 返回当前策略的**深拷贝**。
 //
 // 必须深拷贝：调用方（HTTP 视图层）会读切片字段，若返回共享底层数组，
@@ -598,6 +624,30 @@ func (r *Registry) Policy() Policy {
 // 为什么把"最便宜且最确定的检查"放前面：模型幻觉工具名与参数错误是最常见的两种失败，
 // 让它们在碰到任何预算/限速账本之前就被拒，账本才不会被噪声污染。
 func (r *Registry) Call(ctx context.Context, sessionID, name string, args map[string]interface{}) (Result, error) {
+	return r.call(ctx, sessionID, name, args, "")
+}
+
+// ExecuteApproved 执行一个**已获人工批准**的写动作（`approvalID` 非空）。
+//
+// 它与 Call 的唯一差别是"审批那道闸"：Call 在需要审批时生成审批单并返回，
+// ExecuteApproved 则不生成审批单、直接进入执行。其余每一道闸**都要再走一遍**
+// （工具存在、风险自洽、策略允许、自治级别、Schema、速率、并发），
+// 因为批准发生在过去，而"现在还能不能执行"必须重新判断——这是 TOCTOU 的第二道防线
+// （第一道是控制面里的参数哈希比对，见 admin 的 ApprovalService）。
+//
+// 为什么必须做成注册表的方法，而不是"绕开网关直接调 Tool.Execute"：
+// 绕开网关意味着审计里没有 approval_executed 这条事实，事后无法回答
+// "这次执行是谁批准的、走的哪张单子"。
+func (r *Registry) ExecuteApproved(ctx context.Context, sessionID, name string,
+	args map[string]interface{}, approvalID string) (Result, error) {
+	if strings.TrimSpace(approvalID) == "" {
+		return Result{}, retry.Fatal(fmt.Errorf("%w: 缺少审批单号，拒绝执行已批准动作", ErrInvalidArgs))
+	}
+	return r.call(ctx, sessionID, name, args, strings.TrimSpace(approvalID))
+}
+
+func (r *Registry) call(ctx context.Context, sessionID, name string, args map[string]interface{}, approvalID string) (Result, error) {
+	approved := approvalID != ""
 	if r == nil {
 		return Result{}, retry.Fatal(fmt.Errorf("tools: 注册表未初始化"))
 	}
@@ -636,6 +686,13 @@ func (r *Registry) Call(ctx context.Context, sessionID, name string, args map[st
 				ErrRiskNotAllowed, policy.Autonomy))
 		}
 	}
+	// 审批单只对**写动作**有意义：拿一张单子来执行只读工具，说明调用方搞错了
+	// （或者参数被换过），一律拒绝并留下证据。
+	if approved && !risk.IsWrite() {
+		r.recordDenied(sessionID, name, args, risk, meta, ReasonApprovalMissed)
+		return Result{}, retry.Fatal(fmt.Errorf("%w: 审批单 %s 对应写动作，但 %s 是只读工具",
+			ErrApprovalUnavailable, approvalID, name))
+	}
 	if args == nil {
 		args = map[string]interface{}{}
 	}
@@ -659,12 +716,21 @@ func (r *Registry) Call(ctx context.Context, sessionID, name string, args map[st
 	}
 	defer r.release()
 
-	needApproval := risk.IsWrite() && !policy.autoApproveMatch(name, targets, risk)
+	needApproval := risk.IsWrite() && !approved && !policy.autoApproveMatch(name, targets, risk)
 
 	// 爆炸半径 + 会话预算：直接拒绝的两种情形都不消耗额度。
-	if reason, err := r.admit(sessionID, name, risk, targets); err != nil {
-		r.recordDenied(sessionID, name, args, risk, meta, reason)
-		return Result{}, err
+	//
+	// 已批准的执行**不重复扣预算**：这笔写动作在"转审批"时就扣过一次
+	// （那是刻意的——它保证模型不能靠狂发审批单绕过爆炸半径）。若执行时再扣一次，
+	// 一张单子会吃掉两个名额；在"单会话最多影响 1 个主机"的默认策略下，
+	// 结果就是**任何写动作都永远批不出来**——安全策略变成了功能禁用。
+	// 之所以不担心"跳过预算导致狂执行"：每张审批单最多执行一次（控制面的 CAS），
+	// 而单子数量本身已经被扣过预算。
+	if !approved {
+		if reason, err := r.admit(sessionID, name, risk, targets); err != nil {
+			r.recordDenied(sessionID, name, args, risk, meta, reason)
+			return Result{}, err
+		}
 	}
 
 	if needApproval {
@@ -715,6 +781,10 @@ func (r *Registry) Call(ctx context.Context, sessionID, name string, args map[st
 	started := time.Now()
 	res, err := r.execute(callCtx, tool, args)
 	res.DurationMS = time.Since(started).Milliseconds()
+	// 写动作的观测必须**显式**说明"这次真的执行了"：审批路径的观测写的是
+	// executed=false（尚未执行），如果执行路径什么都不写，模型和前端就只能靠
+	// "没有 approval_id"去猜——而"猜"在写动作上是不可接受的。
+	stampWriteMeta(&res, risk)
 
 	if err != nil {
 		if errors.Is(callCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
@@ -724,10 +794,11 @@ func (r *Registry) Call(ctx context.Context, sessionID, name string, args map[st
 		if res.Err == "" {
 			res.Err = llm.Redact(err.Error())
 		}
-		rec := r.baseRecord(sessionID, name, args, risk, meta, targets, DecisionAllowed, ReasonTimeout)
+		rec := r.baseRecord(sessionID, name, args, risk, meta, targets, decisionOf(approved), ReasonTimeout)
 		if !errors.Is(callCtx.Err(), context.DeadlineExceeded) {
 			rec.Reason = ReasonExecuteFailed
 		}
+		rec.ApprovalID = approvalID
 		rec.OK = false
 		rec.Err = res.Err
 		rec.DurationMS = res.DurationMS
@@ -752,7 +823,8 @@ func (r *Registry) Call(ctx context.Context, sessionID, name string, args map[st
 		res.Summary = "已执行"
 	}
 
-	rec := r.baseRecord(sessionID, name, args, risk, meta, targets, DecisionAllowed, "")
+	rec := r.baseRecord(sessionID, name, args, risk, meta, targets, decisionOf(approved), "")
+	rec.ApprovalID = approvalID
 	rec.OK = res.OK
 	rec.Err = res.Err
 	rec.DurationMS = res.DurationMS
@@ -760,6 +832,34 @@ func (r *Registry) Call(ctx context.Context, sessionID, name string, args map[st
 	rec.Evidence = len(res.Evidence)
 	r.observe(rec)
 	return res, nil
+}
+
+// decisionOf 审计决策取值：走审批单执行的记为 approval_executed，
+// 其余正常执行记为 allowed。两者都不代表"成功"——成败看 CallRecord.OK。
+func decisionOf(approved bool) string {
+	if approved {
+		return DecisionApprovalExecuted
+	}
+	return DecisionAllowed
+}
+
+// stampWriteMeta 给写动作的执行结果打上"已执行"标记（只读工具不动）。
+//
+// 语义约定（前端与模型都按这个读）：
+//   - `executed=false`：本次调用**没有副作用**，只生成了审批单；
+//   - `executed=true`：网关真的调用了执行器；成功与否看 OK/Err，**不要**用 executed 判成败。
+//
+// 执行失败也标 true：动作确实跑了（可能产生了部分副作用），把它标成 false
+// 会让人误以为"什么都没发生"，这是审计上更危险的谎言。
+func stampWriteMeta(res *Result, risk RiskLevel) {
+	if res == nil || !risk.IsWrite() {
+		return
+	}
+	if res.Meta == nil {
+		res.Meta = map[string]interface{}{}
+	}
+	res.Meta["executed"] = true
+	res.Meta["risk"] = risk.String()
 }
 
 // baseRecord 组装审计记录的公共部分（每次 Call 恰好一条）。
@@ -880,9 +980,9 @@ func (r *Registry) sessionLocked(sessionID string) *sessionState {
 	st, ok := r.sessions[sessionID]
 	if !ok {
 		st = &sessionState{
-			perTool:  make(map[string]int),
-			hosts:    make(map[string]struct{}),
-			deniedBy: make(map[string]int),
+			perTool:   make(map[string]int),
+			hosts:     make(map[string]struct{}),
+			deniedBy:  make(map[string]int),
 			startedAt: time.Now(),
 		}
 		r.sessions[sessionID] = st

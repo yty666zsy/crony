@@ -838,4 +838,356 @@ func TestAcceptanceSuite(t *testing.T) {
 			len(got), len(sessions), totalCalls, got[0].sessionID, got[0].tool, got[0].decision,
 			got[0].ok, truncate(got[0].reason, 40), truncate(got[0].errMsg, 60), got[0].kind, got[0].runID)
 	})
+
+	// ---------- 阶段 4.2：写动作审批（AC-17…AC-25） ----------
+	//
+	// 这一组用例的被测对象是"模型想动手时，谁来踩刹车"。部署形态是
+	// allow_write=false（AC-03 已断言），因此**黑盒侧只能验证"不执行"这一侧**：
+	// 写工具根本不在能力面里、审批单即使被批准也不会执行、参数不一致会被拦。
+	// "批准后真的执行了一次"需要写权限打开，由真库集成测试覆盖
+	// （admin/internal/service/approval_integration_test.go，构建标签 integration）。
+	// 这个分工是有意的：不去为了让用例好看而临时改部署配置。
+
+	run("AC-17", "写动作能力面：allow_write=false 时写工具不可被调用", func(cc *caseCtx) {
+		_, env, err := c.do(http.MethodPost, "/agent/tool/list", map[string]any{}, true)
+		if err != nil {
+			cc.t.Fatalf("请求失败: %v", err)
+		}
+		data := env.dataMap()
+		policy := asMap(data["policy"])
+		if asBool(policy["allow_write"]) {
+			cc.t.Fatalf("部署策略 allow_write=true，本用例的前提（只读部署）不成立：" +
+				"请在验收环境保持 allow_write=false，否则写动作审批的「不执行」一侧无从验证")
+		}
+		tools0 := asSlice(data["tools"])
+		var writeNames []string
+		for _, t0 := range tools0 {
+			m := asMap(t0)
+			risk := asStr(m["risk"])
+			if risk == "write" || risk == "destructive" {
+				writeNames = append(writeNames, asStr(m["name"]))
+			}
+			if asStr(m["name"]) == "job_retry" {
+				writeNames = append(writeNames, "job_retry")
+			}
+		}
+		if len(writeNames) > 0 {
+			cc.t.Fatalf("只读部署里出现了写工具 %v：写动作必须「不注册」而不是「注册了再拦」", writeNames)
+		}
+		// 审计是"模型试过什么"的唯一事实来源：只读部署下不该有任何写类调用留痕。
+		if db != nil {
+			since := time.Now().Add(-10 * time.Minute).Unix()
+			var n int
+			if err := db.QueryRow(`select count(*) from agent_tool_audit
+				where tool = 'job_retry' and created >= ?`, since).Scan(&n); err != nil {
+				cc.t.Fatalf("查询审计失败: %v", err)
+			}
+			if n != 0 {
+				cc.t.Fatalf("只读部署里出现了 %d 条 job_retry 调用留痕：能力面与审计不一致", n)
+			}
+			var nw int
+			if err := db.QueryRow(`select count(*) from agent_tool_audit
+				where risk in ('write','destructive') and created >= ?`, since).Scan(&nw); err != nil {
+				cc.t.Fatalf("查询审计失败: %v", err)
+			}
+			if nw != 0 {
+				cc.t.Fatalf("只读部署里出现了 %d 条写类调用留痕", nw)
+			}
+		}
+		cc.note("策略 allow_write=false / 自治 %s；能力面 %d 个工具，其中写工具 0 个；审计中写类调用 0 条",
+			asStr(policy["autonomy"]), len(tools0))
+	})
+
+	// approvalDecision 调一次审批决策接口：返回（业务码、data、msg）。
+	approvalDecision := func(path, approvalID, note string) (int, map[string]any, string, error) {
+		body := map[string]any{"approval_id": approvalID}
+		if note != "" {
+			body["note"] = note
+		}
+		status, env, err := c.do(http.MethodPost, path, body, true)
+		if err != nil {
+			return 0, nil, "", fmt.Errorf("POST %s 网络错误: %w", path, err)
+		}
+		if status != http.StatusOK {
+			return env.Code, nil, env.Msg, fmt.Errorf("POST %s HTTP %d（审批接口约定恒 HTTP 200）", path, status)
+		}
+		return env.Code, env.dataMap(), env.Msg, nil
+	}
+	// auditRowsFor 统计某张审批单在审计表里留下的调用行数。
+	// 这是"第二次决策有没有重新走执行路径"唯一可观测的副作用。
+	auditRowsFor := func(cc *caseCtx, approvalID string) int {
+		var n int
+		if err := db.QueryRow(`select count(*) from agent_tool_audit where approval_id = ?`, approvalID).Scan(&n); err != nil {
+			cc.t.Fatalf("查询审批单审计行失败: %v", err)
+		}
+		return n
+	}
+	requireDB := func(cc *caseCtx) {
+		if db == nil {
+			cc.skip("未配置 CRONY_TEST_MYSQL_DSN（或验收库不可写）：无法自备审批单夹具，" +
+				"而审批单的正常来源是模型请求写动作——只读部署里造不出来")
+		}
+	}
+
+	run("AC-18", "策略未开时批准也不执行（fail-closed，code 1017）", func(cc *caseCtx) {
+		requireDB(cc)
+		id := provisionApprovalFixture(t, db, approvalFixture{Reason: "验收夹具：策略未开时的批准必须被复核拦下"})
+		code, data, msg, err := approvalDecision("/agent/approval/approve", id, "验证 fail-closed")
+		if err != nil {
+			cc.t.Fatalf("%v", err)
+		}
+		if code != 1017 {
+			cc.t.Fatalf("策略未开时批准应返回 1017（执行前复核未通过），实际 code=%d msg=%q", code, truncate(msg, 200))
+		}
+		if asBool(data["executed"]) {
+			cc.t.Fatalf("复核未通过竟然报告 executed=true：写动作被真的执行了")
+		}
+		row := loadApprovalRow(t, db, id)
+		if row.Status != "blocked" {
+			cc.t.Fatalf("复核未通过的单子应落 blocked（决策已消耗、动作从未执行），实际 %s", row.Status)
+		}
+		if strings.TrimSpace(row.ExecutionResult) == "" {
+			cc.t.Fatalf("复核未通过必须写明原因（回看时要知道是哪一道闸）：%+v", row)
+		}
+		if row.DecidedBy == "" || row.DecidedAt == 0 {
+			cc.t.Fatalf("决策人与时间必须落库：%+v", row)
+		}
+		if row.ExecutedAt != 0 {
+			cc.t.Fatalf("复核未通过不得留下「已执行」时间戳：%+v", row)
+		}
+		cc.note("code=1017 msg=%s；单子状态 %s，执行结果=%s", truncate(msg, 90), row.Status, truncate(row.ExecutionResult, 80))
+	})
+
+	run("AC-19", "一次批准一次执行：第二次决策是冲突且不重走执行路径", func(cc *caseCtx) {
+		requireDB(cc)
+		id := provisionApprovalFixture(t, db, approvalFixture{Reason: "验收夹具：验证同一张单子只能被决策一次"})
+		code1, _, msg1, err := approvalDecision("/agent/approval/approve", id, "第一次批准")
+		if err != nil {
+			cc.t.Fatalf("%v", err)
+		}
+		if code1 != 1017 {
+			cc.t.Fatalf("首次批准在只读部署下应被复核拦下（1017），实际 code=%d msg=%q", code1, truncate(msg1, 160))
+		}
+		row1 := loadApprovalRow(t, db, id)
+		rows1 := auditRowsFor(cc, id)
+
+		code2, data2, msg2, err := approvalDecision("/agent/approval/approve", id, "第二次批准（模拟重复点击/并发）")
+		if err != nil {
+			cc.t.Fatalf("%v", err)
+		}
+		if code2 != 1014 {
+			cc.t.Fatalf("已决策的单子再次批准必须返回 1014（状态已变更），实际 code=%d msg=%q", code2, truncate(msg2, 160))
+		}
+		if asBool(data2["executed"]) {
+			cc.t.Fatalf("第二次批准竟报告 executed=true")
+		}
+		row2 := loadApprovalRow(t, db, id)
+		rows2 := auditRowsFor(cc, id)
+		if rows2 != rows1 {
+			cc.t.Fatalf("第二次决策又走了一遍执行路径（审计行 %d → %d）：一次批准必须至多一次执行", rows1, rows2)
+		}
+		if row2.ExecutedAt != row1.ExecutedAt || row2.Status != row1.Status || row2.DecidedBy != row1.DecidedBy {
+			cc.t.Fatalf("第二次决策改写了已决策单子：决策前 %+v / 决策后 %+v", row1, row2)
+		}
+		cc.note("首次 code=%d（状态→%s，审计 %d 行）；二次 code=%d；executed_at 未变（%d）",
+			code1, row1.Status, rows1, code2, row2.ExecutedAt)
+	})
+
+	run("AC-20", "TOCTOU：批准 A 却执行 B 一律拒绝（code 1016，且不碰执行路径）", func(cc *caseCtx) {
+		requireDB(cc)
+		id := provisionApprovalFixture(t, db, approvalFixture{
+			Args:         map[string]any{"job_id": float64(910007), "reason": "验收夹具：批准的是这个任务"},
+			HashForOther: map[string]any{"job_id": float64(999999), "reason": "但存档哈希对的是另一个任务"},
+			Reason:       "验收夹具：复现「批准与执行之间参数被改」",
+		})
+		code, data, msg, err := approvalDecision("/agent/approval/approve", id, "看起来没问题")
+		if err != nil {
+			cc.t.Fatalf("%v", err)
+		}
+		if code != 1016 {
+			cc.t.Fatalf("参数哈希与存档不一致必须返回 1016，实际 code=%d msg=%q", code, truncate(msg, 200))
+		}
+		if asBool(data["executed"]) {
+			cc.t.Fatalf("参数不一致竟然执行了")
+		}
+		row := loadApprovalRow(t, db, id)
+		if row.Status != "blocked" {
+			cc.t.Fatalf("参数不一致应落 blocked（复核发生在网关之前），实际 %s", row.Status)
+		}
+		if n := auditRowsFor(cc, id); n != 0 {
+			cc.t.Fatalf("参数不一致时不该触达工具网关，但审计表里有 %d 行", n)
+		}
+		cc.note("code=1016 msg=%s；单子状态 %s，工具网关审计 0 行（复核发生在网关之前）",
+			truncate(msg, 80), row.Status)
+	})
+
+	run("AC-21", "过期单子不能再批准（code 1015，且不执行）", func(cc *caseCtx) {
+		requireDB(cc)
+		id := provisionApprovalFixture(t, db, approvalFixture{
+			ExpiresIn: -2 * time.Minute,
+			Reason:    "验收夹具：过期单子（写动作的合理性依赖当时现场）",
+		})
+		code, data, msg, err := approvalDecision("/agent/approval/approve", id, "来晚了")
+		if err != nil {
+			cc.t.Fatalf("%v", err)
+		}
+		if code != 1015 {
+			cc.t.Fatalf("过期后批准必须返回 1015，实际 code=%d msg=%q", code, truncate(msg, 200))
+		}
+		if asBool(data["executed"]) {
+			cc.t.Fatalf("过期单子竟然执行了")
+		}
+		row := loadApprovalRow(t, db, id)
+		if row.Status != "expired" {
+			cc.t.Fatalf("过期单子应被惰性清理成 expired（「过期」与「执行失败」必须能区分），实际 %s", row.Status)
+		}
+		if row.ExecutedAt != 0 {
+			cc.t.Fatalf("过期单子不得有执行时间戳：%+v", row)
+		}
+		if n := auditRowsFor(cc, id); n != 0 {
+			cc.t.Fatalf("过期单子不得触达工具网关，但审计表里有 %d 行", n)
+		}
+		cc.note("code=1015 状态=%s 执行时间=%d 审计 0 行；msg=%s", row.Status, row.ExecutedAt, truncate(msg, 60))
+	})
+
+	run("AC-22", "驳回：不执行、留意见、状态落 rejected、二次决策冲突", func(cc *caseCtx) {
+		requireDB(cc)
+		id := provisionApprovalFixture(t, db, approvalFixture{Reason: "验收夹具：驳回路径"})
+		code, data, msg, err := approvalDecision("/agent/approval/reject", id, "现场已恢复，不需要重跑")
+		if err != nil {
+			cc.t.Fatalf("%v", err)
+		}
+		if code != 200 {
+			cc.t.Fatalf("驳回是正常业务动作，应 code=200，实际 %d msg=%q", code, truncate(msg, 200))
+		}
+		if asBool(data["executed"]) {
+			cc.t.Fatalf("驳回竟然执行了动作")
+		}
+		row := loadApprovalRow(t, db, id)
+		if row.Status != "rejected" {
+			cc.t.Fatalf("驳回后状态应为 rejected，实际 %s", row.Status)
+		}
+		if row.DecidedBy == "" || !strings.Contains(row.DecisionNote, "现场已恢复") {
+			cc.t.Fatalf("审批意见必须原样落库（回看时要看理由）：%+v", row)
+		}
+		if n := auditRowsFor(cc, id); n != 0 {
+			cc.t.Fatalf("驳回不得触达工具网关，但审计表里有 %d 行", n)
+		}
+		code2, _, msg2, err := approvalDecision("/agent/approval/reject", id, "再点一次")
+		if err != nil {
+			cc.t.Fatalf("%v", err)
+		}
+		if code2 != 1014 {
+			cc.t.Fatalf("已驳回的单子再次决策应 1014，实际 %d msg=%q", code2, truncate(msg2, 120))
+		}
+		cc.note("驳回 code=200 状态=%s 审批人=%s；二次决策 code=%d；网关审计 0 行",
+			row.Status, row.DecidedBy, code2)
+	})
+
+	run("AC-23", "审批参数校验与撤销：不存在 1013、空单号 1001、已决策不可撤 1014", func(cc *caseCtx) {
+		code, _, msg, err := approvalDecision("/agent/approval/approve", "ap-does-not-exist-acc", "")
+		if err != nil {
+			cc.t.Fatalf("%v", err)
+		}
+		if code != 1013 {
+			cc.t.Fatalf("不存在的单号应返回 1013，实际 %d msg=%q", code, truncate(msg, 160))
+		}
+		code2, _, msg2, err := approvalDecision("/agent/approval/approve", "", "")
+		if err != nil {
+			cc.t.Fatalf("%v", err)
+		}
+		if code2 != 1001 {
+			cc.t.Fatalf("空 approval_id 应返回 1001（参数错误），实际 %d msg=%q", code2, truncate(msg2, 160))
+		}
+		requireDB(cc)
+		// 已决策（rejected）的单子不可撤销：撤销只对 pending 有意义。
+		id := provisionApprovalFixture(t, db, approvalFixture{Status: "rejected", Reason: "验收夹具：已决策不可撤销"})
+		code3, _, msg3, err := approvalDecision("/agent/approval/cancel", id, "撤回")
+		if err != nil {
+			cc.t.Fatalf("%v", err)
+		}
+		if code3 != 1014 {
+			cc.t.Fatalf("已决策的单子不可撤销，应返回 1014，实际 %d msg=%q", code3, truncate(msg3, 160))
+		}
+		// pending 的单子可以撤销。
+		id2 := provisionApprovalFixture(t, db, approvalFixture{Reason: "验收夹具：待审批可撤销"})
+		code4, data4, msg4, err := approvalDecision("/agent/approval/cancel", id2, "不用了")
+		if err != nil {
+			cc.t.Fatalf("%v", err)
+		}
+		if code4 != 200 {
+			cc.t.Fatalf("pending 单子撤销应 code=200，实际 %d msg=%q", code4, truncate(msg4, 160))
+		}
+		if got := asStr(asMap(data4["approval"])["status"]); got != "canceled" {
+			cc.t.Fatalf("撤销后状态应为 canceled，实际 %q", got)
+		}
+		if row := loadApprovalRow(t, db, id2); row.Status != "canceled" || row.ExecutedAt != 0 {
+			cc.t.Fatalf("撤销后的库内状态不符：%+v", row)
+		}
+		cc.note("不存在单号 code=1013；空单号 code=1001；已决策不可撤 code=1014；pending 撤销 code=200")
+	})
+
+	run("AC-24", "审批接口不可匿名调用（谁批的必须能追到人）", func(cc *caseCtx) {
+		anon := newClient(base)
+		status, env, err := anon.do(http.MethodPost, "/agent/approval/approve",
+			map[string]any{"approval_id": "ap-anonymous", "decided_by": "root"}, false)
+		if err != nil {
+			cc.t.Fatalf("请求失败: %v", err)
+		}
+		if status == http.StatusOK && env.Code == 200 {
+			cc.t.Fatalf("匿名请求竟能批准审批单（HTTP %d/code %d）", status, env.Code)
+		}
+		st2, env2, err := anon.do(http.MethodPost, "/agent/approval/search", map[string]any{}, false)
+		if err != nil {
+			cc.t.Fatalf("请求失败: %v", err)
+		}
+		if st2 == http.StatusOK && env2.Code == 200 {
+			cc.t.Fatalf("匿名请求竟能列出审批单（HTTP %d/code %d）", st2, env2.Code)
+		}
+		cc.note("匿名 approve：HTTP %d/code %d；匿名 search：HTTP %d/code %d",
+			status, env.Code, st2, env2.Code)
+	})
+
+	run("AC-25", "审计查询接口：决策可解释、字段可渲染、审批单可回溯", func(cc *caseCtx) {
+		data, err := c.postOK("/agent/audit/search", map[string]any{"page": 1, "page_size": 50})
+		if err != nil {
+			cc.t.Fatalf("查询审计失败: %v", err)
+		}
+		list := asSlice(data["list"])
+		total := int(asNum(data["total"]))
+		if total == 0 || len(list) == 0 {
+			cc.skip("审计表当前没有事实行（本环境尚未发生过工具调用）：审计查询的字段契约无从核对")
+		}
+		known := map[string]bool{"allowed": true, "denied": true, "approval_required": true, "approval_executed": true}
+		approvalLinked := 0
+		for _, item := range list {
+			m := asMap(item)
+			if asStr(m["audit_id"]) == "" || asStr(m["session_id"]) == "" || asStr(m["tool"]) == "" {
+				cc.t.Fatalf("审计行缺少可渲染的主键字段: %+v", m)
+			}
+			d := asStr(m["decision"])
+			if !known[d] {
+				cc.t.Fatalf("未知决策取值 %q（前端审计面板渲染不出来）", d)
+			}
+			if asStr(m["decision_text"]) == "" {
+				cc.t.Fatalf("决策必须带中文解释（前端只渲染不推断）: %+v", m)
+			}
+			if asStr(m["risk"]) == "" {
+				cc.t.Fatalf("审计行必须写明风险级别: %+v", m)
+			}
+			if d == "denied" || d == "approval_required" {
+				if asStr(m["reason"]) == "" {
+					cc.t.Fatalf("被拦/转审批的行必须写明是哪道闸拒的: %+v", m)
+				}
+			}
+			if asStr(m["approval_id"]) != "" {
+				approvalLinked++
+			}
+			if int64(asNum(m["created_ms"])) <= 0 {
+				cc.t.Fatalf("审计行时间必须双口径非零: %+v", m)
+			}
+		}
+		cc.note("total=%d，本页 %d 行全部字段自洽；其中带审批单号的行 %d 行（审批→执行可回溯）",
+			total, len(list), approvalLinked)
+	})
 }

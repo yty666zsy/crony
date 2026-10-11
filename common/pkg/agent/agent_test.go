@@ -35,7 +35,7 @@ func (f *fakeTool) Risk() tools.RiskLevel {
 	}
 	return tools.RiskWrite
 }
-func (f *fakeTool) Timeout() time.Duration     { return 5 * time.Second }
+func (f *fakeTool) Timeout() time.Duration { return 5 * time.Second }
 func (f *fakeTool) Execute(ctx context.Context, args map[string]interface{}) (tools.Result, error) {
 	return f.fn(ctx, args)
 }

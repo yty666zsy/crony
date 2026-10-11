@@ -1,8 +1,12 @@
 package models
 
 import (
+	"errors"
+	"strconv"
+	"strings"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"gorm.io/gorm"
 )
 
@@ -22,6 +26,13 @@ const (
 	ApprovalStatusCanceled        = "canceled"
 	ApprovalStatusExecuted        = "executed"
 	ApprovalStatusExecutionFailed = "execution_failed"
+	// ApprovalStatusBlocked 执行前复核未通过（工具下线 / 策略收紧 / 参数被改）。
+	//
+	// 为什么不复用 execution_failed："已执行但失败"与"根本没执行"是两件完全不同的事，
+	// 用一个状态表示会让 executed_at 变得不可信——而 executed_at 正是事后判断
+	// "这次动作到底有没有发生"的唯一依据（验收 AC-18 第一次跑就抓到了这个问题：
+	// 复核失败的行带上了非零 executed_at，等于凭空宣称"执行过了"）。
+	ApprovalStatusBlocked = "blocked"
 )
 
 // DefaultApprovalTTL 审批单默认有效期：超过它仍未决策就作废。
@@ -46,9 +57,16 @@ type ApprovalRequest struct {
 	SessionID string `json:"session_id" gorm:"size:128;column:session_id;not null;index:idx_approval_request_session"`
 	Tool      string `json:"tool" gorm:"size:64;column:tool;not null;index:idx_approval_request_tool"`
 	Risk      string `json:"risk" gorm:"size:16;column:risk;not null;default:'write'"`
-	// ArgsJSON 待执行参数（脱敏存档）；ArgsHash 是**同一份参数**的规范哈希。
+	// ArgsJSON 待执行参数（**原文**存档）；ArgsHash 是同一份参数的规范哈希。
+	//
+	// 为什么存原文而不是存脱敏后的文本：批准与执行之间必须能证明"执行的就是被批准的那件事"，
+	// 而哈希校验需要原文。一旦这里存的是被改写过的 JSON，自校验必然失败（要么永远执行不了，
+	// 要么把改写后的参数当成"原件"）。脱敏发生在**对外展示**这一层（接口返回时再脱敏），
+	// 而不是在存档层——审计表要留事实，展示层才做裁剪。
 	ArgsJSON string `json:"args_json" gorm:"type:text;column:args_json"`
 	ArgsHash string `json:"args_hash" gorm:"size:64;column:args_hash;not null;default:''"`
+	// RunID 关联的执行记录（诊断类会话）；审批执行时用它把审计行归到同一次运行上。
+	RunID string `json:"run_id" gorm:"size:128;column:run_id;default:'';index:idx_approval_request_run"`
 	// Reason 模型自述的"为什么要做这件事"（原样存档，不加工）。
 	Reason string `json:"reason" gorm:"type:text;column:reason"`
 	// TargetNode 目标节点；Impact 影响面的人类可读摘要（"1 个任务 / 1 台节点"）。
@@ -73,6 +91,12 @@ type ApprovalRequest struct {
 
 // TableName 实现 gorm 表名约定。
 func (a *ApprovalRequest) TableName() string { return CronyApprovalRequestTableName }
+
+// NewApprovalID 生成审批单号（形如 ap-<nano>）：不暴露自增 id，
+// 也不带时间格式之外的信息（单号本身不该泄漏"是谁提的"）。
+func NewApprovalID() string {
+	return "ap-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+}
 
 // CreateApprovalRequest 落一张待审批单。
 func CreateApprovalRequest(db *gorm.DB, a *ApprovalRequest) error {
@@ -128,14 +152,16 @@ func DecideApprovalRequest(db *gorm.DB, approvalID, toStatus, decidedBy, note st
 	if toStatus != ApprovalStatusApproved && toStatus != ApprovalStatusRejected && toStatus != ApprovalStatusCanceled {
 		return false, gorm.ErrInvalidValue
 	}
-	res := db.Table(CronyApprovalRequestTableName).
-		Where("approval_id = ? and status = ?", approvalID, ApprovalStatusPending).
-		Updates(map[string]interface{}{
-			"status":        toStatus,
-			"decided_by":    decidedBy,
-			"decided_at":    now,
-			"decision_note": note,
-		})
+	res := casUpdate(3, func() *gorm.DB {
+		return db.Table(CronyApprovalRequestTableName).
+			Where("approval_id = ? and status = ?", approvalID, ApprovalStatusPending).
+			Updates(map[string]interface{}{
+				"status":        toStatus,
+				"decided_by":    decidedBy,
+				"decided_at":    now,
+				"decision_note": note,
+			})
+	})
 	if res.Error != nil {
 		return false, res.Error
 	}
@@ -149,17 +175,79 @@ func MarkApprovalExecuted(db *gorm.DB, approvalID, status, result string, now in
 	if status != ApprovalStatusExecuted && status != ApprovalStatusExecutionFailed {
 		return false, gorm.ErrInvalidValue
 	}
-	res := db.Table(CronyApprovalRequestTableName).
-		Where("approval_id = ? and status = ?", approvalID, ApprovalStatusApproved).
-		Updates(map[string]interface{}{
-			"status":           status,
-			"executed_at":      now,
-			"execution_result": result,
-		})
+	res := casUpdate(3, func() *gorm.DB {
+		return db.Table(CronyApprovalRequestTableName).
+			Where("approval_id = ? and status = ?", approvalID, ApprovalStatusApproved).
+			Updates(map[string]interface{}{
+				"status":           status,
+				"executed_at":      now,
+				"execution_result": result,
+			})
+	})
 	if res.Error != nil {
 		return false, res.Error
 	}
 	return res.RowsAffected == 1, nil
+}
+
+// MarkApprovalBlocked 记录"执行前复核未通过"（approved → blocked），同样是 CAS。
+//
+// 与 MarkApprovalExecuted 的关键区别：**不动 executed_at**。
+// 复核未通过意味着动作从未交给执行器，写上执行时间戳等于伪造执行事实。
+func MarkApprovalBlocked(db *gorm.DB, approvalID, result string) (bool, error) {
+	res := casUpdate(3, func() *gorm.DB {
+		return db.Table(CronyApprovalRequestTableName).
+			Where("approval_id = ? and status = ?", approvalID, ApprovalStatusApproved).
+			Updates(map[string]interface{}{
+				"status":           ApprovalStatusBlocked,
+				"execution_result": result,
+			})
+	})
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected == 1, nil
+}
+
+// ---------------------------------------------------------------------------
+// 并发 CAS 的锁竞争处理
+//
+// 真库集成测试（TestIntegrationConcurrentApproveExecutesExactlyOnce）实测到：
+// 4 个并发"批准"打到同一张单子上时，MySQL 会对其中一条 CAS UPDATE 报
+//   Error 1213: Deadlock found when trying to get lock; try restarting transaction
+// 四分之一概率复现。后果不是数据错乱（赢家仍然只有一个），而是**输家看到的错误很奇怪**：
+// 运维同时点"批准"，其中一个看到的是"死锁"，完全不知道这张单子其实已经被处理了。
+//
+// 为什么重试是安全的：被重试的语句都是纯 CAS（where 里带 status 条件），
+// 重试不可能把"本该失败"的更新变成"成功"——别人赢了，where 就不再匹配。
+// 这跟"重试一次副作用"有本质区别，后者才是绝对不能做的。
+// ---------------------------------------------------------------------------
+
+// isRetryableLockErr 判断是否为 InnoDB 锁竞争（死锁 / 锁等待超时）。
+// 这两类错误的正确处置都是"重来一次"，而不是把它们上报成业务失败。
+func isRetryableLockErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var myErr *mysql.MySQLError
+	if errors.As(err, &myErr) {
+		return myErr.Number == 1213 || myErr.Number == 1205
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "deadlock") || strings.Contains(msg, "lock wait timeout")
+}
+
+// casUpdate 执行一条 CAS 语句，遇到锁竞争时最多重试三次（退避 10ms/20ms）。
+func casUpdate(attempts int, fn func() *gorm.DB) *gorm.DB {
+	if attempts < 1 {
+		attempts = 1
+	}
+	res := fn()
+	for attempt := 1; attempt < attempts && res.Error != nil && isRetryableLockErr(res.Error); attempt++ {
+		time.Sleep(time.Duration(attempt) * 10 * time.Millisecond)
+		res = fn()
+	}
+	return res
 }
 
 // ExpirePendingApprovals 把超时未决策的单子置为 expired，并**写下原因**（返回生效行数）。
@@ -169,12 +257,14 @@ func MarkApprovalExecuted(db *gorm.DB, approvalID, status, result string, now in
 // 原因文本必须自述"超时未决策"，不能只留 status——阶段 3 的 expired 不带原因已经吃过一次亏
 // （事后回看无法区分"没人处理"与"处理了但没生效"）。
 func ExpirePendingApprovals(db *gorm.DB, now int64) (int64, error) {
-	res := db.Table(CronyApprovalRequestTableName).
-		Where("status = ? and expires_at > 0 and expires_at <= ?", ApprovalStatusPending, now).
-		Updates(map[string]interface{}{
-			"status":        ApprovalStatusExpired,
-			"decision_note": "审批超时未决策（系统自动作废）：写动作的合理性依赖当时的现场，过期单子不允许再执行",
-		})
+	res := casUpdate(3, func() *gorm.DB {
+		return db.Table(CronyApprovalRequestTableName).
+			Where("status = ? and expires_at > 0 and expires_at <= ?", ApprovalStatusPending, now).
+			Updates(map[string]interface{}{
+				"status":        ApprovalStatusExpired,
+				"decision_note": "审批超时未决策（系统自动作废）：写动作的合理性依赖当时的现场，过期单子不允许再执行",
+			})
+	})
 	if res.Error != nil {
 		return 0, res.Error
 	}

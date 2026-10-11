@@ -27,6 +27,7 @@ import (
 	"unicode/utf8"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/tmnhs/crony/common/pkg/tools"
 )
 
 // ---------- 环境 ----------
@@ -426,6 +427,113 @@ func provisionRunFixtureAs(t *testing.T, db *sql.DB, suffix string, withSteps bo
 		}
 	})
 	return runID
+}
+
+// ---------- 审批单夹具（阶段 4.2） ----------
+
+// approvalFixture 审批单夹具的描述。
+//
+// 为什么需要直接造审批单：审批单的正常来源是"模型请求写动作"，而在
+// allow_write=false 的部署里模型拿不到写工具（这正是 AC-17 要验的事）。
+// 于是"审批生命周期"的接口用例必须自备前置条件——否则要么测不到，
+// 要么为了测试而临时打开写权限（那等于用被测对象的配置去迁就测试）。
+type approvalFixture struct {
+	SessionID string
+	Tool      string
+	// Args 存档参数（原文 JSON）；ArgsHash 为空时由 Args 现算。
+	Args     map[string]any
+	ArgsHash string
+	// HashForOther 非空时：存档 Args 但哈希按这份"另一组参数"算，
+	// 用于复现 TOCTOU（批准 A 执行 B）。
+	HashForOther map[string]any
+	// ExpiresIn 相对当前的到期时间（负值=已过期）。
+	ExpiresIn time.Duration
+	Status    string
+	Reason    string
+}
+
+// provisionApprovalFixture 写入一张审批单夹具并注册自清理（返回 approval_id）。
+//
+// 只写 approval_request 一张表；清理时按 approval_id 删除。
+// 哈希用被测代码里的 tools.ArgsHash：夹具必须是"格式合法"的记录，
+// 否则用例测到的会是"夹具写坏了"而不是被测行为。
+func provisionApprovalFixture(t *testing.T, db *sql.DB, spec approvalFixture) string {
+	t.Helper()
+	tag := strings.TrimSpace(os.Getenv("CRONY_ACC_RUN_TAG"))
+	if tag == "" {
+		tag = "acc-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	}
+	approvalID := "ap-" + tag + "-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	if spec.Tool == "" {
+		spec.Tool = "job_retry"
+	}
+	if spec.SessionID == "" {
+		spec.SessionID = "acceptance:" + tag
+	}
+	if spec.Status == "" {
+		spec.Status = "pending"
+	}
+	if spec.Args == nil {
+		spec.Args = map[string]any{"job_id": float64(910007), "reason": "验收夹具：确认重跑一次"}
+	}
+	if spec.Reason == "" {
+		spec.Reason = "验收夹具：模型自述的重跑理由（用于验证理由被原样存档）"
+	}
+	hash := spec.ArgsHash
+	if hash == "" {
+		if spec.HashForOther != nil {
+			hash = tools.ArgsHash(spec.HashForOther)
+		} else {
+			hash = tools.ArgsHash(spec.Args)
+		}
+	}
+	argsJSON, err := json.Marshal(spec.Args)
+	if err != nil {
+		t.Fatalf("夹具参数无法序列化: %v", err)
+	}
+	now := time.Now()
+	expiresAt := now.Add(spec.ExpiresIn).Unix()
+	if spec.ExpiresIn == 0 {
+		expiresAt = now.Add(15 * time.Minute).Unix()
+	}
+	if _, err := db.Exec(`insert into approval_request
+		(approval_id, session_id, tool, risk, args_json, args_hash, reason, target_node, impact,
+		 requested_by, status, decided_by, decided_at, decision_note, executed_at, execution_result,
+		 expires_at, created, created_ms, run_id)
+		values (?, ?, ?, 'write', ?, ?, ?, 'job:910007', '1 个任务 / 1 台节点',
+		 'diagnose', ?, '', 0, '', 0, '', ?, ?, ?, ?)`,
+		approvalID, spec.SessionID, spec.Tool, string(argsJSON), hash, spec.Reason,
+		spec.Status, expiresAt, now.Unix(), now.UnixMilli(), tag+"-approval-fixture"); err != nil {
+		t.Fatalf("造审批单夹具失败（验收库需要 INSERT 权限）: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := db.Exec("delete from approval_request where approval_id = ?", approvalID); err != nil {
+			t.Errorf("清理审批单夹具失败（验收库可能残留 %s）: %v", approvalID, err)
+		}
+	})
+	return approvalID
+}
+
+// approvalRow 审批单的读取结果（断言用）。
+type approvalRow struct {
+	Status          string
+	DecidedBy       string
+	DecisionNote    string
+	DecidedAt       int64
+	ExecutedAt      int64
+	ExecutionResult string
+}
+
+// loadApprovalRow 从库里读审批单（夹具与断言都走它，保证列口径一致）。
+func loadApprovalRow(t *testing.T, db *sql.DB, approvalID string) approvalRow {
+	t.Helper()
+	var out approvalRow
+	row := db.QueryRow(`select status, decided_by, decision_note, decided_at, executed_at, execution_result
+		from approval_request where approval_id = ?`, approvalID)
+	if err := row.Scan(&out.Status, &out.DecidedBy, &out.DecisionNote, &out.DecidedAt, &out.ExecutedAt, &out.ExecutionResult); err != nil {
+		t.Fatalf("读审批单 %s 失败: %v", approvalID, err)
+	}
+	return out
 }
 
 // ---------- 三态报告 ----------

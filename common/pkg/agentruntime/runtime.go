@@ -36,6 +36,12 @@ type Options struct {
 	Sources tools.Sources
 	// Observer 工具调用审计回调（可选）。
 	Observer tools.Observer
+	// WriteSources 写工具的执行实现（可选）。为 nil 时**不注册**写工具：
+	// 能力面里"没有写"比"有写但执行必失败"安全得多。
+	WriteSources tools.WriteSources
+	// Approver 审批单生成方（可选）。写工具需要审批而这里为 nil 时，
+	// 注册表按安全默认**拒绝**该次调用（fail closed），不会执行。
+	Approver tools.Approver
 	// NodeUUID 本进程所属节点（用于把会话关联到节点）；admin 侧可留空。
 	NodeUUID string
 }
@@ -56,9 +62,13 @@ func New(opts Options) (*Runtime, error) {
 		return nil, err
 	}
 	policy := opts.Policy.Normalize()
-	registry, err := tools.NewReadonlyRegistry(policy, opts.Sources, tools.WithObserver(opts.Observer))
+	registry, err := tools.NewReadonlyRegistry(policy, opts.Sources, tools.WithObserver(opts.Observer), tools.WithApprover(opts.Approver))
 	if err != nil {
 		return nil, fmt.Errorf("装配只读工具集失败: %w", err)
+	}
+	// 写工具是**可选增量**：策略没开或没有执行器时不注册（见 WriteSources 注释）。
+	if _, err := tools.RegisterWriteTools(registry, opts.WriteSources); err != nil {
+		return nil, fmt.Errorf("装配写工具失败: %w", err)
 	}
 	a := agent.New(rt.Gateway, registry, rt.Config)
 	return &Runtime{
@@ -84,6 +94,48 @@ func (r *Runtime) ToolNames() []string { return r.registry.AllowedNames() }
 
 // Policy 生效的工具策略（接口展示用）。
 func (r *Runtime) Policy() tools.Policy { return r.policy }
+
+// ConfigureWrites 后置装配写动作能力面（审批通道 + 重跑执行器）。
+//
+// 为什么需要后置装配（而不是全在 New 里塞进来）：
+// 审批通道（ApprovalService）本身**需要**拿到本运行时才能执行已批准的动作，
+// 而运行时又要拿到审批通道才能注册写工具——这是一个环。解法是：
+// New 先建只读能力面，再由装配层把"已建好的运行时"交给审批服务，
+// 最后用本方法把审批通道接回运行时。写工具在接入前**不存在**（模型看不到），
+// 接入后按策略决定是否真的注册。
+//
+// 返回实际注册的写工具名（空表示策略未开或没有执行器）。
+func (r *Runtime) ConfigureWrites(approver tools.Approver, src tools.WriteSources) ([]string, error) {
+	if r == nil || r.registry == nil {
+		return nil, fmt.Errorf("运行时未初始化")
+	}
+	r.registry.SetApprover(approver)
+	names, err := tools.RegisterWriteTools(r.registry, src)
+	if err != nil {
+		return names, fmt.Errorf("装配写工具失败: %w", err)
+	}
+	return names, nil
+}
+
+// WritesEnabled 当前是否已装配写动作能力（控制台/接口如实展示用）。
+func (r *Runtime) WritesEnabled() bool {
+	if r == nil || r.registry == nil {
+		return false
+	}
+	return r.registry.HasWriteTools()
+}
+
+// ExecuteApprovedTool 执行一个已获人工批准的写动作（审批控制面的执行方接口）。
+//
+// 它**只**转发到 tools.Registry.ExecuteApproved：审批执行不允许有第二条执行路径，
+// 否则"审批后到底发生了什么"就没有唯一答案。
+func (r *Runtime) ExecuteApprovedTool(ctx context.Context, meta tools.RunMeta, sessionID, tool string,
+	args map[string]interface{}, approvalID string) (tools.Result, error) {
+	if r == nil || r.registry == nil {
+		return tools.Result{}, fmt.Errorf("运行时未初始化")
+	}
+	return r.registry.ExecuteApproved(r.runContext(ctx, meta), sessionID, tool, args, approvalID)
+}
 
 // Agent 底层 Agent（测试与高级调用用）。
 func (r *Runtime) Agent() *agent.Agent { return r.agent }

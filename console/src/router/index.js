@@ -178,6 +178,17 @@ const routes = [
     component: () => import('@/views/AuditView.vue'),
     meta: { title: 'Audit Trail', subtitle: '审计日志 · 谁在何时对什么做了什么（Mock）', group: 'AI Agent', icon: 'Files' },
   },
+  {
+    path: '/approvals',
+    name: 'approvals',
+    component: () => import('@/views/ApprovalsView.vue'),
+    meta: {
+      title: 'Approvals',
+      subtitle: '写动作审批台 · 一次批准至多执行一次',
+      group: 'AI Agent',
+      icon: 'CircleCheck',
+    },
+  },
 
   /* ----------------------------- System ------------------------- */
   {

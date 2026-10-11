@@ -377,9 +377,9 @@ func draftView(d agent.JobDraft, sessionID string) agentDraftView {
 // ---------- 工具清单（契约 §4） ----------
 
 type agentToolView struct {
-	Name        string      `json:"name"`
-	Description string      `json:"description"`
-	Readonly    bool        `json:"readonly"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Readonly    bool   `json:"readonly"`
 	// Risk 风险级别（阶段 4）：read/write/destructive。
 	// 与 readonly 不是冗余：`readonly` 只说"有没有副作用"，
 	// `risk` 还说"副作用可不可逆"——重启主机与重跑任务在这两个字段上才分得开。

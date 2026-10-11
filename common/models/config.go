@@ -12,7 +12,7 @@ const (
 	CronyAgentSessionTable = CronyAgentSessionTableName
 	CronyAgentStepTable    = CronyAgentStepTableName
 	// 阶段 4：工具调用审计（append-only）与写动作审批。定义在各自文件，这里统一索引。
-	CronyAgentToolAuditTable = CronyAgentToolAuditTableName
+	CronyAgentToolAuditTable  = CronyAgentToolAuditTableName
 	CronyApprovalRequestTable = CronyApprovalRequestTableName
 )
 

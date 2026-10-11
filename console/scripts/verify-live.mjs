@@ -95,6 +95,8 @@ try {
     auth: await server.ssrLoadModule('/src/api/auth.js'),
     agent: await server.ssrLoadModule('/src/api/agent.js'),
     stream: await server.ssrLoadModule('/src/api/stream.js'),
+    // 阶段 4.2：写动作审批台走的是 api/approval.js，与页面同一条链路。
+    approval: await server.ssrLoadModule('/src/api/approval.js'),
   }
 } catch (err) {
   console.error('加载控制台 API 模块失败:', err?.message || err)
@@ -319,6 +321,71 @@ if (!SKIP_MODEL_WRITE) {
   }
 } else {
   console.log('SKIP  nljob/draft + confirm（CRONY_LIVE_SKIP_WRITE=1）')
+}
+
+// ---------------------------------------------------------------------------
+// 阶段 4.2) 写动作审批台：走控制台自己的 api/approval.js（真链路，不是直连 curl）
+//
+// 这一节**不制造任何审批单**：造单要用写工具，而本机部署是只读策略
+// （allow_write=false），写能力面里根本没有 job_retry。
+// 所以这里验的是"接口存在、契约正确、封死的那一侧真的封死"：
+//   - search 返回分页结构，且当前策略下不会有任何写动作单子；
+//   - 不存在的单号 → 1013（错误码必须与前端 dict 一致，否则提示走错分支）；
+//   - 审批接口对未知单号一律 1013，说明服务装配正常（而不是 1007/1011）；
+//   - 审计接口能返回真实流水，且决策枚举都在已知集合内。
+// ---------------------------------------------------------------------------
+{
+  const SAFE_DECISIONS = new Set(['allowed', 'denied', 'approval_required', 'approval_executed'])
+
+  const apSearch = await step('POST /agent/approval/search', () =>
+    mods.approval.searchApprovals({ page: 1, page_size: 20 }),
+  )
+  if (apSearch.ok) {
+    const r = apSearch.value || {}
+    check(
+      'POST /agent/approval/search 返回分页结构且无写动作单子（只读部署的应有形态）',
+      Array.isArray(r.list) && typeof r.total === 'number' && r.total === 0,
+      `total=${r.total} page=${r.page} size=${r.page_size}`,
+    )
+  }
+
+  for (const [name, fn] of [
+    ['POST /agent/approval/find', () => mods.approval.findApproval('ap-live-verify-none')],
+    ['POST /agent/approval/approve', () => mods.approval.approveApproval('ap-live-verify-none', '联调自检')],
+    ['POST /agent/approval/reject', () => mods.approval.rejectApproval('ap-live-verify-none', '联调自检')],
+    ['POST /agent/approval/cancel', () => mods.approval.cancelApproval('ap-live-verify-none', '联调自检')],
+  ]) {
+    // 这里**故意不用 step()**：step() 会把抛错直接记成一条 FAIL，
+    // 而本节要验的正是"被拒绝"——失败是期望结果，必须自己接住并断言错误码。
+    let code = null
+    let msg = ''
+    let unexpected = ''
+    try {
+      const v = await fn()
+      unexpected = summary(v)
+    } catch (err) {
+      code = err?.code
+      msg = err?.message || String(err)
+    }
+    check(
+      `${name} 对不存在的单号返回 1013（服务已装配、错误码可区分）`,
+      !unexpected && code === 1013,
+      unexpected ? `意外成功：${unexpected}` : `code=${code} msg=${summary(msg, 80)}`,
+    )
+  }
+
+  const auditSearch = await step('POST /agent/audit/search', () =>
+    mods.approval.searchToolAudit({ page: 1, page_size: 20 }),
+  )
+  if (auditSearch.ok) {
+    const r = auditSearch.value || {}
+    const bad = (r.list || []).filter((x) => !SAFE_DECISIONS.has(x.decision) || !x.decision_text || !x.risk)
+    check(
+      'POST /agent/audit/search 返回工具网关流水（决策枚举与中文解释齐全）',
+      Array.isArray(r.list) && typeof r.total === 'number' && bad.length === 0,
+      `total=${r.total} 本页=${r.list?.length} 决策=[${[...new Set((r.list || []).map((x) => x.decision))].join(',')}]`,
+    )
+  }
 }
 
 await server.close()

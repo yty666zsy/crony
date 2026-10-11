@@ -40,6 +40,8 @@ import {
   agentSessionDetails,
   agentSessions,
   agentToolPolicy,
+  approvalRequests,
+  toolAuditRows,
   agentTools,
   rfc3339,
   specTriggers,
@@ -758,3 +760,98 @@ export function changePassword({ username, old_pw: oldPw, new_pw: newPw }) {
 }
 
 export { runSteps }
+/* ==========================================================================
+ * 阶段 4.2：写动作审批 + 工具调用审计（与 admin/internal/handler/agent_approval.go 同契约）
+ *
+ * Mock 的职责是"让页面在没有后端时也能把状态看全"，所以：
+ *   - 六种状态都有样例（pending/executed/execution_failed/blocked/rejected/expired）；
+ *   - 决策接口只动内存里的那一行，且**复刻后端的业务码**：
+ *       pending 之外的单子再决策 → 1014（状态已变更）；
+ *       blocked/expired 的单子 → 1015/1014；
+ *       找不到单号 → 1013。
+ *     前端因此不能在 Mock 模式下"点什么成什么"——错误分支必须真的走一遍，
+ *     否则真实联调时才发现提示文案不对就晚了。
+ * ========================================================================== */
+
+/** 把审批行按"现在"重新算剩余秒数（样例数据是相对时间生成的）。 */
+function approvalView(row) {
+  const remain = row.status === 'pending' ? Math.max(0, row.expires_at - NOW_SECONDS) : 0
+  return { ...row, remain_seconds: remain }
+}
+
+function nowSeconds() {
+  return Math.floor(Date.now() / 1000)
+}
+
+const NOW_SECONDS = nowSeconds()
+
+/** POST /agent/approval/search */
+export function approvalSearch(params = {}) {
+  const { page, pageSize } = normalizePage(params)
+  let list = approvalRequests.map(approvalView)
+  if (params.status) list = list.filter((r) => r.status === params.status)
+  if (params.tool) list = list.filter((r) => includes(r.tool, params.tool))
+  if (params.target_node) list = list.filter((r) => includes(r.target_node, params.target_node))
+  // 待审批在前（与人处理顺序一致），其余按创建时间倒序。
+  list.sort((a, b) => (a.status === 'pending' ? -1 : 0) - (b.status === 'pending' ? -1 : 0) || b.created - a.created)
+  return { code: 200, data: paginate(list, { page, pageSize }), msg: 'operation success' }
+}
+
+/** POST /agent/approval/find */
+export function approvalFind({ approval_id: approvalId } = {}) {
+  const row = approvalRequests.find((r) => r.approval_id === approvalId)
+  if (!row) return bizErr(1013, '审批单不存在（Mock）')
+  return { code: 200, data: { found: true, approval: approvalView(row) }, msg: 'operation success' }
+}
+
+/**
+ * approve / reject / cancel 三个动作共用一个处理器（与后端 decide() 同形状）。
+ * action: 'approve' | 'reject' | 'cancel'
+ */
+export function approvalDecide({ approval_id: approvalId, note, action } = {}) {
+  const row = approvalRequests.find((r) => r.approval_id === approvalId)
+  if (!row) return bizErr(1013, '审批单不存在（Mock）')
+  if (row.status !== 'pending') {
+    // 复刻后端：只有 pending 能被决策（CAS 语义）。
+    return bizErr(1014, `审批单状态已变更（当前 ${row.status_text || row.status}），本次决策未生效`)
+  }
+  if (action === 'reject') {
+    row.status = 'rejected'
+    row.status_text = '已驳回'
+    row.decided_by = 'admin'
+    row.decided_at = nowSeconds()
+    row.decision_note = note || ''
+    row.remain_seconds = 0
+    return { code: 200, data: { executed: false, approval: approvalView(row) }, msg: '已驳回（未执行任何动作）' }
+  }
+  if (action === 'cancel') {
+    row.status = 'canceled'
+    row.status_text = '已撤销'
+    row.decided_by = 'admin'
+    row.decided_at = nowSeconds()
+    row.decision_note = note || ''
+    row.remain_seconds = 0
+    return { code: 200, data: { executed: false, approval: approvalView(row) }, msg: '已撤销' }
+  }
+  // 批准：Mock 里"执行成功"。真实环境这里是**真的会动手**的一步。
+  row.status = 'executed'
+  row.status_text = '已执行'
+  row.decided_by = 'admin'
+  row.decided_at = nowSeconds()
+  row.decision_note = note || ''
+  row.executed_at = nowSeconds()
+  row.execution_result = '（Mock）已执行：真实环境这里会向原节点投递一次重跑'
+  row.executed = true
+  row.remain_seconds = 0
+  return { code: 200, data: { executed: true, approval: approvalView(row) }, msg: '已批准并执行（一次批准一次执行）' }
+}
+
+/** POST /agent/audit/search —— 工具网关审计（decision ∈ allowed/denied/approval_required/approval_executed） */
+export function toolAuditSearch(params = {}) {
+  const { page, pageSize } = normalizePage(params)
+  let list = [...toolAuditRows]
+  if (params.session_id) list = list.filter((r) => includes(r.session_id, params.session_id))
+  if (params.tool) list = list.filter((r) => includes(r.tool, params.tool))
+  if (params.decision) list = list.filter((r) => r.decision === params.decision)
+  return { code: 200, data: paginate(list, { page, pageSize }), msg: 'operation success' }
+}
