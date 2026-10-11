@@ -347,6 +347,14 @@ type NodeStatus struct {
 	DiskPercent   float64   `json:"disk_percent"`
 	LoadAvg       string    `json:"load_avg"`
 	Version       string    `json:"version"`
+	// 容量信息：只有百分比时模型无法判断"90% 是 4GB 里的 90% 还是 512GB 里的 90%"，
+	// 而"要不要扩容/能不能再派任务"恰恰取决于绝对量。零值表示节点没上报这一项。
+	CPUCores    int    `json:"cpu_cores"`
+	MemTotalMB  int64  `json:"mem_total_mb"`
+	MemUsedMB   int64  `json:"mem_used_mb"`
+	DiskTotalMB int64  `json:"disk_total_mb"`
+	DiskFreeMB  int64  `json:"disk_free_mb"`
+	DiskPath    string `json:"disk_path"`
 	// CollectedAt 是资源水位的**采集时间**；零值表示该节点尚未上报采集数据。
 	//
 	// 为什么必须有这个字段：CPUPercent/MemPercent/DiskPercent 是 float64，
@@ -372,7 +380,7 @@ func (t *NodeStatusTool) Name() string { return "node_status" }
 
 // Description 实现 Tool。
 func (t *NodeStatusTool) Description() string {
-	return "查询 crony 节点的在线状态、心跳时间、正在运行的任务数与资源水位（CPU/内存/磁盘）。"
+	return "查询 crony 节点的在线状态、心跳时间、正在运行的任务数与资源水位（CPU/内存/磁盘占用率与容量）。"
 }
 
 // Schema 实现 Tool。
@@ -408,6 +416,9 @@ func (t *NodeStatusTool) Execute(ctx context.Context, args map[string]interface{
 	if !st.CollectedAt.IsZero() {
 		metrics = fmt.Sprintf("资源水位：cpu=%.1f%% mem=%.1f%% disk=%.1f%% load=%s（采集于 %s）",
 			st.CPUPercent, st.MemPercent, st.DiskPercent, firstNonEmpty(st.LoadAvg, "—"), formatTime(st.CollectedAt))
+		if cap := formatCapacity(st); cap != "" {
+			metrics += "；容量：" + cap
+		}
 		metricsShort = fmt.Sprintf("cpu=%.1f%% mem=%.1f%% disk=%.1f%%", st.CPUPercent, st.MemPercent, st.DiskPercent)
 	}
 	output := strings.Join([]string{
@@ -431,7 +442,51 @@ func (t *NodeStatusTool) Execute(ctx context.Context, args map[string]interface{
 				online, formatTime(st.LastHeartbeat), st.RunningJobs, metricsShort),
 		}},
 	}
+	if !st.CollectedAt.IsZero() {
+		// 容量进 Meta：控制台/后续的图表不必再解析中文输出。
+		// 逐项判 >0 再写：旧版节点只上报百分比，若把 0 也写进去，
+		// 前端会把"没有这项数据"显示成"0 核 / 0GB"。
+		if st.CPUCores > 0 {
+			res.Meta["cpu_cores"] = st.CPUCores
+		}
+		if st.MemTotalMB > 0 {
+			res.Meta["mem_total_mb"] = st.MemTotalMB
+			res.Meta["mem_used_mb"] = st.MemUsedMB
+		}
+		if st.DiskTotalMB > 0 {
+			res.Meta["disk_total_mb"] = st.DiskTotalMB
+			res.Meta["disk_free_mb"] = st.DiskFreeMB
+			res.Meta["disk_path"] = st.DiskPath
+		}
+	}
 	return res, nil
+}
+
+// formatCapacity 渲染容量信息；节点没上报容量字段时返回空串（不写"0 核 0MB"）。
+//
+// 与水位同一条纪律：**没有数据就不许编**。旧版本节点只上报百分比，
+// 这时多写一句"内存 0MB"会让模型以为节点内存是 0。
+func formatCapacity(st NodeStatus) string {
+	parts := make([]string, 0, 3)
+	if st.CPUCores > 0 {
+		parts = append(parts, fmt.Sprintf("%d 核", st.CPUCores))
+	}
+	if st.MemTotalMB > 0 {
+		s := fmt.Sprintf("内存 %.1fGB", float64(st.MemTotalMB)/1024)
+		if st.MemUsedMB > 0 {
+			s += fmt.Sprintf("（已用 %.1fGB，剩 %.1fGB）",
+				float64(st.MemUsedMB)/1024, float64(st.MemTotalMB-st.MemUsedMB)/1024)
+		}
+		parts = append(parts, s)
+	}
+	if st.DiskTotalMB > 0 {
+		s := fmt.Sprintf("磁盘 %s 合计 %.1fGB", firstNonEmpty(st.DiskPath, "—"), float64(st.DiskTotalMB)/1024)
+		if st.DiskFreeMB > 0 || st.DiskTotalMB > 0 {
+			s += fmt.Sprintf("，可用 %.1fGB", float64(st.DiskFreeMB)/1024)
+		}
+		parts = append(parts, s)
+	}
+	return strings.Join(parts, " / ")
 }
 
 // ---------------------------------------------------------------------------

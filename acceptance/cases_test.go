@@ -82,7 +82,12 @@ func TestAcceptanceSuite(t *testing.T) {
 	loginErr := c.login(user, pass)
 	db := openDB(t)
 	if db != nil {
-		defer db.Close()
+		// 用 t.Cleanup 而不是 defer 关连接：Go 里 defer 先于 t.Cleanup 执行，
+		// 而夹具清理是在 t.Cleanup 里注册的——若这里 defer 关库，
+		// 夹具清理就会撞上"database is closed"，**静默留下脏数据**
+		// （实测过：3 条 run 夹具 + 6 条步骤残留）。Cleanup 是后进先出，
+		// 这里先注册关库，夹具清理（后注册）就能先跑。
+		t.Cleanup(func() { db.Close() })
 	}
 
 	// 用例间共享的事实（顺序执行，t.Run 不并行）。
@@ -90,6 +95,29 @@ func TestAcceptanceSuite(t *testing.T) {
 		lastSession      string
 		lastDraftSession string
 	)
+
+	// ---------- 前置夹具：一条**真实终态**的执行记录 ----------
+	//
+	// AC-06（SSE 终态）与 AC-07/08/09/15（诊断正路径）都需要一条已结束的 job_run。
+	// 这条记录有两种来源：
+	//   1) 调用方通过 CRONY_ACC_RUN_ID 指定（例如刚跑过一次真任务）；
+	//   2) 没有指定时**由本程序自建夹具**（跑完自删）。
+	//
+	// 为什么必须支持自建：验收要"一条命令可复跑"。此前这两个用例依赖一个只在
+	// 开发机上存在过的 run_id，换台机器后就会直接 FAIL（或更糟：悄悄 SKIP），
+	// 而"从生产 API 读一条真实终态运行记录"这件事本身与此无关。
+	//
+	// 夹具只写 job_run/job_run_step（admin 侧的诊断正是从这两张表取材料，
+	// 见 common/pkg/agentruntime/loadrun.go），不碰 job 表，避免污染任务列表。
+	runRecordSource := "环境变量 CRONY_ACC_RUN_ID（调用方提供）"
+	if runID == "" && db != nil {
+		runID = provisionRunFixture(t, db)
+		runRecordSource = "本程序自建夹具（跑完自删）"
+	} else if runID == "" {
+		runRecordSource = "不可用（既没有 CRONY_ACC_RUN_ID，也没有可写数据库）"
+	}
+	rep.fact("诊断/SSE 使用的 run 记录：%s（run_id=%s）", runRecordSource,
+		map[bool]string{true: runID, false: "（无）"}[runID != ""])
 
 	// ---------- 平台面：鉴权 / 能力面 / 检索 ----------
 
@@ -194,7 +222,7 @@ func TestAcceptanceSuite(t *testing.T) {
 
 	run("AC-06", "SSE 真实执行：能观测到 snapshot/step 与终态 end", func(cc *caseCtx) {
 		if runID == "" {
-			cc.skip("CRONY_ACC_RUN_ID 未设置：无法验收真实执行的流式终态")
+			cc.skip("没有可用的 run 记录（既未设置 CRONY_ACC_RUN_ID，也没有可写验收库来自建夹具）：无法验收真实执行的流式终态")
 		}
 		res, err := c.sse("/job/run/stream?run_id="+url.QueryEscape(runID)+"&interval_ms=1000", sseRun)
 		if err != nil {
@@ -210,7 +238,7 @@ func TestAcceptanceSuite(t *testing.T) {
 
 	run("AC-07", "诊断正路径（真模型）：有模型调用、有工具轨迹、有结构化结论", func(cc *caseCtx) {
 		if runID == "" {
-			cc.skip("CRONY_ACC_RUN_ID 未设置：无法验收真实诊断")
+			cc.skip("没有可用的 run 记录（既未设置 CRONY_ACC_RUN_ID，也没有可写验收库来自建夹具）：无法验收真实诊断")
 		}
 		data, err := c.postOK("/agent/diagnosis/run", map[string]any{
 			"run_id": runID, "force": true, "goal": "排查失败原因，并确认端口监听状态",
@@ -512,22 +540,67 @@ func TestAcceptanceSuite(t *testing.T) {
 			"另有 %d/%d 条更早的历史行缺少原因文本（来自旧版本进程，不计入本次判定）", legacyNoReason, n-1)
 	})
 
-	run("AC-14", "节点资源水位：node_metric 有真数据且可归属节点", func(cc *caseCtx) {
+	run("AC-14", "节点资源水位：目标节点有新鲜的真数据（含容量）", func(cc *caseCtx) {
 		if db == nil {
-			cc.skip("CRONY_TEST_MYSQL_DSN 未配置")
+			cc.skip("CRONY_TEST_MYSQL_DSN 未配置：无法读取 node_metric")
 		}
-		var count int
-		var newest sql.NullString
-		if err := db.QueryRow("select count(*), max(node_uuid) from node_metric").Scan(&count, &newest); err != nil {
+		// 只看**目标节点**这一行：别的节点的旧数据不能拿来给本次通过背书。
+		var (
+			rows      int
+			uuid      string
+			collected int64
+			cpu       float64
+			mem       float64
+			disk      float64
+			cores     int
+			memTotal  int64
+			diskTotal int64
+		)
+		err := db.QueryRow(`select count(*) from node_metric where node_uuid = ?`, nodeUUID).Scan(&rows)
+		if err != nil {
 			cc.t.Fatalf("查询 node_metric 失败: %v", err)
 		}
-		if count == 0 {
-			cc.skip("node_metric 仍为 0 行：节点水位发布器尚未实现（阶段 3 剩余项），本轮没有水位数据可验收")
+		if rows == 0 {
+			cc.skip(fmt.Sprintf("node_metric 里没有节点 %s 的水位行：节点侧水位发布器没在跑"+
+				"（阶段 3 收尾项，AC-14 专门盯它；跳过不等于通过）", nodeUUID))
 		}
-		if strings.TrimSpace(newest.String) == "" {
-			cc.t.Fatal("node_metric 有行但 node_uuid 为空")
+		err = db.QueryRow(`select node_uuid, collected_at, cpu_percent, mem_percent, disk_percent,
+				cpu_cores, mem_total_mb, disk_total_mb
+			from node_metric where node_uuid = ? order by id desc limit 1`, nodeUUID).
+			Scan(&uuid, &collected, &cpu, &mem, &disk, &cores, &memTotal, &diskTotal)
+		if err != nil {
+			cc.t.Fatalf("读取节点水位失败: %v", err)
 		}
-		cc.note("node_metric %d 行；示例 node_uuid=%s（目标节点 %s）", count, newest.String, nodeUUID)
+		if strings.TrimSpace(uuid) == "" {
+			cc.t.Fatal("node_metric 有行但 node_uuid 为空，水位无法归属")
+		}
+		// collected_at 单位必须能被读取方正确还原（admin 按 Unix 秒）。
+		now := time.Now()
+		freshness := now.Sub(time.Unix(collected, 0))
+		if collected <= 0 || freshness < -2*time.Minute || freshness > 10*time.Minute {
+			cc.t.Fatalf("collected_at=%d 不是「刚刚采集」的时间（距今 %s）："+
+				"要么发布器没在跑，要么写入方与读取方对时间单位理解不同", collected, freshness.Round(time.Second))
+		}
+		for _, p := range []struct {
+			name string
+			v    float64
+		}{{"cpu_percent", cpu}, {"mem_percent", mem}, {"disk_percent", disk}} {
+			if p.v < 0 || p.v > 100 {
+				cc.t.Fatalf("%s=%.2f 不在 0~100 之间：水位不是真采集出来的", p.name, p.v)
+			}
+		}
+		// 容量：只有百分比时模型无法判断"90% 是 4GB 还是 512GB"，所以容量必须有真值。
+		if cores <= 0 || memTotal <= 0 || diskTotal <= 0 {
+			cc.t.Fatalf("容量字段为 0（cores=%d mem_total_mb=%d disk_total_mb=%d）："+
+				"要么采集失败却照样落库（伪造 0），要么发布器没带容量", cores, memTotal, diskTotal)
+		}
+		// 全零水位是最典型的"假数据"：真机上 CPU/内存/磁盘不可能是三个 0。
+		if cpu == 0 && mem == 0 && disk == 0 {
+			cc.t.Fatal("cpu/mem/disk 全为 0：这是伪造的假水位，不是真采集")
+		}
+		cc.note("节点 %s 水位采集于 %s（距今 %s）：cpu=%.2f%% mem=%.2f%% disk=%.2f%%；"+
+			"容量 %d 核 / 内存 %dMB / 磁盘 %dMB", uuid, time.Unix(collected, 0).Format("15:04:05"),
+			freshness.Round(time.Second), cpu, mem, disk, cores, memTotal, diskTotal)
 	})
 
 	run("AC-15", "会话详情契约字段齐全（控制台回放面板依赖）", func(cc *caseCtx) {
@@ -553,9 +626,21 @@ func TestAcceptanceSuite(t *testing.T) {
 			cc.t.Fatalf("控制台契约字段缺失: %v", missing)
 		}
 		stats := asMap(detail["tool_stats"])
-		if _, ok := stats["per_tool"]; !ok {
-			cc.t.Fatal("tool_stats 缺少 per_tool")
+		perToolRaw, ok := stats["per_tool"]
+		if !ok {
+			cc.t.Fatal("tool_stats 缺少 per_tool（控制台分布面板依赖它；即使没调工具也必须是 {}）")
 		}
-		cc.note("%d 个契约字段齐全；tool_stats=%v；budget=%v", len(required), stats, asMap(detail["budget"]))
+		// per_tool 与 calls 必须自洽：只报总数、不报分布（或反之）都会让
+		// "模型到底用了哪些工具"变成不可核对的说法。
+		sum := 0
+		for _, v := range asMap(perToolRaw) {
+			sum += int(asNum(v))
+		}
+		calls := int(asNum(stats["calls"]))
+		if sum != calls {
+			cc.t.Fatalf("tool_stats 自洽性检查失败：per_tool 合计=%d 但 calls=%d（per_tool=%v）", sum, calls, perToolRaw)
+		}
+		cc.note("%d 个契约字段齐全；tool_stats=%v；per_tool 计数与 calls 自洽（合计 %d）；budget=%v",
+			len(required), stats, sum, asMap(detail["budget"]))
 	})
 }

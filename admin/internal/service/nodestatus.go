@@ -74,6 +74,13 @@ func (s *NodeStatusSource) NodeStatus(ctx context.Context, nodeUUID string) (too
 		st.MemPercent = m.MemPercent
 		st.DiskPercent = m.DiskPercent
 		st.LoadAvg = m.LoadAvg
+		// 容量信息一起带出去：只给百分比，模型没法判断"90% 是 4GB 还是 512GB"。
+		st.CPUCores = m.CPUCores
+		st.MemTotalMB = m.MemTotalMB
+		st.MemUsedMB = m.MemUsedMB
+		st.DiskTotalMB = m.DiskTotalMB
+		st.DiskFreeMB = m.DiskFreeMB
+		st.DiskPath = m.DiskPath
 		if m.CollectedAt > 0 {
 			st.CollectedAt = time.Unix(m.CollectedAt, 0)
 		}

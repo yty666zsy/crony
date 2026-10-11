@@ -107,11 +107,15 @@ type evidenceView struct {
 }
 
 type agentToolStatsView struct {
-	Calls     int            `json:"calls"`
-	Denied    int            `json:"denied"`
-	Truncated int            `json:"truncated"`
-	Remaining int            `json:"remaining"`
-	PerTool   map[string]int `json:"per_tool,omitempty"`
+	Calls     int `json:"calls"`
+	Denied    int `json:"denied"`
+	Truncated int `json:"truncated"`
+	Remaining int `json:"remaining"`
+	// PerTool 不加 omitempty：控制台的回放面板要按工具名渲染分布，
+	// "没有工具调用"应当是 `per_tool: {}`，而不是**字段消失**——
+	// 字段消失会让前端无法区分"这次没调工具"和"服务端版本不支持"，
+	// 也会让契约类验收用例时红时绿（取决于本轮模型用没用工具）。
+	PerTool map[string]int `json:"per_tool"`
 }
 
 type agentStepView struct {
@@ -593,6 +597,14 @@ func orEmpty(in []string) []string {
 func orEmptyStrings(in []string) []string {
 	if in == nil {
 		return []string{}
+	}
+	return in
+}
+
+// orEmptyIntMap 把 nil map 归一成空 map：JSON 里 `null` 与 `{}` 对前端不是一回事。
+func orEmptyIntMap(in map[string]int) map[string]int {
+	if in == nil {
+		return map[string]int{}
 	}
 	return in
 }

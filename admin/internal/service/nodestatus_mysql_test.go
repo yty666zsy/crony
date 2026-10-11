@@ -120,6 +120,12 @@ func TestIntegrationNodeStatusSourceAgainstRealMySQL(t *testing.T) {
 	if st.CollectedAt.Unix() != now+5 {
 		t.Fatalf("采集时间不符: %v", st.CollectedAt)
 	}
+	// 容量必须一起带出来：只有百分比时模型无法判断"90% 是 4GB 里的还是 512GB 里的"，
+	// 而"要不要扩容"恰好取决于绝对量（阶段 3 收尾补的字段）。
+	if st.CPUCores != 8 || st.MemTotalMB != 16384 || st.MemUsedMB != 10362 ||
+		st.DiskTotalMB != 51200 || st.DiskFreeMB != 2304 || st.DiskPath != "/" {
+		t.Fatalf("容量字段没有从 node_metric 传到 node_status: %+v", st)
+	}
 
 	// 3) 未知节点：必须报"不存在"，不能返回一个空快照（那会让模型以为节点在线但没数据）
 	if _, err := src.NodeStatus(context.Background(), tag+"-ghost"); err == nil ||

@@ -41,7 +41,10 @@ type NodeMetric struct {
 	// DiskPath 是上面磁盘水位对应的挂载点/路径（例如 "/" 或 "C:\"）。
 	DiskPath string `json:"disk_path" gorm:"size:255;column:disk_path;default:''"`
 	// UptimeSec 节点**进程**已运行秒数（不是 OS uptime）：节点刚重启过是重要的诊断线索。
-	UptimeSec   int64 `json:"uptime_sec" gorm:"column:uptime_sec;default:0"`
+	UptimeSec int64 `json:"uptime_sec" gorm:"column:uptime_sec;default:0"`
+	// CollectedAt 是本次采集时刻，单位 **Unix 秒**（与 node.up_time 一致；
+	// 注意本项目的 node_probe_request.*_at 用的是毫秒，两者不要混）。
+	// 读取方靠它区分"未上报（0）"与"上报为零"，所以写库时绝不能漏写。
 	CollectedAt int64 `json:"collected_at" gorm:"column:collected_at;not null;default:0;index:idx_node_metric_collected"`
 }
 

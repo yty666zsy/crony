@@ -19,10 +19,12 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	_ "github.com/go-sql-driver/mysql"
 )
@@ -242,11 +244,23 @@ func asBool(v any) bool {
 	return b
 }
 
+// truncate 按字节截断，但**不切断多字节字符**。
+//
+// 为什么较真：验收报告是给人看的交付物，一个被切半的汉字会让整个文件变成
+// 非法 UTF-8，编辑器与流水线都打不开（实测：报告第 1831 字节出现悬挂的 E6，
+// 严格 UTF-8 解码直接失败）。common/pkg/llm.Truncate 早就是这么做的，这里以前漏了。
 func truncate(s string, n int) string {
-	if len(s) <= n {
+	if n <= 0 || len(s) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	cut := n
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	if cut <= 0 {
+		return "…"
+	}
+	return s[:cut] + "…"
 }
 
 // ---------- 只读 SQL ----------
@@ -279,6 +293,83 @@ func redactDSN(dsn string) string {
 		return dsn[:colon+1] + "***" + dsn[at:]
 	}
 	return dsn
+}
+
+// provisionRunFixture 造一条**真实终态**的失败执行记录，供 SSE 与诊断用例使用。
+//
+// 为什么允许这里写库：验收必须能自己准备前置条件。AC-06/AC-07 要验的是
+// "从生产 API 读取一条已结束的执行并流式/诊断它"，而不是"某个 run_id 恰好存在"。
+// 夹具只写 job_run + job_run_step（诊断材料来源见 common/pkg/agentruntime/loadrun.go），
+// 不写 job 表；测试结束自动删除，不留脏数据。
+//
+// 返回夹具的 run_id；清理逻辑通过 t.Cleanup 注册。
+func provisionRunFixture(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	tag := strings.TrimSpace(os.Getenv("CRONY_ACC_RUN_TAG"))
+	if tag == "" {
+		tag = "acc-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	}
+	runID := tag + "-run"
+	now := time.Now()
+	started := now.Add(-3 * time.Second)
+
+	// status=3 是 RunStatusFailed（见 common/models/run.go）：诊断用例需要"失败"
+	// 才有可解释的东西；同时它是**终态**，SSE 应立即下发 end。
+	res, err := db.Exec(`insert into job_run
+		(run_id, job_id, job_name, spec, command, job_type, node_uuid, hostname, ip,
+		 trigger_source, triggered_by, status, attempt, scheduled_time, started_at, finished_at,
+		 duration_ms, exit_code, step_count, success_steps, failed_steps, retry_count,
+		 error_msg, output, created, updated)
+		values (?, 910007, '验收夹具任务', '0 0 3 * * *', 'sh -c "exit 7"', 1, ?, 'acc-host', '127.0.0.1',
+		 1, 'acceptance', 3, 1, ?, ?, ?, 3000, 7, 2, 1, 1, 0,
+		 '验收夹具：第 2 步失败（引号测试代码，不是真实故障）', 'step1 ok', ?, ?)`,
+		runID, envOr("CRONY_ACC_NODE_UUID", "node-it-01"),
+		now.Add(-3*time.Second).Unix(), started.Unix(), now.Unix(), now.Unix(), now.Unix())
+	if err != nil {
+		t.Fatalf("造 run 夹具失败（验收库需要 INSERT 权限）: %v", err)
+	}
+	affected, _ := res.RowsAffected()
+	if affected != 1 {
+		t.Fatalf("造 run 夹具影响行数 %d，期望 1", affected)
+	}
+	// 两条步骤：一条成功、一条失败（诊断的"哪一步失败"材料）。
+	steps := []struct {
+		idx     int
+		name    string
+		status  int
+		code    int
+		output  string
+		errMsg  string
+		elapsed int64
+	}{
+		{0, "准备环境", 2, 0, "step1 ok", "", 900},
+		{1, "执行清理", 3, 7, "", "引号测试代码：第 2 步退出码 7", 2100},
+	}
+	for _, s := range steps {
+		if _, err := db.Exec(`insert into job_run_step
+			(run_id, step_index, name, kind, `+"`condition`"+`, command, status, exit_code,
+			 retry_count, started_at, finished_at, duration_ms, output, error_msg, created)
+			values (?, ?, ?, 'cmd', 'on_success', ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
+			runID, s.idx, s.name, "echo "+s.name, s.status, s.code,
+			started.Unix(), now.Unix(), s.elapsed, s.output, s.errMsg, now.Unix()); err != nil {
+			t.Fatalf("造步骤夹具失败: %v", err)
+		}
+	}
+
+	t.Cleanup(func() {
+		// 清理必须按依赖顺序：先步骤，后主记录。
+		// 失败要**报错**（t.Errorf，而不是 t.Logf）：留在验收库里的夹具行会让
+		// 下一轮"按最新行判定"的用例读到脏数据，静默通过比失败更糟。
+		// 实测过的坑：主用例里 `defer db.Close()` 早于 t.Cleanup 执行，
+		// 清理全部失败却只 Logf，结果留下 3 条 run + 6 条步骤。
+		if _, err := db.Exec("delete from job_run_step where run_id = ?", runID); err != nil {
+			t.Errorf("清理步骤夹具失败（验收库可能残留 %s）: %v", runID, err)
+		}
+		if _, err := db.Exec("delete from job_run where run_id = ?", runID); err != nil {
+			t.Errorf("清理 run 夹具失败（验收库可能残留 %s）: %v", runID, err)
+		}
+	})
+	return runID
 }
 
 // ---------- 三态报告 ----------
@@ -380,5 +471,7 @@ func (r *report) write(path string) error {
 			return err
 		}
 	}
-	return os.WriteFile(path, []byte(r.markdown()), 0o644)
+	// ToValidUTF8 是兜底：报告里会掺入被测系统的原始输出（err 文本、模型片段），
+	// 只要有一处非法字节，整个报告文件在编辑器/流水线里就打不开。
+	return os.WriteFile(path, []byte(strings.ToValidUTF8(r.markdown(), "\uFFFD")), 0o644)
 }

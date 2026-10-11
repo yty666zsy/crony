@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/jakecoffman/cron"
@@ -168,6 +169,9 @@ func (srv *NodeServer) Run() (err error) {
 	go srv.watchKilledProc()
 	go srv.watchOnce()
 	go srv.watchSystemInfo()
+	// 阶段 3 收尾：资源水位上报。没有它，admin 的 node_status 工具永远只能
+	// 输出"资源水位=未上报"（读的是 node_metric 表，而此前没人往里写）。
+	go srv.StartMetricPublisher(context.Background())
 	return
 }
 

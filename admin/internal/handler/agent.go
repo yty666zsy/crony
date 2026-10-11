@@ -136,7 +136,9 @@ func (a *AgentRouter) sessionDetail(session *models.AgentSession, steps []*model
 		Denied:    trace.ToolStats.Denied,
 		Truncated: truncated,
 		Remaining: remaining,
-		PerTool:   trace.ToolStats.PerTool,
+		// 归一成空 map 而不是 nil：nil 会序列化成 `per_tool: null`，
+		// 前端 `Object.keys(null)` 会直接抛错（旧轨迹里也可能存着 null）。
+		PerTool: orEmptyIntMap(trace.ToolStats.PerTool),
 	}
 	if len(out.Warnings) == 0 {
 		out.Warnings = orEmpty(trace.Warnings)
@@ -416,7 +418,8 @@ func (a *AgentRouter) NLJobConfirm(c *gin.Context) {
 // retry_times 用 *int 区分"没传"（nil）与"显式改成 0"（合法值）；
 // 负数一律视为"不改"——与 timeout_seconds 的 <= 0 保持一致。
 // （此前负数会被写进草案并触发 1009 校验失败，与契约/前端注释说法不符，
-//   真实联调时前端注释写着"空串 / 0 / -1 表示不改"，代码却不认 -1。）
+//
+//	真实联调时前端注释写着"空串 / 0 / -1 表示不改"，代码却不认 -1。）
 func applyDraftOverrides(d agent.JobDraft, ov request.AgentNLJobOverrides) agent.JobDraft {
 	out := d
 	if name := strings.TrimSpace(ov.Name); name != "" {
