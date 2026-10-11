@@ -73,7 +73,7 @@ type ApiServer struct {
 	Services    []func(*ApiServer)
 }
 
-//get close Chan
+// get close Chan
 func (srv *ApiServer) getDoneChan() <-chan struct{} {
 	srv.mu.Lock()
 	defer srv.mu.Unlock()
@@ -284,12 +284,29 @@ func (srv *ApiServer) ListenAndServe() error {
 		c(srv.Engine)
 	}
 
+	// 超时设置说明（真实联调发现的问题，勿随意回退）：
+	//
+	// 原实现 ReadTimeout/WriteTimeout 都是 20s。但本服务有两类**合法长连接/长请求**：
+	//   - SSE /job/run/stream：max_seconds 默认 600、上限 3600；
+	//   - Agent 接口（诊断/起草）：一次真实模型调用 + 修复轮很容易超过 20s
+	//     （实测 qwen-plus 一次诊断 35.5s）。
+	// WriteTimeout 是"从读完请求头开始算的绝对写截止时间"，不会因为中间有数据写出而顺延，
+	// 因此到期后写响应必然失败：gin 的 c.JSON 会 panic（write tcp ... i/o timeout），
+	// 客户端只看到 EOF，**模型已经算完的结论被丢掉**。
+	//
+	// 所以这里不再用全局 WriteTimeout 兜底，改为依赖**应用层预算**：
+	//   - SSE：max_seconds（30..3600）+ 硬上限 1h，终态自动 end 并关闭连接；
+	//   - Agent：llm.max-calls-per-session / max-tokens-per-session / max-duration-seconds
+	//     （默认 300s）+ 单次模型调用 timeout-seconds。
+	// ReadHeaderTimeout/ReadTimeout 保留，用于挡住慢速请求头/慢速正文（slowloris）。
 	srv.HttpServer = &http.Server{
-		Handler:        srv.Engine,
-		Addr:           srv.Addr,
-		ReadTimeout:    20 * time.Second,
-		WriteTimeout:   20 * time.Second,
-		MaxHeaderBytes: 1 << 20,
+		Handler:           srv.Engine,
+		Addr:              srv.Addr,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      0,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 	if err := srv.HttpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return err

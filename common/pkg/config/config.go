@@ -98,6 +98,13 @@ func applyEnvOverrides(v *viper.Viper) {
 // registerDefaults 注册所有允许通过环境变量注入的键的默认值。
 // 这些默认值同时也是"配置缺省时的安全缺省"：
 // jwt-secret 默认为空 => 非生产环境生成随机会话密钥，生产环境拒绝启动。
+//
+// llm.* 也必须注册：APIKey 的 mapstructure 标签是 api-key，而 struct 注释写明
+// "只能从环境变量注入（CRONY_LLM_API_KEY）"。但 viper 的 Unmarshal 不会为
+// 未注册的键读环境变量（applyEnvOverrides 也只遍历 v.AllKeys()），
+// 因此如果配置文件里没写 llm 块，CRONY_LLM_API_KEY 会被**静默丢弃**：
+// 真实联调时表现为模型调用 401 "You didn't provide an API key"。
+// 这里把整段 llm 配置注册进 viper，让"密钥只走环境变量"这条设计真正可用。
 func registerDefaults(v *viper.Viper) {
 	v.SetDefault("auth.jwt-secret", "")
 	v.SetDefault("auth.token-expire-hours", 168)
@@ -105,6 +112,23 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("auth.bootstrap-admin-password", "")
 	v.SetDefault("auth.bootstrap-admin-email", "")
 	v.SetDefault("auth.allow-public-register", false)
+
+	// Agent / 模型凭据（阶段 2）
+	v.SetDefault("llm.enabled", false)
+	v.SetDefault("llm.provider", "")
+	v.SetDefault("llm.base-url", "")
+	v.SetDefault("llm.api-key", "")
+	v.SetDefault("llm.model", "")
+	v.SetDefault("llm.temperature", 0)
+	v.SetDefault("llm.max-tokens", 0)
+	v.SetDefault("llm.timeout-seconds", 60)
+	v.SetDefault("llm.max-calls-per-session", 20)
+	v.SetDefault("llm.max-tokens-per-session", 200000)
+	v.SetDefault("llm.max-duration-seconds", 1800)
+	v.SetDefault("llm.max-steps", 6)
+	v.SetDefault("llm.max-tool-calls", 8)
+	v.SetDefault("llm.offline-tool-call", "")
+	v.SetDefault("llm.offline-response", "")
 }
 
 // printConfigSummary 打印一份脱敏后的配置摘要。

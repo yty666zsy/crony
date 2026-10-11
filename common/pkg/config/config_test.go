@@ -93,6 +93,55 @@ func TestApplyEnvOverridesWithoutConfigKeys(t *testing.T) {
 	}
 }
 
+// TestApplyEnvOverridesLLMAPIKey 锁定"模型密钥只走环境变量"这条路径。
+//
+// 真实联调发现的缺陷：models.LLM.APIKey 的注释与 json:"-" 都要求密钥只从
+// CRONY_LLM_API_KEY 注入，但 registerDefaults 只注册了 auth.*，
+// 于是当配置文件里没有 llm 块（正是推荐的写法——密钥不落配置文件）时，
+// 环境变量会被静默丢弃，模型调用直接 401 "You didn't provide an API key"。
+func TestApplyEnvOverridesLLMAPIKey(t *testing.T) {
+	const noLLMRaw = `{"mysql": {"path": "127.0.0.1"}}`
+	v := viper.New()
+	v.SetConfigType("json")
+	if err := v.ReadConfig(strings.NewReader(noLLMRaw)); err != nil {
+		t.Fatalf("ReadConfig() error = %v", err)
+	}
+	t.Setenv(EnvPrefix+"_LLM_API_KEY", "sk-live-from-env")
+	t.Setenv(EnvPrefix+"_LLM_PROVIDER", "openai")
+	t.Setenv(EnvPrefix+"_LLM_BASE_URL", "https://example.invalid/v1")
+	t.Setenv(EnvPrefix+"_LLM_MODEL", "qwen-plus")
+	t.Setenv(EnvPrefix+"_LLM_ENABLED", "true")
+
+	applyEnvOverrides(v)
+
+	var c models.Config
+	if err := v.Unmarshal(&c); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if c.LLM.APIKey != "sk-live-from-env" {
+		t.Errorf("llm.api-key = %q, want sk-live-from-env（环境变量必须能注入密钥）", c.LLM.APIKey)
+	}
+	if c.LLM.Provider != "openai" {
+		t.Errorf("llm.provider = %q, want openai", c.LLM.Provider)
+	}
+	if c.LLM.BaseURL != "https://example.invalid/v1" {
+		t.Errorf("llm.base-url = %q, want https://example.invalid/v1", c.LLM.BaseURL)
+	}
+	if c.LLM.Model != "qwen-plus" {
+		t.Errorf("llm.model = %q, want qwen-plus", c.LLM.Model)
+	}
+	if !c.LLM.Enabled {
+		t.Errorf("llm.enabled = false, want true（字符串转 bool）")
+	}
+	// 未显式配置的键必须落到与代码一致的安全缺省（不是 0）。
+	if c.LLM.TimeoutSeconds != 60 {
+		t.Errorf("llm.timeout-seconds = %d, want 默认 60", c.LLM.TimeoutSeconds)
+	}
+	if c.LLM.MaxSteps != 6 || c.LLM.MaxToolCalls != 8 {
+		t.Errorf("llm.max-steps/max-tool-calls = %d/%d, want 6/8", c.LLM.MaxSteps, c.LLM.MaxToolCalls)
+	}
+}
+
 // TestPrintConfigSummaryDoesNotLeakSecrets 保证配置摘要不打印明文口令。
 func TestPrintConfigSummaryDoesNotLeakSecrets(t *testing.T) {
 	c := &models.Config{}
@@ -100,9 +149,10 @@ func TestPrintConfigSummaryDoesNotLeakSecrets(t *testing.T) {
 	c.Etcd.Password = "etcd-secret"
 	c.Email.Secret = "smtp-secret"
 	c.Auth.JwtSecret = "jwt-secret-value"
+	c.LLM.APIKey = "sk-llm-secret-value"
 
 	out := captureStdout(t, func() { printConfigSummary(c) })
-	for _, secret := range []string{"super-secret-password", "etcd-secret", "smtp-secret", "jwt-secret-value"} {
+	for _, secret := range []string{"super-secret-password", "etcd-secret", "smtp-secret", "jwt-secret-value", "sk-llm-secret-value"} {
 		if strings.Contains(out, secret) {
 			t.Fatalf("配置摘要泄漏了明文密钥：%q", secret)
 		}
