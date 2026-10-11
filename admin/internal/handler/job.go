@@ -29,7 +29,10 @@ func (j *JobRouter) CreateOrUpdate(c *gin.Context) {
 	}
 	if err := req.Valid(); err != nil {
 		logger.GetLogger().Error(fmt.Sprintf("create_job check error:%s", err.Error()))
-		resp.FailWithMessage(resp.ErrorJobFormat, "[create_job] check error", c)
+		// 返回具体校验原因（例如"非法的并发策略取值: 9"）：
+		// 只回 "check error" 会让调用方（含前端控制台）无法定位是哪一项参数不合法
+		resp.FailWithDetailed(resp.ErrorJobFormat, map[string]interface{}{},
+			"[create_job] check error: "+err.Error(), c)
 		return
 	}
 
