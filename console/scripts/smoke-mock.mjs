@@ -455,6 +455,19 @@ check('阶段 5 自治信用 Mock：连续成功升级、一次不良后果降�
   const listed = mock.autonomyList().data.list.find((r) => r.scope === scope)
   assert.equal(listed.effective_level, 'L1', '冻结时实际生效等级回落 L1')
   mock.autonomyUnfreeze({ scope })
+
+  // 生效级别判据：min(配置上限, max(L1, 信用级别))，与网关同一条路径。
+  const floored = mock.autonomyEffective({ tool: 'smoke_scope', env: 'test' }).data
+  assert.equal(floored.credit_known, true)
+  assert.equal(floored.credit_level, 'L0', '解冻后信用等级仍是 L0')
+  assert.equal(floored.enforcement_level, 'L1', 'L0 在放行判定里等价 L1（信用不决定要不要写）')
+  assert.equal(floored.effective, 'L1', 'L0 不得让写动作被全盘拒绝')
+  assert.ok(floored.effective <= floored.configured_ceiling, '生效级别不得越过配置上限')
+  const noHistory = mock.autonomyEffective({ tool: 'never_seen', env: 'test' }).data
+  assert.equal(noHistory.source, 'config', '无历史应沿用配置')
+  assert.equal(noHistory.effective, noHistory.configured_ceiling)
+  const capped = mock.autonomyEffective({ tool: 'whatever', env: 'test' }).data
+  assert.ok(capped.effective <= capped.configured_ceiling, '任何情形都不得越过配置上限')
 })
 
 check('阶段 5 混沌/影子 Mock：驾照分口径正确、影子有差异即拒绝放量', () => {
@@ -479,6 +492,7 @@ check('阶段 4-D/5 Mock：ops api 层只读/计算，无"直接改生产"的入
     assert.ok(!/deploy|promote|apply|execute/i.test(name), `不得存在直接改生产的入口: ${name}`)
   }
   assert.ok(exported.includes('explainAllocation') && exported.includes('reconcileShadow'))
+  assert.ok(exported.includes('effectiveAutonomy'), '应导出自治级别解释接口')
 })
 
 let failed = 0

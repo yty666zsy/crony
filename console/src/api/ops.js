@@ -12,6 +12,7 @@
  *   POST /ops/autonomy/list       自治信用列表（含实际生效等级）
  *   POST /ops/autonomy/observe    记录一次动作结果，推进信用
  *   POST /ops/autonomy/unfreeze   人工解冻
+ *   POST /ops/autonomy/effective  解释某工具当下实际生效的自治级别（配置上限 ∩ 信用）
  *   POST /ops/chaos/catalog       混沌故障目录
  *   POST /ops/chaos/grade         混沌考核打分（驾照分）
  *   POST /ops/shadow/reconcile    影子执行对账（只读计算）
@@ -67,6 +68,11 @@ export function observeAutonomy(scope, success) {
 export function unfreezeAutonomy(scope) {
   if (USE_MOCK) return mockResponse(mock.autonomyUnfreeze({ scope }))
   return request.post('/ops/autonomy/unfreeze', { scope })
+}
+
+export function effectiveAutonomy(tool, env = '') {
+  if (USE_MOCK) return mockResponse(mock.autonomyEffective({ tool, env }))
+  return request.post('/ops/autonomy/effective', { tool, env })
 }
 
 export function fetchChaosCatalog() {

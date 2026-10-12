@@ -209,15 +209,16 @@ func (o *OpsRouter) AutonomyList(c *gin.Context) {
 		resp.FailWithMessage(resp.ERROR, "[ops/autonomy/list] 查询失败: "+err.Error(), c)
 		return
 	}
-	// 附上每条的"实际生效等级"（冻结时回落 L1）。
+	// 附上每条的"实际生效等级"（放行判定用的那一个：冻结回落 L1，且不低于 L1）。
 	out := make([]gin.H, 0, len(list))
 	for i := range list {
 		r := &list[i]
+		credit := autonomy.Credit{Level: autonomy.Level(r.Level), Frozen: r.Frozen}
 		out = append(out, gin.H{
 			"scope": r.Scope, "level": r.Level, "level_name": autonomy.Level(r.Level).Name(),
-			"effective_level": autonomy.Effective(autonomy.Credit{
-				Level: autonomy.Level(r.Level), Frozen: r.Frozen,
-			}).Name(),
+			// effective_level 与工具网关用的是同一个函数（EnforcementLevel），
+			// 避免"表里看到的等级"与"决定放行时用的等级"变成两套口径。
+			"effective_level": autonomy.EnforcementLevel(credit).Name(),
 			"streak": r.Streak, "total_up": r.TotalUp, "total_down": r.TotalDown,
 			"frozen": r.Frozen, "frozen_reason": r.FrozenReason, "updated": r.Updated,
 		})
@@ -260,4 +261,21 @@ func (o *OpsRouter) AutonomyUnfreeze(c *gin.Context) {
 		return
 	}
 	resp.OkWithDetailed(gin.H{"credit": row}, "ok", c)
+}
+
+// AutonomyEffective POST /ops/autonomy/effective 解释某工具当下的实际生效自治级别。
+//
+// 这是"只读解释"：它把 min(配置上限, 信用级别) 这条判据摊开展示，
+// 让人能回答"这个写动作为什么要审批 / 为什么不自动放行"——与网关走同一条计算路径。
+func (o *OpsRouter) AutonomyEffective(c *gin.Context) {
+	tag := "[ops/autonomy/effective]"
+	var req struct {
+		Tool string `json:"tool"`
+		Env  string `json:"env"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.Tool) == "" {
+		resp.FailWithMessage(resp.ErrorRequestParameter, tag+" 需要 tool（可带 env）", c)
+		return
+	}
+	resp.OkWithDetailed(service.DefaultAutonomyService.EffectiveForTool(req.Tool, req.Env), "ok", c)
 }

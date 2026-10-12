@@ -114,6 +114,21 @@ func InitAgentRuntime() (*agentruntime.Runtime, error) {
 		logger.GetLogger().Error("[agent] 写工具装配失败（写动作不可用，只读能力不受影响）: " + werr.Error())
 		writeNames = nil
 	}
+
+	// 阶段 5：把「自治信用」接进放行判定（可选，默认关闭）。
+	//
+	// 开启后：写动作的实际生效级别 = min(配置自治级别, 该动作信用级别)。
+	// 信用只能**收紧**（出了不良后果就冻结回 L1），不能越权升过配置上限；
+	// 没有历史的动作沿用配置。默认关闭 = 与阶段 4 行为完全一致（零回归）。
+	if cfg.Tools.AutonomyCredit {
+		resolver := AutonomyResolverFor(cfg.Tools.AutonomyEnv)
+		rt.SetAutonomyResolver(resolver)
+		logger.GetLogger().Info(fmt.Sprintf(
+			"[agent] 自治信用已接入放行判定：环境段=%q（scope 形如 <工具>@%s）；配置上限=%s 只可收紧不可越权；无历史沿用配置",
+			strings.TrimSpace(cfg.Tools.AutonomyEnv), ConfiguredAutonomyEnv(), toolsPolicy.Autonomy))
+	} else {
+		logger.GetLogger().Info("[agent] 自治信用未接入（tools.autonomy-credit=false）：放行判定完全按配置的自治级别")
+	}
 	logger.GetLogger().Info(fmt.Sprintf(
 		"[agent] Agent 运行时已就绪：provider=%s offline=%v model=%s 工具=%s（诊断证据来源：数据库 + 节点水位 + 节点本机只读探测）",
 		rt.ProviderName(), rt.Offline(), rt.Model(), strings.Join(rt.ToolNames(), ",")))

@@ -164,6 +164,7 @@ func configRoute(r *gin.Engine) {
 		opsGroup.POST("/autonomy/list", defaultOpsRouter.AutonomyList)
 		opsGroup.POST("/autonomy/observe", defaultOpsRouter.AutonomyObserve)
 		opsGroup.POST("/autonomy/unfreeze", defaultOpsRouter.AutonomyUnfreeze)
+		opsGroup.POST("/autonomy/effective", defaultOpsRouter.AutonomyEffective)
 		opsGroup.POST("/shadow/reconcile", defaultOpsRouter.ShadowReconcile)
 		opsGroup.POST("/chaos/catalog", defaultOpsRouter.ChaosCatalog)
 		opsGroup.POST("/chaos/grade", defaultOpsRouter.ChaosGrade)

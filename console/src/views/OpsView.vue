@@ -122,6 +122,17 @@
         <el-button size="small" @click="doObserve(true)">记录一次成功</el-button>
         <el-button size="small" @click="doObserve(false)">记录一次不良后果</el-button>
       </div>
+      <div class="row">
+        <el-input v-model="effTool" placeholder="工具名（如 job_retry）" style="width: 200px" />
+        <el-input v-model="effEnv" placeholder="环境（默认 default）" style="width: 160px" />
+        <el-button size="small" @click="doEffective">解释生效级别</el-button>
+        <span v-if="effResult" class="dim">
+          {{ effResult.scope }}：配置上限 {{ effResult.configured_ceiling }} ∩ 信用
+          {{ effResult.credit_known ? `${effResult.credit_level}（放行 ${effResult.enforcement_level}）` : '无历史' }}
+          → 生效 {{ effResult.effective }}
+          （来源 {{ effResult.source }}{{ effResult.frozen ? '，已冻结' : '' }}，信用接入 {{ effResult.credit_enabled ? '开' : '关' }}）
+        </span>
+      </div>
     </el-card>
 
     <el-card shadow="never">
@@ -147,7 +158,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
-  explainAllocation, evaluateSlo, fetchMetricsOverview, gradeChaos, listAutonomy,
+  effectiveAutonomy, explainAllocation, evaluateSlo, fetchMetricsOverview, gradeChaos, listAutonomy,
   observeAutonomy, reconcileShadow, searchSlo, unfreezeAutonomy,
 } from '@/api/ops'
 
@@ -159,6 +170,9 @@ const sloList = ref([])
 const sloEval = ref(null)
 const autonomy = ref([])
 const obsScope = ref('job_retry@prod')
+const effTool = ref('job_retry')
+const effEnv = ref('prod')
+const effResult = ref(null)
 const chaosScore = ref(null)
 const shadowResult = ref(null)
 
@@ -203,6 +217,12 @@ async function doObserve(success) {
 async function doUnfreeze(scope) {
   await unfreezeAutonomy(scope)
   autonomy.value = (await listAutonomy()).list || []
+}
+
+// doEffective 展示"这个写动作为什么要审批/为什么自动放行"：
+// 实际生效级别 = min(配置上限, 信用级别)。它走的是与工具网关同一条判据。
+async function doEffective() {
+  effResult.value = await effectiveAutonomy(effTool.value, effEnv.value)
 }
 
 async function doChaosDemo() {

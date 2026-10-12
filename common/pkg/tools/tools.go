@@ -406,6 +406,8 @@ type Registry struct {
 	policy   Policy
 	observer Observer
 	approver Approver
+	// autonomy 阶段 5：自治信用解析器（nil = 未启用，按配置级别判定，零回归）。
+	autonomy AutonomyResolver
 	sessions map[string]*sessionState
 	// sem 进程级并发信号量（容量 = policy.MaxConcurrentCalls）。
 	sem chan struct{}
@@ -429,6 +431,13 @@ func WithPolicy(p Policy) Option {
 // WithApprover 设置审批单生成方（不设置时，需要审批的写动作会被**拒绝**）。
 func WithApprover(a Approver) Option {
 	return func(r *Registry) { r.approver = a }
+}
+
+// WithAutonomyResolver 装配「自治信用」解析器（阶段 5）。
+//
+// 不设置（nil）时，放行判定完全按配置的自治级别来——即**与阶段 4 行为一致**。
+func WithAutonomyResolver(fn AutonomyResolver) Option {
+	return func(r *Registry) { r.autonomy = fn }
 }
 
 // NewRegistry 创建注册表。
@@ -583,6 +592,38 @@ func (r *Registry) SetApprover(a Approver) {
 	r.approver = a
 }
 
+// SetAutonomyResolver 后置装配自治信用解析器（阶段 5）。
+//
+// 语义与 SetApprover 一致的克制：**只允许装配一次**，不允许中途更换。
+// 因为"某工具到底该不该自动放行"在进程生命周期内应当是稳定的判据；
+// 允许热换会让"这次为什么放行了"变成查不出来的谜。
+// 传 nil 表示不启用（保持配置级别）。
+func (r *Registry) SetAutonomyResolver(fn AutonomyResolver) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.autonomy != nil && fn != nil {
+		return
+	}
+	r.autonomy = fn
+}
+
+// EffectiveAutonomyForTool 报告某工具**当下**实际生效的自治级别（配置上限 ∩ 信用）。
+//
+// 与网关放行判定走的是同一条计算路径（policy.EffectiveAutonomy），
+// 因此控制台"看到的级别"就是"决定放行时要用的级别"，不存在两套口径。
+func (r *Registry) EffectiveAutonomyForTool(tool string) AutonomyLevel {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.policy.EffectiveAutonomy(r.autonomy, tool)
+}
+
+// AutonomyCreditEnabled 是否已装配自治信用解析器（信用是否参与放行判定）。
+func (r *Registry) AutonomyCreditEnabled() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.autonomy != nil
+}
+
 // HasWriteTools 当前能力面里是否**有**写工具（含被策略拒绝但已注册的）。
 func (r *Registry) HasWriteTools() bool {
 	r.mu.RLock()
@@ -656,7 +697,12 @@ func (r *Registry) call(ctx context.Context, sessionID, name string, args map[st
 	tool, ok := r.tools[name]
 	policy := r.policy
 	approver := r.approver
+	resolver := r.autonomy
 	r.mu.RUnlock()
+
+	// 阶段 5：实际生效的自治级别（配置为上限，信用只可收紧）。
+	// 只在写动作分支里计算/使用——只读工具不该为了一次放行判定去查信用。
+	effAutonomy := policy.Autonomy
 
 	if !ok {
 		// 把可用工具列表带上：模型下一轮可以自我纠正
@@ -675,15 +721,17 @@ func (r *Registry) call(ctx context.Context, sessionID, name string, args map[st
 		return Result{}, retry.Fatal(fmt.Errorf("%w: %s", ErrToolDenied, name))
 	}
 	if risk.IsWrite() {
+		// 阶段 5：写动作才查信用（配置上限之下，按信用收紧）。
+		effAutonomy = policy.EffectiveAutonomy(resolver, name)
 		if !policy.AllowWrite || (risk == RiskDestructive && !policy.AllowDestructive) {
 			r.recordDenied(sessionID, name, args, risk, meta, ReasonRiskNotAllowed)
 			return Result{}, retry.Fatal(fmt.Errorf("%w: 工具 %s 是%s工具，但当前策略未开启该类动作",
 				ErrRiskNotAllowed, name, map[bool]string{true: "不可逆写", false: "可逆写"}[risk == RiskDestructive]))
 		}
-		if !policy.Autonomy.AllowsWriteTools() {
+		if !effAutonomy.AllowsWriteTools() {
 			r.recordDenied(sessionID, name, args, risk, meta, ReasonAutonomyL0)
-			return Result{}, retry.Fatal(fmt.Errorf("%w: 当前自治级别 %s 只提供建议，不提供写动作",
-				ErrRiskNotAllowed, policy.Autonomy))
+			return Result{}, retry.Fatal(fmt.Errorf("%w: 当前生效自治级别 %s 只提供建议，不提供写动作（配置上限 %s）",
+				ErrRiskNotAllowed, effAutonomy, policy.Autonomy))
 		}
 	}
 	// 审批单只对**写动作**有意义：拿一张单子来执行只读工具，说明调用方搞错了
@@ -716,7 +764,7 @@ func (r *Registry) call(ctx context.Context, sessionID, name string, args map[st
 	}
 	defer r.release()
 
-	needApproval := risk.IsWrite() && !approved && !policy.autoApproveMatch(name, targets, risk)
+	needApproval := risk.IsWrite() && !approved && !policy.autoApproveMatchAt(effAutonomy, name, targets, risk)
 
 	// 爆炸半径 + 会话预算：直接拒绝的两种情形都不消耗额度。
 	//

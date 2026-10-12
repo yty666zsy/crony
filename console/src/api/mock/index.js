@@ -1634,7 +1634,8 @@ export function autonomyList() {
   const list = Object.values(opsAutonomy).map((r) => ({
     ...r,
     level_name: LVL_NAME[r.level] || 'L?',
-    effective_level: r.frozen ? 'L1' : LVL_NAME[r.level],
+    // 放行判定用的等级：冻结回落 L1，且不低于 L1（信用只能决定"要不要自动"）。
+    effective_level: LVL_NAME[Math.max(1, r.frozen ? 1 : r.level)],
   }))
   return { code: 200, data: { list, total: list.length }, msg: 'ok' }
 }
@@ -1665,6 +1666,38 @@ export function autonomyUnfreeze({ scope } = {}) {
   cur.frozen_reason = ''
   cur.streak = 0
   return { code: 200, data: { credit: { ...cur } }, msg: 'ok' }
+}
+
+// autonomyEffective 解释某工具当下实际生效的自治级别（与后端 /ops/autonomy/effective 同形状）。
+// 判据与网关一致：放行等级 = max(L1, 信用级别)（信用只决定"要不要自动"）；
+// 生效级别 = min(配置上限, 放行等级)；无历史则沿用配置上限。
+export function autonomyEffective({ tool, env } = {}) {
+  if (!tool) return bizErr(1001, '需要 tool')
+  const e = env || 'default'
+  const scope = `${tool}@${e}`
+  const ceilingRank = 2 // Mock 里运维配置上限取 L2
+  const out = {
+    tool, env: e, scope,
+    configured_ceiling: LVL_NAME[ceilingRank],
+    frozen: false,
+    effective: LVL_NAME[ceilingRank],
+    source: 'config',
+    credit_enabled: true,
+    credit_known: false,
+  }
+  const row = opsAutonomy[scope]
+  if (row) {
+    const effectiveCreditRank = row.frozen ? 1 : row.level
+    const enforcedRank = Math.max(1, effectiveCreditRank) // L1 底线
+    out.credit_level = LVL_NAME[effectiveCreditRank]
+    out.enforcement_level = LVL_NAME[enforcedRank]
+    out.frozen = row.frozen
+    out.frozen_reason = row.frozen_reason
+    out.credit_known = true
+    out.effective = LVL_NAME[Math.min(ceilingRank, enforcedRank)]
+    out.source = enforcedRank > ceilingRank ? 'credit_capped' : 'credit'
+  }
+  return { code: 200, data: out, msg: 'ok' }
 }
 
 const OPS_CHAOS = [

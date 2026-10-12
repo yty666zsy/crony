@@ -131,7 +131,62 @@ func ParseAutonomyLevel(s string) (AutonomyLevel, error) {
 	return "", fmt.Errorf("tools: 未知自治级别 %q（合法取值：L0/L1/L2/L3）", s)
 }
 
-// autoApproveMatch 判断某工具/目标是否命中"免审批"条件。
+// rank 自治级别的严格序：L0 < L1 < L2 < L3。非法值按最严格（L0）处理。
+func (a AutonomyLevel) rank() int {
+	switch a {
+	case AutonomyL1:
+		return 1
+	case AutonomyL2:
+		return 2
+	case AutonomyL3:
+		return 3
+	default:
+		return 0
+	}
+}
+
+// Tighten 取两者中**更严格**（级别更低）的一档。
+//
+// 这是阶段 5「自治信用」接入放行判定的核心不变式：**配置是上限，信用只能往下压**。
+// 无论信用解析器返回什么（哪怕是 L3），实际生效级别都不会超过运维配置的那一档。
+// 把它做进网关而不是只做在服务层，是为了让"越权升级"在**最里层**就不可能发生。
+func Tighten(ceiling, want AutonomyLevel) AutonomyLevel {
+	if want.rank() < ceiling.rank() {
+		return want
+	}
+	return ceiling
+}
+
+// AutonomyResolver 阶段 5：把「自治信用」解析成某工具**当下**实际生效的自治级别。
+//
+// ok=false 表示"无从判断"（例如该动作还没有任何历史）→ 调用方沿用配置级别。
+// 它是注入点：网关本身不碰数据库（保持纯函数、可穷举测试），
+// "信用从哪来、怎么算"由调用方（admin 服务层）负责。
+type AutonomyResolver func(tool string) (AutonomyLevel, bool)
+
+// EffectiveAutonomy 计算某工具实际生效的自治级别：配置为上限，信用只可收紧。
+//
+// 三种情形：
+//   - 未装配解析器（resolve==nil）：返回配置级别（**行为不变**，零回归）；
+//   - 解析器无判断（ok=false）：返回配置级别（没有历史 = 沿用运维配置）；
+//   - 解析器有判断：返回 min(配置, 信用)（信用更严格才生效，否则被配置夹住）。
+func (p Policy) EffectiveAutonomy(resolve AutonomyResolver, tool string) AutonomyLevel {
+	if resolve == nil {
+		return p.Autonomy
+	}
+	want, ok := resolve(tool)
+	if !ok {
+		return p.Autonomy
+	}
+	return Tighten(p.Autonomy, want)
+}
+
+// autoApproveMatch 判断某工具/目标是否命中"免审批"条件（用配置级别，兼容旧调用）。
+func (p Policy) autoApproveMatch(name string, targets []string, risk RiskLevel) bool {
+	return p.autoApproveMatchAt(p.Autonomy, name, targets, risk)
+}
+
+// autoApproveMatchAt 用**给定的生效级别**判断是否免审批。
 //
 // 三档语义（顺序即优先级）：
 //   - destructive **永不**免审批（无论自治级别多高、白名单怎么写）；
@@ -142,11 +197,11 @@ func ParseAutonomyLevel(s string) (AutonomyLevel, error) {
 // 白名单条目形如 `job_retry`（任意目标）或 `job_retry@node-it-01`（指定目标）。
 // 只支持"精确匹配"是刻意的：通配符白名单（`job_*`）会让人以为自己放行了一个动作，
 // 实际放行了一整类动作——这是最典型的"配置事故"来源。
-func (p Policy) autoApproveMatch(name string, targets []string, risk RiskLevel) bool {
+func (p Policy) autoApproveMatchAt(level AutonomyLevel, name string, targets []string, risk RiskLevel) bool {
 	if risk == RiskDestructive {
 		return false
 	}
-	switch p.Autonomy {
+	switch level {
 	case AutonomyL3:
 		return true
 	case AutonomyL2:

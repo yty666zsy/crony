@@ -66,6 +66,28 @@ func TestEffectiveFallsBackWhenFrozen(t *testing.T) {
 	}
 }
 
+// TestEnforcementLevelHasApprovalFloor 锁死"信用不能决定要不要写"这一条：
+// 等级 0（只建议）在放行判定里等价于 L1，绝不让"刚成功过一次"的动作反被全盘拒绝。
+func TestEnforcementLevelHasApprovalFloor(t *testing.T) {
+	cases := []struct {
+		in   Credit
+		want Level
+	}{
+		{Credit{Level: LevelAdvisory}, LevelApproval},                    // L0 → 底线 L1
+		{Credit{Level: LevelApproval}, LevelApproval},                    // L1 保持
+		{Credit{Level: LevelWhitelist}, LevelWhitelist},                  // L2 保持
+		{Credit{Level: LevelFull}, LevelFull},                            // L3 保持（是否真放行由配置上限再夹）
+		{Credit{Level: LevelAdvisory, Frozen: true}, LevelApproval},      // 冻结 → L1
+		{Credit{Level: LevelFull, Frozen: true}, LevelApproval},          // 冻结 → L1（不是 L3）
+	}
+	for _, c := range cases {
+		if got := EnforcementLevel(c.in); got != c.want {
+			t.Fatalf("EnforcementLevel(%s, frozen=%v) = %s，期望 %s",
+				c.in.Level.Name(), c.in.Frozen, got.Name(), c.want.Name())
+		}
+	}
+}
+
 func TestMaxLevelCapsPromotion(t *testing.T) {
 	cfg := Config{PromoteAfter: 1, MaxLevel: LevelWhitelist, DemoteOnMistake: 1, FreezeOnMistake: true}
 	c := Credit{Level: LevelAdvisory}

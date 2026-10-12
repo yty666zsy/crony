@@ -153,3 +153,22 @@ func Effective(c Credit) Level {
 	}
 	return c.Level
 }
+
+// EnforcementLevel 返回"用于放行判定的等级"：在 Effective 之上再加一条底线 L1。
+//
+// 为什么需要这条底线（而不是直接把 Effective 接到放行判定上）：
+// 信用只负责回答"**要不要自动**"，不负责回答"**要不要写**"。写动作的门槛由
+// 运维配置（L0 = 只建议 / L1 = 审批）决定，不该被"某动作刚被观测过一次"这种事
+// 悄悄改掉。否则会出现一个荒谬的序列：某动作首次自动执行成功 → 记一笔信用
+// （等级 0）→ 下一次却被判成 L0、**连审批单都不生成**。刚成功过的动作反而被
+// 全盘拒绝，既反直觉，也让"升级一套在跑的系统"变得不安全。
+//
+// 因此：等级 0 在放行判定里等价于 L1（照旧走审批），要靠连续成功挣到 L2 才免审批；
+// 冻结仍然回落 L1；L0 只建议只可能来自运维配置，不来自信用。
+func EnforcementLevel(c Credit) Level {
+	l := Effective(c)
+	if l < LevelApproval {
+		return LevelApproval
+	}
+	return l
+}

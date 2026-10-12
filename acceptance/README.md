@@ -24,6 +24,7 @@ $env:CRONY_ACC_RUN_ID=''                                  # 可留空：套件�
 $env:CRONY_ACC_RUN_TAG='acc<时间戳>'                       # 可选：夹具 run_id 前缀，便于自查残留
 $env:CRONY_ACC_EXPECT_REAL='1'                            # 要求 provider 不得是 offline
 $env:CRONY_ACC_NODE_UUID='node-it-01'
+$env:CRONY_ACC_AUTONOMY_ENV='acc'                          # 可选：AC-42 用；须与 admin 配置 tools.autonomy-env 一致
 $env:CRONY_TEST_MYSQL_DSN='root:@tcp(127.0.0.1:13306)/crony_live?charset=utf8mb4&parseTime=True&loc=Local&timeout=5s'
 $env:CRONY_ACC_REPORT='E:\documents\crony\验收报告.md'     # 报告输出路径（可留空：只打印）
 
@@ -85,6 +86,7 @@ AC-06/AC-07/AC-08/AC-09/AC-15 都需要**一条已结束的执行记录**。两�
 | AC-39 | SLO 契约：保存后可评估；**无样本不判违约**、违约必须给原因 | 登录 |
 | AC-40 | 自治信用：连成升级、一次不良后果降级并冻结、冻结时**实际生效等级回落 L1**、可人工解冻 | 登录 |
 | AC-41 | 混沌驾照分=处置正确率；影子对账**有差异即拒绝放量** | 登录 |
+| AC-42 | 自治级别解释：无历史沿用配置上限；生效级别 = min(上限, 放行等级) 且**永不越权**（需 `tools.autonomy-credit=true`，否则 SKIP） | 登录 |
 
 ### 3.1 AC-16 为什么要"主动触发"工具调用
 

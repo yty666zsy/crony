@@ -232,6 +232,34 @@ func (r *Runtime) WritesEnabled() bool {
 	return r.registry.HasWriteTools()
 }
 
+// SetAutonomyResolver 装配「自治信用」解析器（阶段 5）。
+//
+// 传 nil 或从不调用 = 未启用，放行判定完全按配置的自治级别（与阶段 4 行为一致）。
+// 装配后，写动作的实际生效级别 = min(配置上限, 信用解析结果)：信用只能收紧、不能越权。
+func (r *Runtime) SetAutonomyResolver(fn tools.AutonomyResolver) {
+	if r == nil || r.registry == nil {
+		return
+	}
+	r.registry.SetAutonomyResolver(fn)
+}
+
+// EffectiveAutonomyForTool 报告某工具**当下**实际生效的自治级别（控制台/接口解释用）。
+// 与网关用的是同一条计算路径（policy.EffectiveAutonomy），因此"看到的"等于"生效的"。
+func (r *Runtime) EffectiveAutonomyForTool(tool string) tools.AutonomyLevel {
+	if r == nil || r.registry == nil {
+		return tools.AutonomyL1
+	}
+	return r.registry.EffectiveAutonomyForTool(tool)
+}
+
+// AutonomyCreditEnabled 进程是否装配了自治信用解析器。
+func (r *Runtime) AutonomyCreditEnabled() bool {
+	if r == nil || r.registry == nil {
+		return false
+	}
+	return r.registry.AutonomyCreditEnabled()
+}
+
 // ExecuteApprovedTool 执行一个已获人工批准的写动作（审批控制面的执行方接口）。
 //
 // 它**只**转发到 tools.Registry.ExecuteApproved：审批执行不允许有第二条执行路径，

@@ -2103,4 +2103,109 @@ func TestAcceptanceSuite(t *testing.T) {
 		}
 		cc.note("驾照分=50（正确率 50%%）；影子一致=允许放量、退出码不同=拒绝放量")
 	})
+
+	// AC-42：自治信用真的接进了"要不要审批"的判定（而不是只存在表里）。
+	// 判据（与工具网关同一函数）：放行等级 = max(L1, 信用)；生效级别 = min(配置上限, 放行等级)。
+	run("AC-42", "自治级别解释：无历史沿用配置上限；生效级别=min(上限,放行等级)且永不越权", func(cc *caseCtx) {
+		rank := func(s string) int {
+			switch strings.ToUpper(strings.TrimSpace(s)) {
+			case "L0":
+				return 0
+			case "L1":
+				return 1
+			case "L2":
+				return 2
+			case "L3":
+				return 3
+			}
+			return -1
+		}
+		env := strings.TrimSpace(os.Getenv("CRONY_ACC_AUTONOMY_ENV"))
+		tool := "ac42_tool"
+
+		// 1) 无历史 → 沿用配置上限（零回归：不因为"没测过"就收紧或放宽）。
+		fresh, err := c.postOK("/ops/autonomy/effective", map[string]any{"tool": tool, "env": env})
+		if err != nil {
+			cc.t.Fatalf("解释生效级别失败: %v", err)
+		}
+		if !asBool(fresh["credit_enabled"]) {
+			cc.skip("实时后端未启用自治信用（tools.autonomy-credit=false），本用例前提不成立：%+v", fresh)
+		}
+		ceiling := asStr(fresh["configured_ceiling"])
+		if rank(ceiling) < 0 {
+			cc.t.Fatalf("必须回报合法的配置上限，实际 %q", ceiling)
+		}
+		if asBool(fresh["credit_known"]) {
+			cc.t.Fatalf("工具 %s 本不应有信用历史: %+v", tool, fresh)
+		}
+		if src := asStr(fresh["source"]); src != "config" {
+			cc.t.Fatalf("无历史时来源应为 config，实际 %q", src)
+		}
+		if eff := asStr(fresh["effective"]); eff != ceiling {
+			cc.t.Fatalf("无历史时应沿用配置上限 %s，实际 %s", ceiling, eff)
+		}
+
+		// 2) 连成 10 次 → 信用升到 L2；放行等级不得因此越过配置上限。
+		scope := asStr(fresh["scope"])
+		for i := 0; i < 10; i++ {
+			if _, err := c.postOK("/ops/autonomy/observe", map[string]any{"scope": scope, "success": true}); err != nil {
+				cc.t.Fatalf("记录成功失败: %v", err)
+			}
+		}
+		got, err := c.postOK("/ops/autonomy/effective", map[string]any{"tool": tool, "env": env})
+		if err != nil {
+			cc.t.Fatalf("解释生效级别失败: %v", err)
+		}
+		if !asBool(got["credit_known"]) {
+			cc.t.Fatalf("应能读到信用历史: %+v", got)
+		}
+		credit, enforced, eff := asStr(got["credit_level"]), asStr(got["enforcement_level"]), asStr(got["effective"])
+		if rank(credit) < 2 {
+			cc.t.Fatalf("连成 10 次信用应升到 L2，实际 %s", credit)
+		}
+		if rank(enforced) < 1 {
+			cc.t.Fatalf("放行等级不得低于 L1（信用不决定\"要不要写\"），实际 %s", enforced)
+		}
+		// 不变式：生效 = min(上限, 放行)，且永不越过上限。
+		want := rank(enforced)
+		if rank(ceiling) < want {
+			want = rank(ceiling)
+		}
+		if rank(eff) != want {
+			cc.t.Fatalf("生效级别应为 min(%s, %s)=L%d，实际 %s", ceiling, enforced, want, eff)
+		}
+		if rank(eff) > rank(ceiling) {
+			cc.t.Fatalf("生效级别越过了配置上限: %s > %s", eff, ceiling)
+		}
+		// 来源必须与"是否被上限夹住"一致。
+		wantSrc := "credit"
+		if rank(enforced) > rank(ceiling) {
+			wantSrc = "credit_capped"
+		}
+		if src := asStr(got["source"]); src != wantSrc {
+			cc.t.Fatalf("来源应为 %s，实际 %s（上限 %s / 放行 %s）", wantSrc, src, ceiling, enforced)
+		}
+
+		// 3) 一次不良后果 → 冻结 → 放行等级与生效级别都回落 L1。
+		if _, err := c.postOK("/ops/autonomy/observe", map[string]any{"scope": scope, "success": false}); err != nil {
+			cc.t.Fatalf("记录不良后果失败: %v", err)
+		}
+		frozen, err := c.postOK("/ops/autonomy/effective", map[string]any{"tool": tool, "env": env})
+		if err != nil {
+			cc.t.Fatalf("解释生效级别失败: %v", err)
+		}
+		if !asBool(frozen["frozen"]) {
+			cc.t.Fatalf("一次不良后果必须冻结: %+v", frozen)
+		}
+		if got := asStr(frozen["effective"]); got != "L1" {
+			cc.t.Fatalf("冻结后生效级别必须回落 L1，实际 %s", got)
+		}
+
+		cc.note("配置上限 %s；连成 10 次信用升到 %s（放行 %s）→ 生效 %s（来源 %s）；一次不良后果冻结 → 生效 L1",
+			ceiling, credit, enforced, eff, wantSrc)
+		// 清理本用例自造的信用行（按 scope 删除，避免污染后续复跑）。
+		if db != nil {
+			_, _ = db.Exec("delete from "+models.CronyAutonomyCreditTableName+" where scope = ?", scope)
+		}
+	})
 }

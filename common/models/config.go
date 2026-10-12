@@ -213,6 +213,15 @@ type (
 		Deny []string `mapstructure:"deny" json:"deny" yaml:"deny" ini:"deny"`
 		// Allow 工具白名单（非空时只允许这些）。
 		Allow []string `mapstructure:"allow" json:"allow" yaml:"allow" ini:"allow"`
+		// AutonomyCredit 阶段 5：是否用「自治信用」驱动写动作的实际生效级别（默认 false）。
+		//
+		// 开启后：写动作的实际生效级别 = min(Autonomy 上限, 该动作的信用级别)。
+		// 信用只能**收紧**不能越权；没有历史的动作沿用 Autonomy。
+		// 默认 false = 与阶段 4 行为完全一致（零回归）。
+		AutonomyCredit bool `mapstructure:"autonomy-credit" json:"autonomyCredit" yaml:"autonomy-credit" ini:"autonomy-credit"`
+		// AutonomyEnv 自治信用 scope 的环境段（默认 "default"），scope 形如 `job_retry@<env>`。
+		// 为什么要有环境维度："重跑在测试环境很安全"不等于"在生产很安全"。
+		AutonomyEnv string `mapstructure:"autonomy-env" json:"autonomyEnv" yaml:"autonomy-env" ini:"autonomy-env"`
 	}
 )
 
