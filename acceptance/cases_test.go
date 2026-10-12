@@ -2392,4 +2392,58 @@ func TestAcceptanceSuite(t *testing.T) {
 		}
 		cc.note("/console/ 返回 index.html（%d 字节），资源为相对路径", len(body))
 	})
+
+	// AC-46：统一审计检索合并**真实**事实源（工具调用审计 + 写动作审批），
+	// 分页/过滤契约与全站一致；未采集字段（ip）如实留空。
+	run("AC-46", "审计检索：合并真实事实源、分页与过滤契约一致、未采集字段留空", func(cc *caseCtx) {
+		page, err := c.postOK("/audit/search", map[string]any{"page": 1, "page_size": 5})
+		if err != nil {
+			cc.t.Fatalf("审计检索失败: %v", err)
+		}
+		for _, key := range []string{"list", "total", "page", "page_size", "source_window", "notice"} {
+			if _, ok := page[key]; !ok {
+				cc.t.Fatalf("审计响应缺字段 %q: %+v", key, page)
+			}
+		}
+		if asNum(page["page"]) != 1 || asNum(page["page_size"]) != 5 {
+			cc.t.Fatalf("分页回显错误: page=%v page_size=%v", page["page"], page["page_size"])
+		}
+		list := asSlice(page["list"])
+		if len(list) > 5 {
+			cc.t.Fatalf("单页行数超过 page_size: %d", len(list))
+		}
+		if asNum(page["total"]) < float64(len(list)) {
+			cc.t.Fatalf("total 小于本页行数: total=%v len=%d", page["total"], len(list))
+		}
+		allowed := map[string]bool{"success": true, "failed": true, "denied": true, "pending": true,
+			"expired": true, "canceled": true, "blocked": true, "unknown": true}
+		for _, x := range list {
+			m := asMap(x)
+			for _, key := range []string{"id", "time", "operator", "operator_type", "action", "action_text",
+				"target", "target_type", "result", "source"} {
+				if strings.TrimSpace(asStr(m[key])) == "" {
+					cc.t.Fatalf("审计行缺字段 %q: %+v", key, m)
+				}
+			}
+			if !allowed[asStr(m["result"])] {
+				cc.t.Fatalf("审计结果取值非法: %q", asStr(m["result"]))
+			}
+			if src := asStr(m["source"]); src != "tool_audit" && src != "approval" {
+				cc.t.Fatalf("审计来源标注非法: %q", src)
+			}
+			if asStr(m["ip"]) != "" {
+				cc.t.Fatalf("ip 当前无采集，应留空: %+v", m)
+			}
+		}
+		// result 过滤为精确匹配：给一个不可能命中的值，total 必须为 0。
+		bogus, err := c.postOK("/audit/search", map[string]any{"result": "__no_such_result__", "page": 1, "page_size": 5})
+		if err != nil {
+			cc.t.Fatalf("审计过滤查询失败: %v", err)
+		}
+		if asNum(bogus["total"]) != 0 || len(asSlice(bogus["list"])) != 0 {
+			cc.t.Fatalf("result 过滤应为精确匹配，捏造值不应命中: %+v", bogus)
+		}
+		cc.note("审计合并契约齐备（本页 %d 行 / 共 %v 行）：来源标注、结果枚举、ip 留空均正确",
+			len(list), page["total"])
+	})
 }

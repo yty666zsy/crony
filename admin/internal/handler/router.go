@@ -89,6 +89,13 @@ func configRoute(r *gin.Engine) {
 		settingsGroup.GET("", defaultInsightRouter.GetSettings)
 	}
 
+	// 阶段 5 补全：统一审计检索（登录即可；合并两个真实事实源）。
+	auditGroup := r.Group("/audit")
+	auditGroup.Use(middlerware.JWTAuth())
+	{
+		auditGroup.POST("/search", defaultInsightRouter.PostAuditSearch)
+	}
+
 	job := r.Group("/job")
 	job.Use(middlerware.JWTAuth())
 	{
