@@ -7,7 +7,7 @@ import { computed } from 'vue'
  */
 const props = defineProps({
   values: { type: Array, default: () => [] },
-  color: { type: String, default: '#6366f1' },
+  color: { type: String, default: '#06b6d4' },
   width: { type: Number, default: 120 },
   height: { type: Number, default: 36 },
   filled: { type: Boolean, default: true },

@@ -16,7 +16,7 @@ const route = useRoute()
 
 const siteUrl = import.meta.env.VITE_SITE_URL || 'https://github.com/tmnhs/crony'
 
-const title = computed(() => route.meta?.title || 'Console')
+const title = computed(() => route.meta?.title || '控制台')
 const subtitle = computed(() => route.meta?.subtitle || '')
 const group = computed(() => route.meta?.group || '')
 
@@ -85,7 +85,7 @@ const unread = computed(() => notifications.value.length)
         class="hide-sm hidden items-center gap-1.5 rounded-lg border border-navy-600 px-3 py-1.5 text-xs text-ink-muted transition-colors hover:border-brand-500 hover:text-ink md:inline-flex"
       >
         <el-icon :size="13"><Link /></el-icon>
-        Visit Website
+        项目主页
       </a>
 
       <el-tooltip :content="app.theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'" placement="bottom">

@@ -13,7 +13,7 @@
 /** 执行状态：0 pending / 1 running / 2 success / 3 failed / 4 canceled / 5 skipped / 6 timeout */
 export const RUN_STATUS = {
   0: { key: 'pending', text: '排队中', color: '#7c8aa8', tag: 'info' },
-  1: { key: 'running', text: '执行中', color: '#6366f1', tag: 'primary' },
+  1: { key: 'running', text: '执行中', color: '#06b6d4', tag: 'primary' },
   2: { key: 'success', text: '成功', color: '#22c55e', tag: 'success' },
   3: { key: 'failed', text: '失败', color: '#ef4444', tag: 'danger' },
   4: { key: 'canceled', text: '已取消', color: '#7c8aa8', tag: 'info' },
@@ -64,7 +64,7 @@ export const CONCURRENCY_POLICY = {
  */
 export const AGENT_STATUS = {
   online: { key: 'online', text: '在线', color: '#22c55e', tag: 'success' },
-  busy: { key: 'busy', text: '工作中', color: '#6366f1', tag: 'primary' },
+  busy: { key: 'busy', text: '工作中', color: '#06b6d4', tag: 'primary' },
   idle: { key: 'idle', text: '空闲', color: '#7c8aa8', tag: 'info' },
   offline: { key: 'offline', text: '离线', color: '#ef4444', tag: 'danger' },
 }
@@ -81,7 +81,7 @@ export const AGENT_STATUS = {
 
 /** 会话类型：契约 §1（diagnose 诊断 / nljob 自然语言建任务 / job 任务内嵌 Agent） */
 export const AGENT_SESSION_KIND = {
-  diagnose: { key: 'diagnose', text: '失败诊断', color: '#8b5cf6', tag: 'primary' },
+  diagnose: { key: 'diagnose', text: '失败诊断', color: '#3b82f6', tag: 'primary' },
   nljob: { key: 'nljob', text: '自然语言建任务', color: '#38bdf8', tag: 'info' },
   job: { key: 'job', text: '任务内嵌 Agent', color: '#f59e0b', tag: 'warning' },
 }
@@ -107,7 +107,7 @@ export const AGENT_STOP_REASON = {
 
 /** 轨迹步骤类型：common/pkg/agent/trace.go: StepKind(model/tool/notice) */
 export const AGENT_STEP_KIND = {
-  model: { key: 'model', text: '模型步骤', color: '#6366f1', icon: 'MagicStick' },
+  model: { key: 'model', text: '模型步骤', color: '#06b6d4', icon: 'MagicStick' },
   tool: { key: 'tool', text: '工具步骤', color: '#f59e0b', icon: 'Tools' },
   notice: { key: 'notice', text: '修复提示', color: '#ef4444', icon: 'WarnTriangleFilled' },
 }
@@ -115,7 +115,7 @@ export const AGENT_STEP_KIND = {
 /** 诊断失败分类：common/pkg/agent/diagnose.go（category 的 enum） */
 export const DIAGNOSIS_CATEGORY = {
   config: { key: 'config', text: '配置错误', color: '#f59e0b' },
-  dependency: { key: 'dependency', text: '依赖不可用', color: '#8b5cf6' },
+  dependency: { key: 'dependency', text: '依赖不可用', color: '#3b82f6' },
   environment: { key: 'environment', text: '环境问题', color: '#38bdf8' },
   network: { key: 'network', text: '网络问题', color: '#0ea5e9' },
   resource: { key: 'resource', text: '资源不足', color: '#ef4444' },

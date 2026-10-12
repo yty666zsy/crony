@@ -69,7 +69,7 @@ onBeforeUnmount(() => {
 
         <footer class="shrink-0 px-5 pb-6 pt-1">
           <p class="text-[11px] text-ink-dim">
-            crony AI Agent 控制台 · 阶段 2（Agent 内核：会话 / 轨迹 / 诊断 / 自然语言建任务） ·
+            crony 控制台 · 分布式定时任务与 AI Agent 运维 ·
             <span :class="useMock === 'true' ? 'text-warn' : 'text-ok'">
               VITE_USE_MOCK={{ useMock }}
             </span>

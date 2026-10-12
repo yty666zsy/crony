@@ -214,9 +214,9 @@ async function refreshDetail() {
 }
 
 const stepKindMeta = {
-  shell: { text: 'Shell', color: '#6366f1' },
+  shell: { text: 'Shell', color: '#06b6d4' },
   http: { text: 'HTTP', color: '#38bdf8' },
-  sql: { text: 'SQL', color: '#8b5cf6' },
+  sql: { text: 'SQL', color: '#3b82f6' },
   python: { text: 'Python', color: '#22c55e' },
   agent: { text: 'Agent 工具', color: '#f59e0b' },
 }

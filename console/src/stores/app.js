@@ -17,10 +17,11 @@ export const useAppStore = defineStore('app', {
     isMobile: false,
     /** 分组展开状态：key=分组 key */
     groupOpen: {
-      home: true,
-      automation: true,
-      infrastructure: true,
-      ai: true,
+      overview: true,
+      scheduling: true,
+      infra: true,
+      agent: true,
+      governance: true,
       system: true,
     },
     theme: 'dark',

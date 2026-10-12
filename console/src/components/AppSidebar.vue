@@ -25,7 +25,7 @@ const auth = useAuthStore()
 const route = useRoute()
 const { collapsed } = storeToRefs(app)
 
-const statusText = computed(() => 'System Normal')
+const statusText = computed(() => '系统正常')
 const sessionTotal = ref(null)
 
 onMounted(async () => {
@@ -60,8 +60,8 @@ function isActiveGroup(group) {
         <el-icon :size="18"><Cpu /></el-icon>
       </div>
       <div v-if="!collapsed" class="min-w-0 flex-1">
-        <p class="truncate text-sm font-semibold leading-5 text-ink">ITOps Agent</p>
-        <p class="truncate text-[11px] leading-4 text-ink-dim">Multi-Agent Automation Platform</p>
+        <p class="truncate text-sm font-semibold leading-5 text-ink">crony</p>
+        <p class="truncate text-[11px] leading-4 text-ink-dim">分布式定时任务 · AI Agent 运维</p>
       </div>
     </div>
 
@@ -82,7 +82,7 @@ function isActiveGroup(group) {
             @click="app.collapseAll()"
           >
             <el-icon :size="12"><Sort /></el-icon>
-            Collapse All
+            收起分组
           </button>
         </el-tooltip>
         <el-tooltip content="展开全部菜单分组" placement="bottom">
@@ -170,7 +170,7 @@ function isActiveGroup(group) {
         <div v-if="!collapsed" class="min-w-0 flex-1">
           <p class="truncate text-xs font-medium leading-4 text-ink">{{ auth.displayName }}</p>
           <p class="truncate text-[10px] leading-4 text-ink-dim">
-            {{ auth.isAdmin ? 'Administrator' : 'Operator' }} · JWT 12h
+            {{ auth.isAdmin ? '管理员' : '运维' }} · JWT 12h
           </p>
         </div>
       </div>

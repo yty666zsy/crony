@@ -134,7 +134,7 @@ console/
     ├── utils/{dict.js,format.js} # 枚举字典（与 Go 枚举逐项对应）、格式化
     ├── components/
     │   ├── AppLayout.vue AppSidebar.vue AppTopbar.vue
-    │   ├── AgentSessionWidget.vue  # 右下角紫色圆形入口 → Agent 会话速查（§1，不是聊天）
+    │   ├── AgentSessionWidget.vue  # 右下角青色圆形入口 → Agent 会话速查（§1，不是聊天）
     │   ├── AgentStepCard.vue     # 单条轨迹步骤：model / tool / notice 视觉可分（§2）
     │   ├── DiagnosisPanel.vue    # AI 诊断面板：只读只建议、模型自评、未观测引用告警（§3）
     │   ├── NlJobWizard.vue       # 自然语言建任务向导：草案 → 5 次触发时间 → 确认（§5）
@@ -163,10 +163,9 @@ console/
 | `/knowledge` | 知识库 | Runbook / SOP / 复盘文档检索与正文预览 |
 | `/audit` | 审计日志 | 操作审计检索（操作者、动作、对象、结果） |
 | `/settings` | 设置 | 鉴权/改密、调度默认值、通知、Agent 能力与预算（provider/model/配额，不写"支持 XX 种能力"） |
-| `/db-connections` `/ssh-keys` `/remote-desktop` `/containers` | 占位页 | 有目标说明、交付阶段与要点清单，**非空白页** |
 | `/:pathMatch(.*)*` | 404 | 兜底页 |
 
-响应式：`≥1280px` 完整三栏；`≤1024px` 侧栏收为图标栏（可手动展开/收起/"Collapse All"）；
+响应式：`≥1280px` 完整三栏；`≤1024px` 侧栏收为图标栏（可手动展开/收起/“收起分组”）；
 `≤768px` 卡片单列、表格横向滚动。
 
 ---
@@ -320,15 +319,18 @@ Mock 里**可达**的业务错误分支（不是装饰）：`1008`（未知 sess
 
 ## 6. 设计取舍
 
-- **导航分组扩展**：基线只有 `Home` / `Infrastructure`，本控制台新增 `Automation`（定时任务、
-  执行记录）、`AI Agent`（Agent 控制台、知识库、审计）、`System`（设置）三组，把 crony 原有的
-  任务/执行能力与新增的 Agent 能力分开，避免"基础设施"分组被撑成杂项。
+- **导航信息架构按 crony 工作流重排**：侧边栏分六组 —— `概览`（概览 / 值班大屏）、
+  `调度与执行`（定时任务 / 执行记录 / 任务编排）、`节点与资源`（节点管理 / 终端）、
+  `Agent 智能`（Agent 会话 / 知识库 / 经验库）、`治理与运维`（审批中心 / 审计轨迹 / 自愈调度 /
+  智能运维）、`系统`（系统设置）。早期版本沿用过演示站基线里的 `DB Connections` / `SSH Keys` /
+  `Remote Desktop` / `Containers` 等**无后端支撑的占位项**，已连同对应路由与 `PlaceholderView.vue`
+  一并移除——控制台只承载有真实接口或明确契约的能力。
 - **无独立登录页**：本期 9 个必交付页面不含登录；底部用户栏展示当前用户（Mock 为 `admin`），
   真实登录链路已在 `client.js` 就绪（`Bearer` 头 + `localStorage` 的 `crony_token`），
   后续把登录页接到 `/login` 即可。
 - **侧边栏状态徽标不再编数字**：阶段 1 写死过 `6 Agent · 12 Job`（Go 侧没有 Agent 实体模型，无从核对）；
-  阶段 2 改为 `System Normal · N Agent 会话`，N 取契约 §1 `POST /agent/session/search` 的 `total`，
-  接口不可用时只显示 `System Normal`。
+  阶段 2 改为 `系统正常 · N Agent 会话`，N 取契约 §1 `POST /agent/session/search` 的 `total`，
+  接口不可用时只显示 `系统正常`。
 - **不做聊天框**：阶段 1 右下角是"AI 对话"（`/agent/chat`），但契约里没有这个接口——Agent 的产物是
   **会话 + 轨迹**。阶段 2 换成"Agent 会话速查"（按 run_id/job_id 检索会话 → 跳轨迹），删除了
   `AiChatWidget.vue` 与 `stores/chat.js`，避免用一个不存在的接口撑交互。
@@ -518,7 +520,8 @@ action → `api/auth.js` → `api/client.js` 的 axios 拦截器（真的往 loc
 
 1. **视觉与交互没有人工点验**：本机没有可用浏览器/无头内核，`verify:live` 走的是
    "控制台 API 层 + 真实后端"，**不覆盖**渲染、点击、路由跳转、二次确认弹窗。
-   开发服务器本身已验证：`pnpm dev` 首页 200（标题 `ITOps Agent · crony 控制台`）、
+   开发服务器本身已验证：`pnpm dev` 首页 200（当时标题 `ITOps Agent · crony 控制台`，后经前端适配
+   改为 `crony · 分布式定时任务与 AI Agent 运维平台`）、
    `/src/main.js`、`/src/App.vue`、`/src/views/{Dashboard,Agents,Runs}View.vue`、
    `/src/components/NlJobWizard.vue` 均 HTTP 200 可编译，且注入的 env 为
    `"VITE_USE_MOCK": "false"`（即 dev 服务器确实处于真实模式）。

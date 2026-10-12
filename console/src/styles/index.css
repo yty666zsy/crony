@@ -5,22 +5,22 @@
 @tailwind utilities;
 
 /* ==========================================================================
-   1. 主题令牌（深色海军蓝，Baseline：ITOps Agent 演示站观测值）
+   1. 主题令牌（深色：冷调石板底 + 青色主强调，crony 控制台自用配色）
    ========================================================================== */
 :root {
-  --c-bg: #0b1020;
-  --c-bg-soft: #131a2e;
-  --c-card: #161f38;
-  --c-card-hover: #1b2544;
-  --c-border: #253053;
-  --c-border-strong: #33406b;
+  --c-bg: #0a0f19;
+  --c-bg-soft: #121a29;
+  --c-card: #151e2e;
+  --c-card-hover: #1a2436;
+  --c-border: #223046;
+  --c-border-strong: #2f4055;
 
-  --c-primary: #6366f1;
-  --c-primary-2: #8b5cf6;
+  --c-primary: #06b6d4;
+  --c-primary-2: #3b82f6;
   --c-success: #22c55e;
   --c-warn: #f59e0b;
   --c-danger: #ef4444;
-  --c-info: #38bdf8;
+  --c-info: #60a5fa;
 
   --c-text: #e6ebf7;
   --c-text-2: #a7b1cc;
@@ -60,7 +60,7 @@
   /* 滚动条 */
   * {
     scrollbar-width: thin;
-    scrollbar-color: #2c3a63 transparent;
+    scrollbar-color: #2b3a4d transparent;
   }
   *::-webkit-scrollbar {
     width: 9px;
@@ -70,13 +70,13 @@
     background: transparent;
   }
   *::-webkit-scrollbar-thumb {
-    background: #2c3a63;
+    background: #2b3a4d;
     border-radius: 999px;
     border: 2px solid transparent;
     background-clip: content-box;
   }
   *::-webkit-scrollbar-thumb:hover {
-    background: #3b4a7d;
+    background: #3a4d66;
     background-clip: content-box;
   }
 }
@@ -140,17 +140,17 @@
    4. Element Plus 深色覆写
    --------------------------------------------------------------------------
    目标站点为深色主题，Element Plus 的 dark css-vars 默认底色偏中性灰，
-   与海军蓝背景不协调；这里把组件级 CSS 变量整体重绑到本工程主题令牌上。
+   与石板蓝背景不协调；这里把组件级 CSS 变量整体重绑到本工程主题令牌上。
    ========================================================================== */
 html.dark {
   /* --- 全局色板 --- */
-  --el-color-primary: #6366f1;
-  --el-color-primary-light-3: #7d80f4;
-  --el-color-primary-light-5: #9698f6;
-  --el-color-primary-light-7: #b3b5f9;
-  --el-color-primary-light-8: #c7c8fa;
-  --el-color-primary-light-9: #1e2450;
-  --el-color-primary-dark-2: #4f52d8;
+  --el-color-primary: #06b6d4;
+  --el-color-primary-light-3: #22d3ee;
+  --el-color-primary-light-5: #67e8f9;
+  --el-color-primary-light-7: #a5f3fc;
+  --el-color-primary-light-8: #c3f6fd;
+  --el-color-primary-light-9: #0d2b33;
+  --el-color-primary-dark-2: #0891b2;
 
   --el-color-success: #22c55e;
   --el-color-success-light-9: #12291d;
@@ -160,14 +160,14 @@ html.dark {
   --el-color-danger-light-9: #2e1618;
   --el-color-error: #ef4444;
   --el-color-info: #7c8aa8;
-  --el-color-info-light-9: #1b2237;
+  --el-color-info-light-9: #182130;
 
   /* --- 背景 --- */
-  --el-bg-color: #161f38;
-  --el-bg-color-page: #0b1020;
-  --el-bg-color-overlay: #1b2544;
-  --el-mask-color: rgba(6, 10, 22, 0.75);
-  --el-mask-color-extra-light: rgba(6, 10, 22, 0.35);
+  --el-bg-color: #151e2e;
+  --el-bg-color-page: #0a0f19;
+  --el-bg-color-overlay: #1a2436;
+  --el-mask-color: rgba(5, 8, 15, 0.75);
+  --el-mask-color-extra-light: rgba(5, 8, 15, 0.35);
 
   /* --- 文本 --- */
   --el-text-color-primary: #e6ebf7;
@@ -178,26 +178,26 @@ html.dark {
   --el-text-color-primary-rgb: 230, 235, 247;
 
   /* --- 边框 --- */
-  --el-border-color: #253053;
-  --el-border-color-light: #2b3760;
-  --el-border-color-lighter: #232e52;
-  --el-border-color-extra-light: #1e2745;
-  --el-border-color-dark: #33406b;
-  --el-border-color-darker: #3c4a7d;
+  --el-border-color: #223046;
+  --el-border-color-light: #26334a;
+  --el-border-color-lighter: #1f2b3d;
+  --el-border-color-extra-light: #1c2635;
+  --el-border-color-dark: #2f4055;
+  --el-border-color-darker: #3a4d66;
 
   /* --- 填充 --- */
-  --el-fill-color: #1f2a4d;
-  --el-fill-color-light: #1b2544;
-  --el-fill-color-lighter: #182142;
-  --el-fill-color-extra-light: #151d3a;
-  --el-fill-color-dark: #232e52;
-  --el-fill-color-darker: #2a3660;
-  --el-fill-color-blank: #161f38;
+  --el-fill-color: #1f2b3d;
+  --el-fill-color-light: #1a2436;
+  --el-fill-color-lighter: #182130;
+  --el-fill-color-extra-light: #141c29;
+  --el-fill-color-dark: #1f2b3d;
+  --el-fill-color-darker: #29384f;
+  --el-fill-color-blank: #151e2e;
 
   /* --- 禁用态 --- */
-  --el-disabled-bg-color: #131a2e;
+  --el-disabled-bg-color: #121a29;
   --el-disabled-text-color: #55608a;
-  --el-disabled-border-color: #253053;
+  --el-disabled-border-color: #223046;
 
   /* --- 阴影 --- */
   --el-box-shadow: 0 12px 32px 4px rgba(0, 0, 0, 0.36), 0 8px 20px rgba(0, 0, 0, 0.42);
@@ -210,13 +210,13 @@ html.dark {
 html.dark .el-input__wrapper,
 html.dark .el-textarea__inner,
 html.dark .el-select__wrapper {
-  background-color: #101736;
-  box-shadow: 0 0 0 1px #253053 inset;
+  background-color: #0e1522;
+  box-shadow: 0 0 0 1px #223046 inset;
 }
 html.dark .el-input__wrapper:hover,
 html.dark .el-textarea__inner:hover,
 html.dark .el-select__wrapper:hover {
-  box-shadow: 0 0 0 1px #3b4a7d inset;
+  box-shadow: 0 0 0 1px #3a4d66 inset;
 }
 html.dark .el-input__wrapper.is-focus,
 html.dark .el-select__wrapper.is-focused {
@@ -235,15 +235,15 @@ html.dark .el-input__inner::placeholder {
 html.dark .el-popper.is-light,
 html.dark .el-select__popper,
 html.dark .el-dropdown__popper {
-  background: #1b2544;
-  border-color: #2b3760;
+  background: #1a2436;
+  border-color: #26334a;
 }
 html.dark .el-popper.is-light .el-popper__arrow::before {
-  background: #1b2544;
-  border-color: #2b3760;
+  background: #1a2436;
+  border-color: #26334a;
 }
 html.dark .el-select-dropdown__item.is-hovering {
-  background-color: #232e52;
+  background-color: #1f2b3d;
 }
 html.dark .el-select-dropdown__item.is-selected {
   color: var(--el-color-primary-light-3);
@@ -253,13 +253,13 @@ html.dark .el-select-dropdown__item.is-selected {
 html.dark .el-table {
   --el-table-bg-color: transparent;
   --el-table-tr-bg-color: transparent;
-  --el-table-header-bg-color: #1b2544;
+  --el-table-header-bg-color: #1a2436;
   --el-table-header-text-color: #a7b1cc;
   --el-table-text-color: #cdd5e9;
-  --el-table-border-color: #232e52;
-  --el-table-row-hover-bg-color: #1f2a4d;
-  --el-table-current-row-bg-color: #232e52;
-  --el-table-expanded-cell-bg-color: #131a2e;
+  --el-table-border-color: #1f2b3d;
+  --el-table-row-hover-bg-color: #1f2b3d;
+  --el-table-current-row-bg-color: #1f2b3d;
+  --el-table-expanded-cell-bg-color: #121a29;
   background-color: transparent;
 }
 html.dark .el-table th.el-table__cell {
@@ -272,11 +272,11 @@ html.dark .el-table tr {
 html.dark .el-table__inner-wrapper::before,
 html.dark .el-table--border::after,
 html.dark .el-table--border::before {
-  background-color: #232e52;
+  background-color: #1f2b3d;
 }
 html.dark .el-table td.el-table__cell,
 html.dark .el-table th.el-table__cell.is-leaf {
-  border-bottom-color: #232e52;
+  border-bottom-color: #1f2b3d;
 }
 html.dark .el-table__empty-block {
   background-color: transparent;
@@ -287,16 +287,16 @@ html.dark .el-table__empty-text {
 
 /* --- 分页 --- */
 html.dark .el-pagination {
-  --el-pagination-bg-color: #161f38;
+  --el-pagination-bg-color: #151e2e;
   --el-pagination-text-color: #cdd5e9;
   --el-pagination-button-color: #cdd5e9;
-  --el-pagination-button-bg-color: #1b2544;
-  --el-pagination-button-disabled-bg-color: #131a2e;
-  --el-pagination-hover-color: #818cf8;
+  --el-pagination-button-bg-color: #1a2436;
+  --el-pagination-button-disabled-bg-color: #121a29;
+  --el-pagination-hover-color: #22d3ee;
 }
 html.dark .el-pagination button,
 html.dark .el-pager li {
-  background-color: #1b2544 !important;
+  background-color: #1a2436 !important;
   color: #cdd5e9;
 }
 html.dark .el-pager li.is-active {
@@ -307,13 +307,13 @@ html.dark .el-pager li.is-active {
 /* --- 抽屉 / 对话框 --- */
 html.dark .el-drawer,
 html.dark .el-dialog {
-  background-color: #131a2e;
+  background-color: #121a29;
 }
 html.dark .el-drawer__header,
 html.dark .el-dialog__header {
   margin-bottom: 0;
   padding: 16px 20px;
-  border-bottom: 1px solid #253053;
+  border-bottom: 1px solid #223046;
   color: var(--el-text-color-primary);
 }
 html.dark .el-drawer__title,
@@ -331,11 +331,11 @@ html.dark .el-dialog__body {
 
 /* --- 卡片 / 描述列表 --- */
 html.dark .el-card {
-  background-color: #161f38;
-  border-color: #253053;
+  background-color: #151e2e;
+  border-color: #223046;
 }
 html.dark .el-descriptions {
-  --el-descriptions-item-bordered-label-background: #1b2544;
+  --el-descriptions-item-bordered-label-background: #1a2436;
 }
 html.dark .el-descriptions__body {
   background-color: transparent;
@@ -351,7 +351,7 @@ html.dark .el-tag {
 
 /* --- 时间线（执行步骤） --- */
 html.dark .el-timeline-item__tail {
-  border-left-color: #2b3760;
+  border-left-color: #26334a;
 }
 html.dark .el-timeline-item__timestamp {
   color: #6f7b9c;
@@ -359,26 +359,26 @@ html.dark .el-timeline-item__timestamp {
 
 /* --- 进度条 / 骨架 --- */
 html.dark .el-progress-bar__outer {
-  background-color: #232e52;
+  background-color: #1f2b3d;
 }
 html.dark .el-skeleton {
-  --el-skeleton-color: #1b2544;
-  --el-skeleton-to-color: #232e52;
+  --el-skeleton-color: #1a2436;
+  --el-skeleton-to-color: #1f2b3d;
 }
 
 /* --- 菜单（移动端抽屉） --- */
 html.dark .el-menu {
-  --el-menu-bg-color: #101736;
+  --el-menu-bg-color: #0e1522;
   --el-menu-text-color: #a7b1cc;
-  --el-menu-hover-bg-color: #1b2544;
-  --el-menu-active-color: #818cf8;
+  --el-menu-hover-bg-color: #1a2436;
+  --el-menu-active-color: #22d3ee;
   border-right: none;
 }
 
 /* --- 消息提示 --- */
 html.dark .el-message {
-  background-color: #1b2544;
-  border-color: #2b3760;
+  background-color: #1a2436;
+  border-color: #26334a;
 }
 html.dark .el-message__content {
   color: #e6ebf7;
@@ -393,10 +393,10 @@ html.dark .el-checkbox__label {
   color: #cdd5e9;
 }
 html.dark .el-divider {
-  border-color: #253053;
+  border-color: #223046;
 }
 html.dark .el-divider__text {
-  background-color: #131a2e;
+  background-color: #121a29;
   color: #a7b1cc;
 }
 html.dark .el-empty__description p {
@@ -406,10 +406,10 @@ html.dark .el-tabs__item {
   color: #a7b1cc;
 }
 html.dark .el-tabs__item.is-active {
-  color: #818cf8;
+  color: #22d3ee;
 }
 html.dark .el-tabs__nav-wrap::after {
-  background-color: #253053;
+  background-color: #223046;
 }
 
 /* ==========================================================================

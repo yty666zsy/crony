@@ -79,8 +79,8 @@ const onlineNodes = computed(() => nodes.value.filter((n) => n.status === 1))
           <el-icon :size="22"><Cpu /></el-icon>
         </div>
         <div>
-          <h1 class="text-lg font-semibold tracking-wide">ITOps Agent 值班大屏</h1>
-          <p class="text-[11px] text-ink-dim">Multi-Agent Automation Platform · crony</p>
+          <h1 class="text-lg font-semibold tracking-wide">crony 值班大屏</h1>
+          <p class="text-[11px] text-ink-dim">分布式定时任务 · AI Agent 运维</p>
         </div>
       </div>
 
@@ -117,7 +117,7 @@ const onlineNodes = computed(() => nodes.value.filter((n) => n.status === 1))
       </div>
       <div class="rounded-2xl border border-navy-600 bg-navy-850 p-4">
         <p class="text-[11px] text-ink-dim">节点在线</p>
-        <p class="mt-1 text-3xl font-semibold text-[#38bdf8]">
+        <p class="mt-1 text-3xl font-semibold text-[#60a5fa]">
           {{ today?.node_online ?? kpi.online_nodes }}<span class="text-base text-ink-dim">/{{ today?.node_total ?? kpi.total_nodes }}</span>
         </p>
         <p class="mt-1 text-[11px] text-ink-dim">离线 {{ (today?.node_total ?? 0) - (today?.node_online ?? 0) }} 台</p>

@@ -23,11 +23,11 @@ const detail = reactive({ visible: false, doc: null })
 const query = reactive({ keyword: '', tag: '', type: '', page: 1, page_size: 8 })
 
 const typeMeta = {
-  runbook: { text: 'Runbook', color: '#6366f1' },
+  runbook: { text: 'Runbook', color: '#06b6d4' },
   sop: { text: 'SOP', color: '#38bdf8' },
   postmortem: { text: '复盘', color: '#f59e0b' },
   standard: { text: '规范', color: '#22c55e' },
-  faq: { text: 'FAQ', color: '#8b5cf6' },
+  faq: { text: 'FAQ', color: '#3b82f6' },
 }
 
 const allTags = ['数据库', '性能', 'Runbook', '容器', '自愈', '存储', 'SOP', '告警', '网络', '变更', 'Kubernetes', '安全']

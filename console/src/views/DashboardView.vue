@@ -120,7 +120,7 @@ function goRunDetail(row) {
           label="执行次数（24h）"
           :value="formatNumber(runsCard.total)"
           icon="VideoPlay"
-          color="#6366f1"
+          color="#06b6d4"
           :trend="trends.runs_today"
           :hint="runsCard.hint"
           :sub="runsCard.source"
@@ -151,7 +151,7 @@ function goRunDetail(row) {
           label="平均执行耗时"
           :value="formatDuration(kpi.avg_duration_ms)"
           icon="Timer"
-          color="#8b5cf6"
+          color="#3b82f6"
           :trend="trends.avg_duration"
           hint="全部终态 run 的中位数（Mock）"
         />

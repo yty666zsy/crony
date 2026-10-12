@@ -8,10 +8,13 @@ import { createRouter, createWebHashHistory } from 'vue-router'
  * 默认路由 /dashboard。
  *
  * meta 字段：
- *   title    页面标题（侧边栏 + 顶栏主标题）
+ *   title    页面标题（顶栏主标题）
  *   subtitle 顶栏副标题（面包屑风格）
- *   group    所属导航分组（用于顶栏面包屑前缀）
+ *   group    所属导航分组（顶栏面包屑前缀，取值与 src/config/nav.js 的分组标签一致）
  *   icon     Element Plus 图标名（侧边栏使用，见 src/config/nav.js）
+ *
+ * 说明：早期版本曾保留 4 个无后端支撑的演示占位路由（/db-connections、/ssh-keys、
+ * /remote-desktop、/containers），现按"控制台只承载真实能力"的原则移除。
  */
 
 // /big-screen 使用独立的全屏布局（不带侧边栏/顶栏）
@@ -20,147 +23,68 @@ const BARE_LAYOUT = { bare: true }
 const routes = [
   { path: '/', redirect: '/dashboard' },
 
+  /* ---------------------------- 概览 ---------------------------- */
   {
     path: '/dashboard',
     name: 'dashboard',
     component: () => import('@/views/DashboardView.vue'),
-    meta: { title: 'Dashboard', subtitle: '总览 · 任务与 Agent 运行态势', group: 'Home', icon: 'Odometer' },
+    meta: { title: '概览', subtitle: '总览 · 任务与 Agent 运行态势', group: '概览', icon: 'Odometer' },
   },
   {
     path: '/big-screen',
     name: 'big-screen',
     component: () => import('@/views/BigScreenView.vue'),
-    meta: { title: 'Big Screen', subtitle: '大屏态势（阶段 2 完善）', group: 'Home', icon: 'Monitor', ...BARE_LAYOUT },
+    meta: { title: '值班大屏', subtitle: '大屏态势（阶段 2 完善）', group: '概览', icon: 'Monitor', ...BARE_LAYOUT },
   },
 
-  /* ------------------------- Automation ------------------------- */
+  /* ------------------------- 调度与执行 ------------------------- */
   {
     path: '/jobs',
     name: 'jobs',
     component: () => import('@/views/JobsView.vue'),
-    meta: { title: 'Scheduled Jobs', subtitle: '定时任务 · cron 表达式与重试策略', group: 'Automation', icon: 'Timer' },
+    meta: { title: '定时任务', subtitle: 'cron 表达式与重试策略', group: '调度与执行', icon: 'Timer' },
   },
   {
     path: '/runs',
     name: 'runs',
     component: () => import('@/views/RunsView.vue'),
-    meta: { title: 'Run History', subtitle: '执行记录 · job_run 与步骤时间线', group: 'Automation', icon: 'DataLine' },
+    meta: { title: '执行记录', subtitle: 'job_run 与步骤时间线', group: '调度与执行', icon: 'DataLine' },
   },
   {
     path: '/orchestration',
     name: 'orchestration',
     component: () => import('@/views/OrchestrationView.vue'),
     meta: {
-      title: 'Orchestration',
-      subtitle: '任务编排 · 多步骤 DAG（依赖 / 汇聚 / 层深）',
-      group: 'Automation',
+      title: '任务编排',
+      subtitle: '多步骤 DAG（依赖 / 汇聚 / 层深）',
+      group: '调度与执行',
       icon: 'Share',
     },
   },
 
-  /* ------------------------ Infrastructure ---------------------- */
+  /* ------------------------- 节点与资源 ------------------------- */
   {
     path: '/servers',
     name: 'servers',
     component: () => import('@/views/ServersView.vue'),
-    meta: { title: 'Server Management', subtitle: '服务器管理 · 节点心跳与任务分布', group: 'Infrastructure', icon: 'Monitor' },
-  },
-  {
-    path: '/db-connections',
-    name: 'db-connections',
-    component: () => import('@/views/PlaceholderView.vue'),
-    meta: {
-      title: 'DB Connections',
-      subtitle: '数据库连接（阶段 2 交付）',
-      group: 'Infrastructure',
-      icon: 'Coin',
-      planned: '阶段 2',
-      desc:
-        '统一登记数据库连接（MySQL / PostgreSQL / Redis），供巡检类任务与 Agent 的只读工具复用。' +
-        '当前后端没有对应模型与接口，本页为信息架构占位。',
-      bullets: [
-        '连接信息加密存储，口令不落前端（仅存引用 ID）',
-        '支持连通性测试与权限最小化校验',
-        '被 MySQL 慢查询巡检等任务引用，避免口令散落在 cron 命令里',
-      ],
-    },
-  },
-  {
-    path: '/ssh-keys',
-    name: 'ssh-keys',
-    component: () => import('@/views/PlaceholderView.vue'),
-    meta: {
-      title: 'SSH Keys',
-      subtitle: '密钥管理（阶段 2 交付）',
-      group: 'Infrastructure',
-      icon: 'Key',
-      planned: '阶段 2',
-      desc:
-        '集中托管节点登录所用密钥与口令凭据，替代当前"节点上直接放私钥"的做法。' +
-        '当前后端没有对应模型与接口，本页为信息架构占位。',
-      bullets: [
-        '私钥仅在后端加密存储，前端只能提交不能回读',
-        '按节点/分组授权，配合阶段 0 的 RBAC 做最小权限',
-        '支持密钥轮换提醒（与"证书到期提醒"任务同源）',
-      ],
-    },
+    meta: { title: '节点管理', subtitle: '节点心跳与任务分布', group: '节点与资源', icon: 'Monitor' },
   },
   {
     path: '/terminal',
     name: 'terminal',
     component: () => import('@/views/TerminalView.vue'),
-    meta: { title: 'Terminal', subtitle: '终端 · 阶段 2 接入真实 PTY', group: 'Infrastructure', icon: 'Monitor' },
-  },
-  {
-    path: '/remote-desktop',
-    name: 'remote-desktop',
-    component: () => import('@/views/PlaceholderView.vue'),
-    meta: {
-      title: 'Remote Desktop',
-      subtitle: '远程桌面（阶段 3 交付）',
-      group: 'Infrastructure',
-      icon: 'FullScreen',
-      planned: '阶段 3',
-      desc:
-        '基于 VNC/RDP 网关的图形化远程桌面，用于无法用命令行覆盖的运维场景。' +
-        '当前后端没有对应能力，本页为信息架构占位。',
-      bullets: [
-        '会话录制与操作回放进入审计链路',
-        '按节点授权，禁止共享账号',
-        '与 Agent 的"人工接管"模式共用入口',
-      ],
-    },
-  },
-  {
-    path: '/containers',
-    name: 'containers',
-    component: () => import('@/views/PlaceholderView.vue'),
-    meta: {
-      title: 'Containers & Virtualization',
-      subtitle: '容器与虚拟化（阶段 3 交付）',
-      group: 'Infrastructure',
-      icon: 'Box',
-      planned: '阶段 3',
-      desc:
-        '容器（Docker）与虚拟机（KVM/vSphere）的统一视图。当前 crony 只在节点上通过 shell 任务操作容器' +
-        '（见"容器健康检查"任务），没有容器 API，本页为信息架构占位。',
-      bullets: [
-        '容器列表/日志/资源水位，复用节点上的 docker 能力',
-        '虚拟机的生命周期动作纳入审批（阶段 3）',
-        '与"容器镜像垃圾回收"任务联动展示清理结果',
-      ],
-    },
+    meta: { title: '终端', subtitle: '阶段 2 接入真实 PTY', group: '节点与资源', icon: 'Monitor' },
   },
 
-  /* ---------------------------- AI Agent ------------------------ */
+  /* -------------------------- Agent 智能 ------------------------ */
   {
     path: '/agents',
     name: 'agents',
     component: () => import('@/views/AgentsView.vue'),
     meta: {
-      title: 'Agent Console',
-      subtitle: 'Agent 会话 · 只读能力边界与轨迹（阶段 2 契约 §1/§3/§4）',
-      group: 'AI Agent',
+      title: 'Agent 会话',
+      subtitle: '只读能力边界与轨迹（阶段 2 契约 §1/§3/§4）',
+      group: 'Agent 智能',
       icon: 'MagicStick',
     },
   },
@@ -171,9 +95,9 @@ const routes = [
     name: 'agent-session',
     component: () => import('@/views/AgentSessionView.vue'),
     meta: {
-      title: 'Agent Session',
+      title: 'Agent 会话详情',
       subtitle: '轨迹回放 · 只渲染后端记录的步骤（阶段 2 契约 §2）',
-      group: 'AI Agent',
+      group: 'Agent 智能',
       icon: 'MagicStick',
     },
   },
@@ -181,44 +105,46 @@ const routes = [
     path: '/knowledge',
     name: 'knowledge',
     component: () => import('@/views/KnowledgeView.vue'),
-    meta: { title: 'Knowledge Base', subtitle: '知识库 · Runbook / SOP / 复盘（Mock）', group: 'AI Agent', icon: 'Notebook' },
-  },
-  {
-    path: '/audit',
-    name: 'audit',
-    component: () => import('@/views/AuditView.vue'),
-    meta: { title: 'Audit Trail', subtitle: '审计日志 · 谁在何时对什么做了什么（Mock）', group: 'AI Agent', icon: 'Files' },
-  },
-  {
-    path: '/approvals',
-    name: 'approvals',
-    component: () => import('@/views/ApprovalsView.vue'),
-    meta: {
-      title: 'Approvals',
-      subtitle: '写动作审批台 · 一次批准至多执行一次',
-      group: 'AI Agent',
-      icon: 'CircleCheck',
-    },
+    meta: { title: '知识库', subtitle: 'Runbook / SOP / 复盘（Mock）', group: 'Agent 智能', icon: 'Notebook' },
   },
   {
     path: '/memory',
     name: 'memory',
     component: () => import('@/views/MemoryView.vue'),
     meta: {
-      title: 'Memory',
+      title: '经验库',
       subtitle: 'Agent 经验库 · 症状/动作/结果沉淀，只作线索不作证据；坏经验只能停用',
-      group: 'AI Agent',
+      group: 'Agent 智能',
       icon: 'Collection',
     },
+  },
+
+  /* ------------------------- 治理与运维 ------------------------- */
+  {
+    path: '/approvals',
+    name: 'approvals',
+    component: () => import('@/views/ApprovalsView.vue'),
+    meta: {
+      title: '审批中心',
+      subtitle: '写动作审批台 · 一次批准至多执行一次',
+      group: '治理与运维',
+      icon: 'CircleCheck',
+    },
+  },
+  {
+    path: '/audit',
+    name: 'audit',
+    component: () => import('@/views/AuditView.vue'),
+    meta: { title: '审计轨迹', subtitle: '谁在何时对什么做了什么（Mock）', group: '治理与运维', icon: 'Files' },
   },
   {
     path: '/selfheal',
     name: 'selfheal',
     component: () => import('@/views/SelfHealView.vue'),
     meta: {
-      title: 'Self-Heal',
-      subtitle: '自愈调度 · 失败自动处置（白名单动作 + 三道闸门），只读与手动催一轮',
-      group: 'AI Agent',
+      title: '自愈调度',
+      subtitle: '失败自动处置（白名单动作 + 三道闸门），只读与手动催一轮',
+      group: '治理与运维',
       icon: 'FirstAidKit',
     },
   },
@@ -227,19 +153,19 @@ const routes = [
     name: 'ops',
     component: () => import('@/views/OpsView.vue'),
     meta: {
-      title: 'Ops Intelligence',
+      title: '智能运维',
       subtitle: '多目标调度 / SLO 契约 / 指标看板 / 自治信用 / 混沌考核 / 影子对账',
-      group: 'AI Agent',
+      group: '治理与运维',
       icon: 'DataAnalysis',
     },
   },
 
-  /* ----------------------------- System ------------------------- */
+  /* ---------------------------- 系统 ---------------------------- */
   {
     path: '/settings',
     name: 'settings',
     component: () => import('@/views/SettingsView.vue'),
-    meta: { title: 'Settings', subtitle: '设置 · 鉴权 / 调度默认值 / 通知 / Agent', group: 'System', icon: 'Setting' },
+    meta: { title: '系统设置', subtitle: '鉴权 / 调度默认值 / 通知 / Agent', group: '系统', icon: 'Setting' },
   },
 
   {
@@ -258,7 +184,7 @@ const router = createRouter({
 
 router.afterEach((to) => {
   const title = to.meta?.title
-  document.title = title ? `${title} · ITOps Agent 控制台` : 'ITOps Agent 控制台'
+  document.title = title ? `${title} · crony 控制台` : 'crony 控制台'
 })
 
 export { routes }

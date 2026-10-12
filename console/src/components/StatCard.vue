@@ -12,7 +12,7 @@ const props = defineProps({
   unit: { type: String, default: '' },
   hint: { type: String, default: '' },
   icon: { type: String, default: '' },
-  color: { type: String, default: '#6366f1' },
+  color: { type: String, default: '#06b6d4' },
   trend: { type: Array, default: null },
   /** 0~100：给定时显示进度条，替代趋势图 */
   progress: { type: Number, default: null },

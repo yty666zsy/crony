@@ -32,7 +32,7 @@ const query = reactive({
 const operatorTypeMeta = {
   user: { text: '用户', color: '#38bdf8' },
   system: { text: '系统', color: '#7c8aa8' },
-  agent: { text: 'AI Agent', color: '#8b5cf6' },
+  agent: { text: 'AI Agent', color: '#3b82f6' },
   anonymous: { text: '匿名', color: '#ef4444' },
 }
 
