@@ -1544,3 +1544,179 @@ export function healScan({ run_id: runId } = {}) {
     msg: '扫描完成',
   }
 }
+/* ===================== 阶段 4-D / 阶段 5：调度智能化与评测 Mock ===================== */
+
+const OPS_WEIGHTS = { load: 60, capacity: 10, affinity: 15, success: 15 }
+
+export function schedulerPolicy() {
+  return {
+    code: 200,
+    data: {
+      weights: { ...OPS_WEIGHTS },
+      dimensions: [
+        { key: 'load', desc: '负载（相对容量归一：任务数 / 并发上限）' },
+        { key: 'capacity', desc: '容量（未打满时容量大者优先）' },
+        { key: 'affinity', desc: '亲和（命中 prefer_node / 原节点）' },
+        { key: 'success', desc: '健康度（近期成功率；样本 <3 时按中性处理）' },
+      ],
+      hard_constraints: [
+        '节点必须可达（status != ConnFail）',
+        '必须满足 job.node_selector.require_labels 全部标签',
+        '必须存在 require_tools 声明的能力标签（tool:<name>）',
+      ],
+      note: '硬约束不满足即拒绝，绝不靠权重“扣分”放行；无可用节点时宁可不派发。',
+    },
+    msg: 'ok',
+  }
+}
+
+export function schedulerAllocate({ job_id: jobId } = {}) {
+  const chosen = 'node-a'
+  const scores = [
+    { uuid: 'node-a', hostname: 'node-a', total: 57.5, parts: { load: 30, capacity: 5, affinity: 15, success: 7.5 }, reasons: ['负载 1（未声明容量）', '命中亲和节点（原节点）'] },
+    { uuid: 'node-b', hostname: 'node-b', total: 40, parts: { load: 25, capacity: 5, affinity: 0, success: 10 }, reasons: ['负载 3/8', '近期成功率 80%（5 样本）'] },
+  ]
+  return {
+    code: 200,
+    data: {
+      decision: { chosen, scores, notes: [] },
+      requirement: { RequireLabels: null, RequireTools: null, PreferNode: 'node-a' },
+      job_id: jobId || 0,
+    },
+    msg: 'ok',
+  }
+}
+
+export function opsMetrics() {
+  return {
+    code: 200,
+    data: {
+      runs_today: 42, runs_success_today: 39, success_rate_today: 0.928,
+      avg_duration_ms_today: 3120, jobs_total: 18, jobs_assigned: 12,
+      nodes_total: 3, nodes_up: 3, approvals_pending: 1,
+      heals_by_status: { denied: 2, executed: 1, succeeded: 3, escalated: 1 },
+      memory_enabled: 45, generated_at: Math.floor(Date.now() / 1000),
+    },
+    msg: 'ok',
+  }
+}
+
+const OPS_SLO_ROWS = [
+  { id: 1, name: 'orders-daily', job_id: 21, target_success_rate: 0.99, target_on_time_rate: 0.95, window_seconds: 86400, grace_seconds: 300, enabled: true, breach_action: 'diagnose' },
+  { id: 2, name: 'cleanup-weekly', job_id: 0, target_success_rate: 0.9, target_on_time_rate: 0.8, window_seconds: 604800, grace_seconds: 600, enabled: true, breach_action: 'diagnose' },
+]
+
+export function sloList() {
+  return { code: 200, data: { list: OPS_SLO_ROWS.map((r) => ({ ...r })), total: OPS_SLO_ROWS.length }, msg: 'ok' }
+}
+
+export function sloEvaluate({ job_id: jobId } = {}) {
+  const list = OPS_SLO_ROWS.filter((r) => !jobId || r.job_id === jobId).map((r) => ({
+    policy: { ...r },
+    job_name: r.job_id ? 'orders-sync' : '',
+    report: {
+      total: 40, success: 38, on_time: 37, on_time_eligible: 40,
+      success_rate: 0.95, on_time_rate: 0.925, breached: true, unverifiable: false,
+      reasons: [`成功率 95% 低于目标 ${(r.target_success_rate * 100) | 0}%`],
+    },
+  }))
+  const breached = list.filter((e) => e.report.breached).length
+  return { code: 200, data: { list, total: list.length, breached }, msg: 'ok' }
+}
+
+const opsAutonomy = {
+  'job_retry@prod': { scope: 'job_retry@prod', level: 2, streak: 2, total_up: 12, total_down: 0, frozen: false, frozen_reason: '', updated: Math.floor(Date.now() / 1000) },
+  'node_drain@prod': { scope: 'node_drain@prod', level: 1, streak: 0, total_up: 3, total_down: 1, frozen: true, frozen_reason: '最近一次动作产生了不良后果：已降级并冻结，需人工解冻', updated: Math.floor(Date.now() / 1000) },
+}
+const LVL_NAME = ['L0', 'L1', 'L2', 'L3']
+
+export function autonomyList() {
+  const list = Object.values(opsAutonomy).map((r) => ({
+    ...r,
+    level_name: LVL_NAME[r.level] || 'L?',
+    effective_level: r.frozen ? 'L1' : LVL_NAME[r.level],
+  }))
+  return { code: 200, data: { list, total: list.length }, msg: 'ok' }
+}
+
+export function autonomyObserve({ scope, success } = {}) {
+  if (!scope || typeof success !== 'boolean') return bizErr(1001, '需要 scope 与 success')
+  const cur = opsAutonomy[scope] || { scope, level: 0, streak: 0, total_up: 0, total_down: 0, frozen: false, frozen_reason: '', updated: 0 }
+  if (success) {
+    cur.total_up += 1
+    cur.streak += 1
+    if (!cur.frozen && cur.streak >= 5 && cur.level < 2) { cur.level += 1; cur.streak = 0 }
+  } else {
+    cur.total_down += 1
+    cur.streak = 0
+    cur.level = Math.max(0, cur.level - 1)
+    cur.frozen = true
+    cur.frozen_reason = '最近一次动作产生了不良后果：已降级并冻结，需人工解冻'
+  }
+  cur.updated = Math.floor(Date.now() / 1000)
+  opsAutonomy[scope] = cur
+  return { code: 200, data: { credit: { ...cur } }, msg: 'ok' }
+}
+
+export function autonomyUnfreeze({ scope } = {}) {
+  const cur = opsAutonomy[scope]
+  if (!cur) return bizErr(1001, '该 scope 不存在')
+  cur.frozen = false
+  cur.frozen_reason = ''
+  cur.streak = 0
+  return { code: 200, data: { credit: { ...cur } }, msg: 'ok' }
+}
+
+const OPS_CHAOS = [
+  { kind: 'latency', target: 'db', severity: 1, params: { ms: '3000' } },
+  { kind: 'disk_full', target: 'node', severity: 2, params: { fill: '95%' } },
+  { kind: 'node_down', target: 'worker-1', severity: 3 },
+]
+
+export function chaosCatalog() {
+  return { code: 200, data: { catalog: OPS_CHAOS.map((f) => ({ ...f })), note: '受控、可复现、可回滚；severity 越高影响面越大。' }, msg: 'ok' }
+}
+
+export function chaosGrade({ attempts } = {}) {
+  const rows = Array.isArray(attempts) ? attempts : []
+  if (rows.length === 0) return { code: 200, data: { score: { total: 0, license: -1, by_kind: {} } }, msg: 'ok' }
+  let detected = 0, handled = 0, correct = 0, detSum = 0
+  const kt = {}, kc = {}
+  for (const a of rows) {
+    if (a.detected) detected++
+    if (a.handled) handled++
+    if (a.correct) { correct++; kc[a.fault.kind] = (kc[a.fault.kind] || 0) + 1 }
+    detSum += a.detection_ms || 0
+    kt[a.fault.kind] = (kt[a.fault.kind] || 0) + 1
+  }
+  const by_kind = {}
+  for (const k of Object.keys(kt)) by_kind[k] = (kc[k] || 0) / kt[k]
+  const correct_rate = correct / rows.length
+  return {
+    code: 200,
+    data: {
+      score: {
+        total: rows.length, detected, handled, correct,
+        detect_rate: detected / rows.length, handle_rate: handled / rows.length,
+        correct_rate, avg_detection_ms: Math.round(detSum / rows.length),
+        license: Math.round(correct_rate * 100), by_kind,
+      },
+    },
+    msg: 'ok',
+  }
+}
+
+export function shadowReconcile({ baseline, candidate } = {}) {
+  const b = baseline || {}, c = candidate || {}
+  const diffs = []
+  if (b.exit_code !== c.exit_code) diffs.push(`退出码不同：${b.exit_code} → ${c.exit_code}`)
+  if (b.stdout_hash !== c.stdout_hash) diffs.push('stdout 不同')
+  if (b.stderr_hash !== c.stderr_hash) diffs.push('stderr 不同')
+  const key = (e) => `${e.kind}|${e.key}|${e.change}`
+  const am = new Set((b.side_effects || []).map(key))
+  const bm = new Set((c.side_effects || []).map(key))
+  for (const k of am) if (!bm.has(k)) diffs.push('基线有而影子没有：' + k)
+  for (const k of bm) if (!am.has(k)) diffs.push('影子多出副作用：' + k)
+  const same = diffs.length === 0
+  return { code: 200, data: { diff: { same, unexpected: !same, differences: diffs }, allow_promotion: same }, msg: 'ok' }
+}

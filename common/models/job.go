@@ -85,9 +85,13 @@ type Job struct {
 	// 运维必须对具体任务显式点头——这和 allow_write 默认关是同一个原则：
 	// 能力先存在、边界先收紧。
 	SelfHeal int    `json:"self_heal" gorm:"size:1;column:self_heal;not null;default:0"`
-	Note     string `json:"note" gorm:"size:512;column:note;default:''"`
-	Created  int64  `json:"created" gorm:"column:created;not null"`
-	Updated  int64  `json:"updated" gorm:"column:updated;default:0"`
+	// NodeSelector 阶段 4-D：多目标调度的硬约束/亲和（JSON 文本）。
+	// 形态：{"require_labels":{"env":"prod"},"require_tools":["docker"],"prefer_node":"<uuid>"}
+	// 空串 = 无约束（老任务行为不变：仍按"任务数最少"分配）。
+	NodeSelector string `json:"node_selector" gorm:"type:text;column:node_selector"`
+	Note         string `json:"note" gorm:"size:512;column:note;default:''"`
+	Created      int64  `json:"created" gorm:"column:created;not null"`
+	Updated      int64  `json:"updated" gorm:"column:updated;default:0"`
 
 	Hostname string   `json:"host_name" gorm:"-"`
 	Ip       string   `json:"ip" gorm:"-"`

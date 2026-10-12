@@ -58,6 +58,10 @@ func RegisterTables(db *gorm.DB) error {
 		// heal_id 唯一（幂等写），source_run_id 索引（"这次失败被怎么处置的"最常按它查），
 		// status/action/failure_class 建索引：控制台按状态与动作筛选是主要用法。
 		models.JobHeal{},
+		// 阶段 4-D（多目标调度 / SLO 契约）：SLO 契约表。
+		models.SloPolicy{},
+		// 阶段 5（灰度与自治升降级）：动作×环境的自治信用表。
+		models.AutonomyCredit{},
 	)
 	if err != nil {
 		return errors.Wrap(err, "register table failed")

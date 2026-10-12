@@ -1927,4 +1927,180 @@ func TestAcceptanceSuite(t *testing.T) {
 		cc.note("最新自愈行 %s：status=%s reason 非空 policy 含 rule 证据非空 finished_at=%d deadline=%d（三要素齐全）",
 			healID, status, finishedAt, deadline)
 	})
+
+	/* ------------------- 阶段 4-D / 阶段 5：运维智能化 ------------------- */
+
+	// AC-38：多目标调度必须"可解释"——能看出每个节点为什么得分、硬约束是什么。
+	run("AC-38", "调度解释：策略声明硬约束与维度，分配给出分项与选中节点（只读）", func(cc *caseCtx) {
+		pol, err := c.postOK("/ops/scheduler/policy", map[string]any{})
+		if err != nil {
+			cc.t.Fatalf("读取调度策略失败: %v", err)
+		}
+		w := asMap(pol["weights"])
+		for _, k := range []string{"load", "capacity", "affinity", "success"} {
+			if _, ok := w[k]; !ok {
+				cc.t.Fatalf("调度权重缺少维度 %q: %+v", k, w)
+			}
+		}
+		if len(asSlice(pol["dimensions"])) == 0 {
+			cc.t.Fatalf("调度必须列出声明的打分维度")
+		}
+		if len(asSlice(pol["hard_constraints"])) < 3 {
+			cc.t.Fatalf("调度必须声明硬约束（可达/标签/能力）")
+		}
+		dec, err := c.postOK("/ops/scheduler/allocate", map[string]any{"job_id": 0})
+		if err != nil {
+			cc.t.Fatalf("调度解释失败: %v", err)
+		}
+		d := asMap(dec["decision"])
+		if _, ok := d["scores"]; !ok {
+			cc.t.Fatalf("调度解释必须给出 scores（可解释），实际 %+v", d)
+		}
+		for _, s := range asSlice(d["scores"]) {
+			m := asMap(s)
+			if _, ok := m["total"]; !ok {
+				cc.t.Fatalf("每个候选必须有总分: %+v", m)
+			}
+			if _, ok := m["parts"]; !ok {
+				cc.t.Fatalf("每个候选必须有分项（否则无法复盘为什么选它）: %+v", m)
+			}
+		}
+		if _, ok := dec["requirement"]; !ok {
+			cc.t.Fatalf("分配解释必须回显调度要求（硬约束/亲和）")
+		}
+		cc.note("权重 4 维、硬约束 %d 条；分配返回 %d 个候选打分（含分项），chosen=%q",
+			len(asSlice(pol["hard_constraints"])), len(asSlice(d["scores"])), asStr(d["chosen"]))
+	})
+
+	// AC-39：SLO 契约的评估口径——无样本不判违约，违约必须说清差在哪。
+	run("AC-39", "SLO 契约：保存后可评估；无样本不判违约、违约必须给原因", func(cc *caseCtx) {
+		tag := strings.TrimSpace(os.Getenv("CRONY_ACC_RUN_TAG"))
+		if tag == "" {
+			tag = "acc"
+		}
+		saved, err := c.postOK("/ops/slo/save", map[string]any{
+			"name": "acc-slo-" + tag, "job_id": 0,
+			"target_success_rate": 0.99, "target_on_time_rate": 0.99,
+			"window_seconds": 86400, "grace_seconds": 300, "enabled": true,
+		})
+		if err != nil {
+			cc.t.Fatalf("保存 SLO 契约失败: %v", err)
+		}
+		if asStr(asMap(saved["policy"])["name"]) == "" {
+			cc.t.Fatalf("保存后应回显契约: %+v", saved)
+		}
+		eval, err := c.postOK("/ops/slo/evaluate", map[string]any{})
+		if err != nil {
+			cc.t.Fatalf("评估 SLO 失败: %v", err)
+		}
+		list := asSlice(eval["list"])
+		if len(list) == 0 {
+			cc.t.Fatalf("保存的契约应出现在评估结果里")
+		}
+		breached := 0
+		for _, it := range list {
+			rep := asMap(asMap(it)["report"])
+			if asBool(rep["unverifiable"]) && asBool(rep["breached"]) {
+				cc.t.Fatalf("无样本不得判违约（否则误报风暴）: %+v", rep)
+			}
+			if asBool(rep["breached"]) {
+				breached++
+				if len(asSlice(rep["reasons"])) == 0 {
+					cc.t.Fatalf("违约必须给出原因（差在哪）: %+v", rep)
+				}
+			}
+		}
+		cc.note("保存契约 %q；评估 %d 条，违约 %d 条（口径：无样本不判违约、违约带原因）",
+			"acc-slo-"+tag, len(list), breached)
+	})
+
+	// AC-40：自治信用——连续成功升级、一次不良后果降级并冻结、冻结时生效等级回落 L1。
+	run("AC-40", "自治信用：连成升级、一次不良后果冻结、冻结回落 L1、可人工解冻", func(cc *caseCtx) {
+		scope := "acc_autonomy@" + strings.TrimSpace(os.Getenv("CRONY_ACC_RUN_TAG"))
+		// 连成 5 次 → 升级。
+		var level float64
+		for i := 0; i < 5; i++ {
+			cr, err := c.postOK("/ops/autonomy/observe", map[string]any{"scope": scope, "success": true})
+			if err != nil {
+				cc.t.Fatalf("记录成功失败: %v", err)
+			}
+			level = asNum(asMap(cr["credit"])["level"])
+		}
+		if level < 1 {
+			cc.t.Fatalf("连续成功应升级（>=L1），实际 level=%v", level)
+		}
+		// 一次不良后果 → 冻结。
+		cr, err := c.postOK("/ops/autonomy/observe", map[string]any{"scope": scope, "success": false})
+		if err != nil {
+			cc.t.Fatalf("记录不良后果失败: %v", err)
+		}
+		if !asBool(asMap(cr["credit"])["frozen"]) {
+			cc.t.Fatalf("一次不良后果必须冻结: %+v", cr)
+		}
+		// list：冻结时生效等级必须回落 L1。
+		listed, err := c.postOK("/ops/autonomy/list", map[string]any{})
+		if err != nil {
+			cc.t.Fatalf("自治信用列表失败: %v", err)
+		}
+		found := false
+		for _, it := range asSlice(listed["list"]) {
+			m := asMap(it)
+			if asStr(m["scope"]) == scope {
+				found = true
+				if asStr(m["effective_level"]) != "L1" {
+					cc.t.Fatalf("冻结时实际生效等级必须回落 L1，实际 %q", asStr(m["effective_level"]))
+				}
+			}
+		}
+		if !found {
+			cc.t.Fatalf("列表中找不到 scope=%s", scope)
+		}
+		// 解冻。
+		un, err := c.postOK("/ops/autonomy/unfreeze", map[string]any{"scope": scope})
+		if err != nil {
+			cc.t.Fatalf("解冻失败: %v", err)
+		}
+		if asBool(asMap(un["credit"])["frozen"]) {
+			cc.t.Fatalf("解冻后不应仍为冻结")
+		}
+		cc.note("scope=%s：连成 5 次升到 L%v → 一次不良后果冻结（生效 L1）→ 人工解冻成功", scope, level)
+	})
+
+	// AC-41：混沌驾照分与影子对账的判据正确。
+	run("AC-41", "混沌驾照分=正确率；影子对账有差异即拒绝放量", func(cc *caseCtx) {
+		g, err := c.postOK("/ops/chaos/grade", map[string]any{"attempts": []map[string]any{
+			{"fault": map[string]any{"kind": "latency", "target": "db", "severity": 1}, "detected": true, "handled": true, "correct": true, "detection_ms": 100},
+			{"fault": map[string]any{"kind": "latency", "target": "db", "severity": 1}, "detected": true, "handled": true, "correct": false, "detection_ms": 200},
+		}})
+		if err != nil {
+			cc.t.Fatalf("混沌打分失败: %v", err)
+		}
+		score := asMap(g["score"])
+		if asNum(score["license"]) != 50 {
+			cc.t.Fatalf("驾照分应等于正确率×100=50，实际 %v", score["license"])
+		}
+		// 影子：一致 → 允许放量。
+		same, err := c.postOK("/ops/shadow/reconcile", map[string]any{
+			"baseline":  map[string]any{"exit_code": 0, "stdout_hash": "a", "stderr_hash": "", "side_effects": []any{}},
+			"candidate": map[string]any{"exit_code": 0, "stdout_hash": "a", "stderr_hash": "", "side_effects": []any{}},
+		})
+		if err != nil {
+			cc.t.Fatalf("影子对账失败: %v", err)
+		}
+		if !asBool(same["allow_promotion"]) {
+			cc.t.Fatalf("零差异应允许放量: %+v", same)
+		}
+		// 影子：有差异 → 拒绝放量。
+		diff, err := c.postOK("/ops/shadow/reconcile", map[string]any{
+			"baseline":  map[string]any{"exit_code": 0, "stdout_hash": "a", "stderr_hash": "", "side_effects": []any{}},
+			"candidate": map[string]any{"exit_code": 1, "stdout_hash": "a", "stderr_hash": "", "side_effects": []any{}},
+		})
+		if err != nil {
+			cc.t.Fatalf("影子对账失败: %v", err)
+		}
+		if asBool(diff["allow_promotion"]) {
+			cc.t.Fatalf("存在意外差异必须拒绝放量: %+v", diff)
+		}
+		cc.note("驾照分=50（正确率 50%%）；影子一致=允许放量、退出码不同=拒绝放量")
+	})
 }

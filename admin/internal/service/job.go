@@ -115,6 +115,18 @@ func (j *JobService) GetRunningJobCount() (int64, error) {
 
 const MaxJobCount = 10000
 
+// AutoAllocateNodeFor 阶段 4-D：带任务的分配——多目标加权打分（scheduling 内核）。
+//
+// 与旧的 AutoAllocateNode 的关系：**打分优先，旧策略兜底**。
+// 只要调度器能在"满足任务硬约束"的候选里选出一个节点就用它；否则回退到旧策略
+// （任务数最少），从而对老任务（无 node_selector）保持零回归。
+func (j *JobService) AutoAllocateNodeFor(job *models.Job) string {
+	if chosen := DefaultSchedulerService.Allocate(job); chosen != "" {
+		return chosen
+	}
+	return j.AutoAllocateNode()
+}
+
 // Give priority to the node with the least number of tasks
 func (j *JobService) AutoAllocateNode() string {
 	//Get all the living nodes

@@ -222,6 +222,17 @@ const routes = [
       icon: 'FirstAidKit',
     },
   },
+  {
+    path: '/ops',
+    name: 'ops',
+    component: () => import('@/views/OpsView.vue'),
+    meta: {
+      title: 'Ops Intelligence',
+      subtitle: '多目标调度 / SLO 契约 / 指标看板 / 自治信用 / 混沌考核 / 影子对账',
+      group: 'AI Agent',
+      icon: 'DataAnalysis',
+    },
+  },
 
   /* ----------------------------- System ------------------------- */
   {

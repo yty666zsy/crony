@@ -147,6 +147,28 @@ func configRoute(r *gin.Engine) {
 		agentGroup.POST("/heal/scan", defaultHealRouter.HealScan)
 	}
 
+	// 阶段 4-D / 阶段 5：调度智能化、SLO 契约、指标看板、轨迹评测、自治信用。
+	//
+	// 权限：登录即可。这些接口是"看与算"，不直接改生产执行；唯一的写（SLO 契约维护、
+	// 自治信用状态迁移）也都在可控范围内，且不触发节点动作。
+	opsGroup := r.Group("/ops")
+	opsGroup.Use(middlerware.JWTAuth())
+	{
+		opsGroup.POST("/scheduler/allocate", defaultOpsRouter.SchedulerAllocate)
+		opsGroup.POST("/scheduler/policy", defaultOpsRouter.SchedulerPolicy)
+		opsGroup.POST("/slo/search", defaultOpsRouter.SloSearch)
+		opsGroup.POST("/slo/save", defaultOpsRouter.SloSave)
+		opsGroup.POST("/slo/evaluate", defaultOpsRouter.SloEvaluate)
+		opsGroup.POST("/metrics/overview", defaultOpsRouter.MetricsOverview)
+		opsGroup.POST("/eval/score", defaultOpsRouter.EvalScore)
+		opsGroup.POST("/autonomy/list", defaultOpsRouter.AutonomyList)
+		opsGroup.POST("/autonomy/observe", defaultOpsRouter.AutonomyObserve)
+		opsGroup.POST("/autonomy/unfreeze", defaultOpsRouter.AutonomyUnfreeze)
+		opsGroup.POST("/shadow/reconcile", defaultOpsRouter.ShadowReconcile)
+		opsGroup.POST("/chaos/catalog", defaultOpsRouter.ChaosCatalog)
+		opsGroup.POST("/chaos/grade", defaultOpsRouter.ChaosGrade)
+	}
+
 	user := r.Group("/user")
 	user.Use(middlerware.JWTAuth())
 	{

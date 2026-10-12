@@ -53,6 +53,7 @@ export const navGroups = [
       { label: 'Approvals', to: '/approvals', icon: 'CircleCheck' },
       { label: 'Memory', to: '/memory', icon: 'Collection' },
       { label: 'Self-Heal', to: '/selfheal', icon: 'FirstAidKit' },
+      { label: 'Ops Intelligence', to: '/ops', icon: 'DataAnalysis' },
     ],
   },
   {

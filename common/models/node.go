@@ -1,7 +1,10 @@
 package models
 
 import (
+	"encoding/json"
 	"fmt"
+	"strings"
+
 	"github.com/tmnhs/crony/common/pkg/dbclient"
 )
 
@@ -22,8 +25,28 @@ type Node struct {
 	Version  string `json:"version" gorm:"size:64;column:version;default:''"`
 	Status   int    `json:"status" gorm:"size:1;column:status"`
 
+	// Labels 能力/位置标签（JSON 对象字符串，如 {"env":"prod","zone":"az1","tool:docker":""}）。
+	// 阶段 4-D（多目标调度）：调度器据此做"能力/机房亲和"，缺标签的节点不会被派发需要该能力的任务。
+	// 存单列 JSON 而不是拆表：标签是节点的**属性快照**，没有独立生命周期，拆表只会多一处一致性 bug。
+	Labels string `json:"labels" gorm:"type:text;column:labels"`
+	// Capacity 并发上限（阶段 4-D）。<=0 表示未声明（调度按中性处理，不当作 0）。
+	Capacity int `json:"capacity" gorm:"column:capacity;not null;default:0"`
+
 	UpTime   int64 `json:"up" gorm:"column:up;not null"`
 	DownTime int64 `json:"down" gorm:"column:down;default:0"`
+}
+
+// LabelMap 解析标签 JSON；解析失败或为空时返回空 map（**不报错**：
+// 一个脏标签不该让整个调度链路失败，但会体现在"缺少必需标签"的拒绝原因里）。
+func (n *Node) LabelMap() map[string]string {
+	m := map[string]string{}
+	if n == nil || strings.TrimSpace(n.Labels) == "" {
+		return m
+	}
+	if err := json.Unmarshal([]byte(n.Labels), &m); err != nil {
+		return map[string]string{}
+	}
+	return m
 }
 
 func (n *Node) String() string {

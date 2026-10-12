@@ -421,6 +421,66 @@ check('阶段 4-C 自愈 Mock：前端 api 层没有"直接执行动作"的函�
   }
 })
 
+/* ===================== 阶段 4-D / 阶段 5：调度智能化与评测 Mock ===================== */
+
+check('阶段 4-D 调度 Mock：硬约束优先于权重、无可用节点不硬派', () => {
+  const d = mock.schedulerAllocate({ job_id: 21 }).data
+  assert.ok(d.decision.chosen, '应给出选中节点')
+  assert.ok(Array.isArray(d.decision.scores) && d.decision.scores.length > 0)
+  for (const s of d.decision.scores) {
+    assert.ok(typeof s.total === 'number' && s.parts && Array.isArray(s.reasons), '打分必须可解释（分项+原因）')
+  }
+  const pol = mock.schedulerPolicy().data
+  assert.deepEqual(Object.keys(pol.weights).sort(), ['affinity', 'capacity', 'load', 'success'])
+  assert.ok(pol.hard_constraints.length >= 3, '调度必须声明硬约束')
+})
+
+check('阶段 4-D SLO Mock：无样本不判违约、违约必须给原因', () => {
+  const all = mock.sloEvaluate({}).data
+  assert.ok(all.total > 0)
+  for (const e of all.list) {
+    if (e.report.unverifiable) assert.ok(!e.report.breached, '无样本不得判违约')
+    if (e.report.breached) assert.ok((e.report.reasons || []).length > 0, '违约必须说明差在哪')
+  }
+})
+
+check('阶段 5 自治信用 Mock：连续成功升级、一次不良后果降级并冻结', () => {
+  const scope = 'smoke_scope@test'
+  let c = mock.autonomyObserve({ scope, success: true }).data.credit
+  assert.equal(c.level, 0)
+  for (let i = 0; i < 5; i++) c = mock.autonomyObserve({ scope, success: true }).data.credit
+  assert.ok(c.level >= 1, '连续成功应升级')
+  c = mock.autonomyObserve({ scope, success: false }).data.credit
+  assert.equal(c.frozen, true, '一次不良后果必须冻结')
+  const listed = mock.autonomyList().data.list.find((r) => r.scope === scope)
+  assert.equal(listed.effective_level, 'L1', '冻结时实际生效等级回落 L1')
+  mock.autonomyUnfreeze({ scope })
+})
+
+check('阶段 5 混沌/影子 Mock：驾照分口径正确、影子有差异即拒绝放量', () => {
+  const g = mock.chaosGrade({
+    attempts: [
+      { fault: { kind: 'latency', target: 'db', severity: 1 }, detected: true, handled: true, correct: true, detection_ms: 100 },
+      { fault: { kind: 'latency', target: 'db', severity: 1 }, detected: true, handled: true, correct: false, detection_ms: 100 },
+    ],
+  }).data.score
+  assert.equal(g.license, 50, '驾照分 = 正确率×100')
+  assert.equal(g.by_kind.latency, 0.5)
+  const same = mock.shadowReconcile({ baseline: { exit_code: 0, stdout_hash: 'a', stderr_hash: '', side_effects: [] }, candidate: { exit_code: 0, stdout_hash: 'a', stderr_hash: '', side_effects: [] } }).data
+  assert.equal(same.allow_promotion, true)
+  const diff = mock.shadowReconcile({ baseline: { exit_code: 0, stdout_hash: 'a', stderr_hash: '', side_effects: [] }, candidate: { exit_code: 1, stdout_hash: 'a', stderr_hash: '', side_effects: [] } }).data
+  assert.equal(diff.allow_promotion, false, '存在差异必须拒绝放量')
+})
+
+check('阶段 4-D/5 Mock：ops api 层只读/计算，无"直接改生产"的入口', async () => {
+  const api = await server.ssrLoadModule('/src/api/ops.js')
+  const exported = Object.keys(api).sort()
+  for (const name of exported) {
+    assert.ok(!/deploy|promote|apply|execute/i.test(name), `不得存在直接改生产的入口: ${name}`)
+  }
+  assert.ok(exported.includes('explainAllocation') && exported.includes('reconcileShadow'))
+})
+
 let failed = 0
 for (const { name, fn } of checks) {
   try {

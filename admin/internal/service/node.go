@@ -303,7 +303,9 @@ func (n *NodeWatcherService) FailOver(nodeUUID string) (success Result, fail Res
 			continue
 		}*/
 		oldUUID := job.RunOn
-		autoUUID := DefaultJobService.AutoAllocateNode()
+		// 阶段 4-D：优先多目标加权打分（考虑负载/容量/亲和/健康度与任务硬约束），
+		// 打分选不出时回退旧策略（任务数最少）。见 job.go AutoAllocateNodeFor。
+		autoUUID := DefaultJobService.AutoAllocateNodeFor(&job)
 		if autoUUID == "" {
 			logger.GetLogger().Warn(fmt.Sprintf("node[%s] job[%d] fail over auto allocate node error", nodeUUID, job.ID))
 			fail = append(fail, job.ID)
