@@ -49,11 +49,43 @@ export const NODE_STATUS = {
   2: { key: 'offline', text: '失联', color: '#ef4444', tag: 'danger' },
 }
 
-/** 并发策略（规划中，阶段 1 任务模型 2.0）：skip / queue / forbid */
-export const CONCURRENCY_POLICY = {
-  skip: { key: 'skip', text: 'Skip（跳过本轮）', tag: 'warning' },
-  queue: { key: 'queue', text: 'Queue（排队等待）', tag: 'primary' },
-  forbid: { key: 'forbid', text: 'Forbid（禁止并发）', tag: 'danger' },
+/**
+ * 并发策略（**已实现**，见 common/pkg/runpolicy）。
+ *
+ * ⚠️ 两处口径不同，别混：
+ *   - 任务列：`models.Job.concurrency_policy` 是 **int** 0..4（接口 JSON 也是 int），
+ *     新建 / 更新任务应提交 int（后端 `request.ValidConcurrencyPolicy` 校验）；
+ *   - 运行快照：`job_run.policy_snapshot` 里的 `concurrency` 是**字符串名**
+ *     （skip / buffer_one / ...，见 runpolicy.ConcurrencyPolicy.String()）。
+ * 因此这里给出规范清单 + 两张查表，并用 `concurrencyPolicyOf` 统一兼容两种入参。
+ */
+export const CONCURRENCY_POLICY_LIST = [
+  { value: 0, name: 'skip', text: 'Skip（跳过本轮）', tag: 'warning' },
+  { value: 1, name: 'buffer_one', text: 'Buffer One（缓冲 1 个）', tag: 'primary' },
+  { value: 2, name: 'buffer_all', text: 'Buffer All（全部排队）', tag: 'info' },
+  { value: 3, name: 'cancel_other', text: 'Cancel Other（取消在跑的）', tag: 'danger' },
+  { value: 4, name: 'terminate_other', text: 'Terminate Other（终止在跑的）', tag: 'danger' },
+]
+
+/** int 值（任务列）→ 策略项 */
+export const CONCURRENCY_POLICY = CONCURRENCY_POLICY_LIST.reduce((m, p) => {
+  m[p.value] = p
+  return m
+}, {})
+
+/** 字符串名（策略快照）→ 策略项 */
+export const CONCURRENCY_POLICY_BY_NAME = CONCURRENCY_POLICY_LIST.reduce((m, p) => {
+  m[p.name] = p
+  return m
+}, {})
+
+/** 兼容 int / 数字字符串 / 策略名 三种入参 → 策略项（找不到返回 null）。 */
+export function concurrencyPolicyOf(value) {
+  if (value === null || value === undefined || value === '') return null
+  if (typeof value === 'number') return CONCURRENCY_POLICY[value] || null
+  const s = String(value)
+  if (/^\d+$/.test(s)) return CONCURRENCY_POLICY[Number(s)] || null
+  return CONCURRENCY_POLICY_BY_NAME[s] || null
 }
 
 /**
@@ -139,15 +171,21 @@ export const ALERT_LEVEL = {
   info: { text: '提示', color: '#38bdf8', tag: 'info' },
 }
 
-/** 审计结果 */
+/**
+ * 审计结果（与后台 `admin/internal/service/audit.go` 的取值**逐项对应**）。
+ * 注意区分 `denied`（没动手、被闸门拦下）与 `failed`（动了手但失败）——两类不同的事实。
+ */
 export const AUDIT_RESULT = {
   success: { text: '成功', tag: 'success', color: '#22c55e' },
   failed: { text: '失败', tag: 'danger', color: '#ef4444' },
-  skipped: { text: '已跳过', tag: 'warning', color: '#f59e0b' },
-  forbidden: { text: '被拒绝', tag: 'danger', color: '#ef4444' },
+  denied: { text: '被拒绝（未执行）', tag: 'warning', color: '#f59e0b' },
+  pending: { text: '待审批', tag: 'info', color: '#7c8aa8' },
+  expired: { text: '已过期', tag: 'info', color: '#7c8aa8' },
+  canceled: { text: '已撤销', tag: 'info', color: '#7c8aa8' },
+  blocked: { text: '复核未通过', tag: 'danger', color: '#ef4444' },
 }
 
-/** 组件健康度（阶段 1 规划接口 /statis/health） */
+/** 组件健康度（真实接口 GET /statis/health） */
 export const HEALTH_STATUS = {
   ok: { text: '正常', tag: 'success', color: '#22c55e' },
   degraded: { text: '降级', tag: 'warning', color: '#f59e0b' },

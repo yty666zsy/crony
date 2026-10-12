@@ -1,6 +1,7 @@
 package models
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -193,6 +194,30 @@ func TestJobPlanSummarize(t *testing.T) {
 		if e.From >= e.To {
 			t.Fatalf("边的方向不对: %+v", e)
 		}
+	}
+}
+
+// TestPlanSummaryJSONArraysAreNeverNullOrMissing 控制台对 depends_on / warnings / edges
+// 直接取 .length：字段缺失或为 null 会让"任务编排"整页渲染时抛 TypeError 白屏
+// （真机走查时确实发生过）。所以接口形态必须是数组，哪怕为空。
+func TestPlanSummaryJSONArraysAreNeverNullOrMissing(t *testing.T) {
+	// 单步、显式 root：没有上游、没有告警、没有边——最容易退化成 null 的形态。
+	spec, err := ParseJobPlan(`{"steps":[{"index":0,"command":"/opt/a.sh","depends_on":"root"}]}`)
+	if err != nil {
+		t.Fatalf("解析失败：%v", err)
+	}
+	raw, err := json.Marshal(spec.Summarize())
+	if err != nil {
+		t.Fatalf("序列化失败：%v", err)
+	}
+	got := string(raw)
+	for _, want := range []string{`"depends_on":[]`, `"warnings":[]`, `"edges":[]`, `"steps":[`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("摘要 JSON 缺少 %s：%s", want, got)
+		}
+	}
+	if strings.Contains(got, "null") {
+		t.Fatalf("摘要 JSON 不应出现 null（控制台直接渲染 .length）：%s", got)
 	}
 }
 

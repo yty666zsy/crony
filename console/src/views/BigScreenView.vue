@@ -113,13 +113,13 @@ const onlineNodes = computed(() => nodes.value.filter((n) => n.status === 1))
       </div>
       <div class="rounded-2xl border border-navy-600 bg-navy-850 p-4">
         <p class="text-[11px] text-ink-dim">成功率</p>
-        <p class="mt-1 text-3xl font-semibold text-ok">{{ kpi.success_rate_today }}%</p>
+        <p class="mt-1 text-3xl font-semibold text-ok">{{ kpi.success_rate_today ?? 0 }}%</p>
         <p class="mt-1 text-[11px] text-ink-dim">超时 {{ today?.job_timeout ?? '—' }} · 运行中 {{ today?.job_running ?? '—' }}</p>
       </div>
       <div class="rounded-2xl border border-navy-600 bg-navy-850 p-4">
         <p class="text-[11px] text-ink-dim">节点在线</p>
         <p class="mt-1 text-3xl font-semibold text-[#60a5fa]">
-          {{ today?.node_online ?? kpi.online_nodes }}<span class="text-base text-ink-dim">/{{ today?.node_total ?? kpi.total_nodes }}</span>
+          {{ today?.node_online ?? kpi.online_nodes ?? 0 }}<span class="text-base text-ink-dim">/{{ today?.node_total ?? kpi.total_nodes ?? 0 }}</span>
         </p>
         <p class="mt-1 text-[11px] text-ink-dim">离线 {{ (today?.node_total ?? 0) - (today?.node_online ?? 0) }} 台</p>
       </div>
@@ -133,7 +133,7 @@ const onlineNodes = computed(() => nodes.value.filter((n) => n.status === 1))
       <div class="rounded-2xl border border-navy-600 bg-navy-850 p-4">
         <p class="text-[11px] text-ink-dim">平均耗时</p>
         <p class="mt-1 text-3xl font-semibold text-warn">{{ formatDuration(kpi.avg_duration_ms) }}</p>
-        <p class="mt-1 text-[11px] text-ink-dim">跳过 {{ kpi.skipped_today }} 次（并发 Skip）</p>
+        <p class="mt-1 text-[11px] text-ink-dim">跳过 {{ kpi.skipped_today ?? 0 }} 次（并发 Skip）</p>
       </div>
     </section>
 

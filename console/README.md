@@ -347,6 +347,10 @@ Mock 里**可达**的业务错误分支（不是装饰）：`1008`（未知 sess
 - **KPI 不编造"Agent 在线数"**：`agent_session` 只有终态（completed / failed / canceled），平台没有
   "Agent 在线"这种状态；因此概览与大屏展示的是**会话计数**（累计 / 今日 / 今日失败），
   而不是像早期 Mock 那样编一个 `4/6`。
+- **并发策略有两种口径，别混**：任务列 `models.Job.concurrency_policy` 是 **int** 0..4（提交也传 int，
+  后端校验），而 `job_run.policy_snapshot.concurrency` 是**字符串名**（`skip/buffer_one/...`）。
+  `utils/dict.js` 因此给出规范清单 + int/名两张查表 + `concurrencyPolicyOf()` 兼容两种入参，
+  避免"用字符串比较 int 字段"这类静默错配（表现为表格恒显"未设置"）。
 - **图表不引第三方库**：趋势用内联 SVG（`Sparkline.vue`），大屏条形图用 div 高度实现，
   避免为两张小图引入图表库体积。
 - **成功率的颜色阈值**：`≥95%` 绿、`≥90%` 橙、否则红，卡片与进度条一致。

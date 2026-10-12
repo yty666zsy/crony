@@ -1674,6 +1674,22 @@ func TestAcceptanceSuite(t *testing.T) {
 			cc.t.Fatalf("读接口必须回原文 steps_json（否则编辑器无法回填）")
 		}
 
+		// 契约回归（真机走查踩到过）：控制台对 depends_on / warnings / edges **直接取 .length**，
+		// 字段缺失或为 null 会让"任务编排"整页渲染时抛 TypeError 白屏。
+		// 所以这三者在 JSON 里必须是数组，空也必须是 []（根步骤的 depends_on 最容易退化成 null）。
+		if _, ok := plan["edges"].([]any); !ok {
+			cc.t.Fatalf("plan.edges 必须是数组（空也要 []，不能 null/缺失）: %+v", plan)
+		}
+		for _, x := range asSlice(plan["steps"]) {
+			m := asMap(x)
+			if _, ok := m["depends_on"].([]any); !ok {
+				cc.t.Fatalf("步骤 %v 的 depends_on 必须是数组: %+v", m["index"], m)
+			}
+			if _, ok := m["warnings"].([]any); !ok {
+				cc.t.Fatalf("步骤 %v 的 warnings 必须是数组（空也要 []，不能靠 omitempty 省掉）: %+v", m["index"], m)
+			}
+		}
+
 		// 单步任务：库里那些 steps_json 为空的老任务必须回 1022
 		var plainID int
 		if err := db.QueryRow("select id from job where (steps_json is null or steps_json = '') order by id limit 1").Scan(&plainID); err != nil {

@@ -46,14 +46,14 @@
             {{ plan.fail_fast ? '失败即急停（fail_fast）' : '分支独立（不急停）' }}
           </el-tag>
           <el-tag size="small" type="info">层深 {{ plan.max_depth }}（同层可并行）</el-tag>
-          <el-tag size="small" type="info">{{ plan.steps.length }} 步 / {{ plan.edges.length }} 条依赖边</el-tag>
+          <el-tag size="small" type="info">{{ (plan.steps || []).length }} 步 / {{ (plan.edges || []).length }} 条依赖边</el-tag>
         </div>
 
         <div class="lanes">
           <div v-for="lane in lanes" :key="lane.depth" class="lane">
             <div class="lane-head">第 {{ lane.depth }} 层</div>
             <div class="lane-body">
-              <div v-for="s in lane.steps" :key="s.index" class="node" :class="{ warn: s.warnings.length }">
+              <div v-for="s in lane.steps" :key="s.index" class="node" :class="{ warn: (s.warnings || []).length }">
                 <div class="node-head">
                   <span class="node-idx">#{{ s.index }}</span>
                   <span class="node-name">{{ s.name }}</span>
@@ -61,13 +61,13 @@
                 </div>
                 <div class="node-cmd">{{ s.command }}</div>
                 <div class="node-meta">
-                  <span>依赖：{{ s.depends_on.length ? s.depends_on.join(', ') : '无（起点）' }}</span>
+                  <span>依赖：{{ (s.depends_on || []).length ? s.depends_on.join(', ') : '无（起点）' }}</span>
                   <span>汇聚：{{ s.join }}</span>
                   <span>条件：{{ s.condition }}</span>
                   <span v-if="s.retry_times">重试：{{ s.retry_times }} 次</span>
                   <span v-if="s.timeout_seconds">超时：{{ s.timeout_seconds }}s</span>
                 </div>
-                <div v-for="(w, i) in s.warnings" :key="i" class="node-warn">⚠ {{ w }}</div>
+                <div v-for="(w, i) in (s.warnings || [])" :key="i" class="node-warn">⚠ {{ w }}</div>
               </div>
             </div>
             <div v-if="lane.depth < plan.max_depth" class="lane-arrow">↓</div>
@@ -79,7 +79,7 @@
           <el-table-column prop="name" label="步骤" min-width="140" />
           <el-table-column prop="kind" label="类型" width="90" />
           <el-table-column label="依赖" width="120">
-            <template #default="{ row }">{{ row.depends_on.length ? row.depends_on.join(',') : '—' }}</template>
+            <template #default="{ row }">{{ (row.depends_on || []).length ? row.depends_on.join(',') : '—' }}</template>
           </el-table-column>
           <el-table-column prop="join" label="汇聚" width="120" />
           <el-table-column prop="condition" label="条件" width="110" />
@@ -149,7 +149,7 @@ function hasPlan(job) {
 const lanes = computed(() => {
   if (!plan.value) return []
   const byDepth = new Map()
-  for (const s of plan.value.steps) {
+  for (const s of plan.value.steps || []) {
     if (!byDepth.has(s.depth)) byDepth.set(s.depth, [])
     byDepth.get(s.depth).push(s)
   }
@@ -157,15 +157,16 @@ const lanes = computed(() => {
 })
 
 function edgeText(edge) {
-  const from = plan.value?.steps.find((s) => s.index === edge.from)
-  const to = plan.value?.steps.find((s) => s.index === edge.to)
+  const steps = plan.value?.steps || []
+  const from = steps.find((s) => s.index === edge.from)
+  const to = steps.find((s) => s.index === edge.to)
   return `${edge.from} ${from?.name || ''} → ${edge.to} ${to?.name || ''}`
 }
 
 function describe(res) {
-  const s = res.plan
-  const bits = [`${s.steps.length} 步 / ${s.edges.length} 条依赖边 / 层深 ${s.max_depth}`]
-  const warns = s.steps.flatMap((x) => x.warnings.map((w) => `#${x.index} ${w}`))
+  const s = res.plan || {}
+  const bits = [`${(s.steps || []).length} 步 / ${(s.edges || []).length} 条依赖边 / 层深 ${s.max_depth ?? 0}`]
+  const warns = (s.steps || []).flatMap((x) => (x.warnings || []).map((w) => `#${x.index} ${w}`))
   return bits.concat(warns).join('；')
 }
 

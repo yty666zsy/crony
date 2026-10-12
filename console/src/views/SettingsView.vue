@@ -53,7 +53,7 @@ async function load() {
   loading.value = true
   try {
     const [s, h] = await Promise.all([
-      // 规划中接口（后端未实现）：缺失时对应区块显示占位，不弹错。
+      // 接口不可达时（后端未起 / 网络异常）：对应区块显示占位，不弹错。
       fetchSettings().catch(() => null),
       fetchHealth().catch(() => null),
     ])
@@ -129,12 +129,12 @@ onMounted(load)
       <div class="card card-pad">
         <p class="card-sub">默认并发策略</p>
         <p class="mt-1 text-sm font-semibold text-warn">{{ schedulerConf.default_concurrency_policy }}</p>
-        <p class="mt-1 text-[11px] text-ink-dim">阶段 1 任务模型 2.0 规划值</p>
+        <p class="mt-1 text-[11px] text-ink-dim">来自后端配置 scheduler.default_concurrency_policy</p>
       </div>
       <div class="card card-pad">
         <p class="card-sub">Agent 运行时</p>
         <p class="mt-1 text-sm font-semibold" :class="agentConf.enabled ? 'text-ok' : 'text-warn'">
-          {{ agentConf.enabled ? '已启用' : '未启用（阶段 2）' }}
+          {{ agentConf.enabled ? '已启用' : '未启用' }}
         </p>
         <p class="mt-1 text-[11px] text-ink-dim">{{ agentConf.autonomy_level }}</p>
       </div>
@@ -148,7 +148,7 @@ onMounted(load)
             <div class="card card-pad">
               <p class="card-title">鉴权配置（只读）</p>
               <p class="card-sub mt-0.5">
-                来源：admin/conf/app.ini 与代码默认值。阶段 1 后端没有 update 路由，控制台不提供修改入口。
+                来源：admin/conf/app.ini 与代码默认值。后端没有 update 路由，控制台不提供修改入口。
               </p>
               <el-descriptions :column="2" border size="small" class="mt-3">
                 <el-descriptions-item label="JWT issuer">{{ authConf.jwt_issuer }}</el-descriptions-item>
@@ -203,16 +203,17 @@ onMounted(load)
         <el-tab-pane label="调度与任务默认值" name="scheduler">
           <div class="space-y-4 pb-5">
             <div class="card card-pad">
-              <p class="card-title">任务默认值（只读 · 阶段 1 规划）</p>
+              <p class="card-title">任务默认值（只读）</p>
               <p class="card-sub mt-0.5">
-                这些是"任务模型 2.0"要引入的调度侧默认值；当前 models.Job 只有 timeout /
-                retry_times / retry_interval，尚无并发策略列。
+                这些是后端配置里的调度侧默认值（新建任务时套用的初值）；
+                `scheduler.default_concurrency_policy` 与 `models.Job.concurrency_policy`
+                是同一套取值（见 common/pkg/runpolicy）。
               </p>
               <div class="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
                 <div class="rounded-lg bg-navy-900 p-3">
                   <p class="text-[10px] text-ink-dim">默认并发策略</p>
                   <p class="mt-1 text-sm text-warn">{{ schedulerConf.default_concurrency_policy }}</p>
-                  <p class="mt-1 text-[10px] text-ink-dim">并发触发时跳过本轮，并产生 status=5 的 run</p>
+                  <p class="mt-1 text-[10px] text-ink-dim">并发触发时的处置由该策略决定（见 common/pkg/runpolicy）</p>
                 </div>
                 <div class="rounded-lg bg-navy-900 p-3">
                   <p class="text-[10px] text-ink-dim">默认重试</p>
@@ -310,7 +311,7 @@ onMounted(load)
         </el-tab-pane>
 
         <!-- Agent -->
-        <el-tab-pane label="AI Agent（阶段 2 · 只读）" name="agent">
+        <el-tab-pane label="AI Agent（只读）" name="agent">
           <div class="space-y-4 pb-5">
             <div class="card card-pad">
               <div class="flex flex-wrap items-center justify-between gap-3">

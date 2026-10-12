@@ -11,7 +11,7 @@ import StatusBadge from '@/components/StatusBadge.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import DiagnosisPanel from '@/components/DiagnosisPanel.vue'
 import MockBadge from '@/components/MockBadge.vue'
-import { CONCURRENCY_POLICY, RUN_STATUS, TRIGGER_SOURCE, bizHint } from '@/utils/dict'
+import { CONCURRENCY_POLICY_BY_NAME, RUN_STATUS, TRIGGER_SOURCE, bizHint } from '@/utils/dict'
 import { formatDuration, formatRelative, formatTime } from '@/utils/format'
 
 /**
@@ -500,7 +500,7 @@ onBeforeUnmount(() => stopLive('silent'))
 
       <div class="flex flex-wrap items-center justify-between gap-3 border-t border-navy-600 px-5 py-3">
         <p class="text-[11px] text-ink-dim">
-          共 {{ total }} 条 · 接口规划中（阶段 1），当前数据来自 Mock
+          共 {{ total }} 条 · 数据来自后端 POST /job/run/search
         </p>
         <el-pagination
           v-model:current-page="query.page"
@@ -608,7 +608,7 @@ onBeforeUnmount(() => stopLive('silent'))
                 <p class="section-label">策略快照（policy_snapshot）</p>
                 <div class="mt-1 flex flex-wrap gap-1.5">
                   <span v-if="policy.concurrency" class="chip border-warn/40 text-warn">
-                    并发：{{ CONCURRENCY_POLICY[policy.concurrency]?.text || policy.concurrency }}
+                    并发：{{ CONCURRENCY_POLICY_BY_NAME[policy.concurrency]?.text || policy.concurrency }}
                   </span>
                   <span class="chip">重试 {{ policy.retry_times ?? 0 }} 次</span>
                   <span class="chip">间隔 {{ policy.retry_interval ?? 0 }}s</span>

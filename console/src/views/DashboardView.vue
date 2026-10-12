@@ -77,12 +77,12 @@ const runsCard = computed(() => {
       retryTotal: ov.retry_total || 0,
     }
   }
-  const k = kpi.value
+  const k = kpi.value || {}
   return {
-    total: k.runs_today,
-    hint: `成功 ${(k.runs_today || 0) - (k.failed_today || 0) - (k.timeout_today || 0) - (k.skipped_today || 0)} · 失败 ${k.failed_today} · 跳过 ${k.skipped_today}`,
+    total: k.runs_today ?? 0,
+    hint: `成功 ${(k.runs_today || 0) - (k.failed_today || 0) - (k.timeout_today || 0) - (k.skipped_today || 0)} · 失败 ${k.failed_today ?? 0} · 跳过 ${k.skipped_today ?? 0}`,
     source: '今日 · GET /statis/overview',
-    successRate: k.success_rate_today,
+    successRate: k.success_rate_today ?? 0,
     skipRate: null,
     retryTotal: null,
   }
@@ -140,7 +140,7 @@ function goRunDetail(row) {
         />
         <StatCard
           label="在线节点"
-          :value="`${kpi.online_nodes}/${kpi.total_nodes}`"
+          :value="`${kpi.online_nodes ?? 0}/${kpi.total_nodes ?? 0}`"
           icon="Monitor"
           color="#38bdf8"
           :progress="kpi.total_nodes ? Math.round((kpi.online_nodes / kpi.total_nodes) * 100) : 0"
@@ -183,8 +183,6 @@ function goRunDetail(row) {
               <p class="mt-0.5 flex flex-wrap items-center gap-x-2 text-[10px] text-ink-dim">
                 <span>{{ a.source }}</span>
                 <span class="text-navy-500">·</span>
-                <span>{{ a.node }}</span>
-                <span class="text-navy-500">·</span>
                 <span>{{ formatRelative(a.time) }}</span>
               </p>
               <p class="mt-1 flex items-center gap-1.5">
@@ -195,10 +193,9 @@ function goRunDetail(row) {
                     borderColor: (ALERT_LEVEL[a.level]?.color || '#333') + '55',
                   }"
                 >
-                  {{ ALERT_LEVEL[a.level]?.text }}
+                  {{ ALERT_LEVEL[a.level]?.text || a.level }}
                 </span>
                 <span class="chip">{{ a.status === 'firing' ? '未恢复' : a.status === 'ack' ? '已确认' : '已恢复' }}</span>
-                <span class="chip text-brand-300">{{ a.agent }}</span>
               </p>
             </div>
           </button>

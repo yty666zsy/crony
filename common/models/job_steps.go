@@ -270,17 +270,19 @@ type PlanSummary struct {
 
 // PlanStepView 单个步骤的展示视图。
 type PlanStepView struct {
-	Index     int      `json:"index"`
-	Name      string   `json:"name"`
-	Kind      string   `json:"kind"`
-	Command   string   `json:"command"`
-	DependsOn []int    `json:"depends_on"`
-	Join      string   `json:"join"`
-	Condition string   `json:"condition"`
-	Depth     int      `json:"depth"`
-	Retries   int      `json:"retry_times"`
-	Timeout   int64    `json:"timeout_seconds"`
-	Warnings  []string `json:"warnings,omitempty"`
+	Index     int    `json:"index"`
+	Name      string `json:"name"`
+	Kind      string `json:"kind"`
+	Command   string `json:"command"`
+	DependsOn []int  `json:"depends_on"`
+	Join      string `json:"join"`
+	Condition string `json:"condition"`
+	Depth     int    `json:"depth"`
+	Retries   int    `json:"retry_times"`
+	Timeout   int64  `json:"timeout_seconds"`
+	// Warnings 刻意**不加 omitempty**：控制台对 warnings/depends_on 直接取 .length，
+	// 字段缺失（而不是空数组）会让整页渲染时抛错白屏。数组一律给 []。
+	Warnings []string `json:"warnings"`
 }
 
 // PlanEdgeView 一条依赖边（from → to 表示 to 依赖 from）。
@@ -294,7 +296,14 @@ type PlanEdgeView struct {
 // 它不校验环（校验由 executor 负责），但对"孤立步骤（既不是根也没有下游）"给出 warning：
 // 一个谁也不依赖、也没人依赖它的步骤往往是删改图时留下的手尾，值得提醒而不是静默执行。
 func (p *JobPlanSpec) Summarize() PlanSummary {
-	summary := PlanSummary{MaxParallel: p.MaxParallel, FailFast: p.FailFast}
+	summary := PlanSummary{
+		MaxParallel: p.MaxParallel,
+		FailFast:    p.FailFast,
+		// 数组一律初始化为空切片（而不是 nil）：控制台直接对 .length 取值，
+		// null 会让"只读编排"整页渲染时抛 TypeError 白屏。
+		Steps: make([]PlanStepView, 0, len(p.Steps)),
+		Edges: make([]PlanEdgeView, 0),
+	}
 	if p.MaxParallel <= 0 {
 		summary.MaxParallel = 1
 	}
@@ -303,6 +312,10 @@ func (p *JobPlanSpec) Summarize() PlanSummary {
 		deps, err := p.Steps[i].ResolveDependsOn(p.Steps, i)
 		if err != nil {
 			deps = nil
+		}
+		if deps == nil {
+			// 根步骤/显式 root 解析出的就是 nil；这里统一成空切片，接口签名稳定为 []。
+			deps = []int{}
 		}
 		depsByPos[i] = deps
 	}
@@ -332,6 +345,7 @@ func (p *JobPlanSpec) Summarize() PlanSummary {
 			Condition: condition,
 			Retries:   s.RetryTimes,
 			Timeout:   s.TimeoutSeconds,
+			Warnings:  []string{},
 		}
 		for _, d := range deps {
 			summary.Edges = append(summary.Edges, PlanEdgeView{From: d, To: s.Index})

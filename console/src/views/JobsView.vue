@@ -7,7 +7,7 @@ import StatusBadge from '@/components/StatusBadge.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import NlJobWizard from '@/components/NlJobWizard.vue'
 import MockBadge from '@/components/MockBadge.vue'
-import { CONCURRENCY_POLICY, JOB_STATUS, JOB_TYPE } from '@/utils/dict'
+import { concurrencyPolicyOf, CONCURRENCY_POLICY_LIST, JOB_STATUS, JOB_TYPE } from '@/utils/dict'
 import { formatRelative, formatSeconds, truncate } from '@/utils/format'
 
 /**
@@ -20,9 +20,23 @@ import { formatRelative, formatSeconds, truncate } from '@/utils/format'
  *   POST /job/del     删除
  *   POST /job/once    立即执行一次
  *
- * ⚠️ 并发策略（concurrency_policy）为**规划中字段**（阶段 1 任务模型 2.0）：
- *    Go 侧 models.Job 目前没有该列，本页在草稿里可编辑，但提交时会提示后端未支持。
+ * 并发策略（concurrency_policy）是**已实现字段**：`models.Job.concurrency_policy` 是 int 0..4
+ * （见 common/pkg/runpolicy），本页提交 int，后端 `request.ValidConcurrencyPolicy` 校验；
+ * node 执行时按它决定跳过 / 排队 / 取消或终止在跑的，并写进 `job_run.policy_snapshot`。
  */
+
+/** 并发策略 → 徽标配色（0=Skip 警告 / 1-2 缓冲 主色 / 3-4 强杀 危险）。 */
+function concurrencyClass(value) {
+  const p = concurrencyPolicyOf(value)
+  if (!p) return ''
+  return {
+    0: 'border-warn/40 text-warn',
+    1: 'border-brand-500/40 text-brand-300',
+    2: 'border-brand-500/40 text-brand-300',
+    3: 'border-danger/40 text-danger',
+    4: 'border-danger/40 text-danger',
+  }[p.value]
+}
 const loading = ref(false)
 const rows = ref([])
 const total = ref(0)
@@ -57,7 +71,7 @@ const form = reactive({
   retry_times: 2,
   retry_interval: 5,
   notify_type: 1,
-  concurrency_policy: 'skip',
+  concurrency_policy: 0,
   note: '',
 })
 
@@ -122,7 +136,7 @@ function openCreate() {
     retry_times: 2,
     retry_interval: 5,
     notify_type: 1,
-    concurrency_policy: 'skip',
+    concurrency_policy: 0,
     note: '',
   })
   drawer.visible = true
@@ -150,7 +164,7 @@ async function openEdit(row) {
     retry_times: detail.retry_times ?? 0,
     retry_interval: detail.retry_interval ?? 0,
     notify_type: detail.notify_type ?? 1,
-    concurrency_policy: detail.concurrency_policy || 'skip',
+    concurrency_policy: concurrencyPolicyOf(detail.concurrency_policy)?.value ?? 0,
     note: detail.note || '',
   })
   drawer.visible = true
@@ -215,7 +229,7 @@ onMounted(() => {
               : '—'
           }}%
         </p>
-        <p class="mt-1 text-[11px] text-ink-dim">基于 job_run 聚合（阶段 1 规划）</p>
+        <p class="mt-1 text-[11px] text-ink-dim">基于任务行返回的 success_rate 聚合</p>
       </div>
       <div class="card card-pad">
         <p class="card-sub">未分配任务</p>
@@ -329,15 +343,11 @@ onMounted(() => {
           <template #default="{ row }">
             <span
               class="chip"
-              :class="{
-                'border-warn/40 text-warn': row.concurrency_policy === 'skip',
-                'border-brand-500/40 text-brand-300': row.concurrency_policy === 'queue',
-                'border-danger/40 text-danger': row.concurrency_policy === 'forbid',
-              }"
+              :class="concurrencyClass(row.concurrency_policy)"
             >
-              {{ CONCURRENCY_POLICY[row.concurrency_policy]?.text || '未设置' }}
+              {{ concurrencyPolicyOf(row.concurrency_policy)?.text || '未设置' }}
             </span>
-            <p class="mt-0.5 text-[10px] text-ink-dim">阶段 1 规划字段</p>
+            <p class="mt-0.5 text-[10px] text-ink-dim">随任务保存（0=Skip）</p>
           </template>
         </el-table-column>
 
@@ -469,21 +479,21 @@ onMounted(() => {
           </el-form-item>
 
           <el-divider content-position="left">
-            <span class="text-[11px] text-warn">并发策略（规划中 · 阶段 1 任务模型 2.0）</span>
+            <span class="text-[11px] text-ink-dim">并发策略</span>
           </el-divider>
 
           <el-form-item label="并发策略">
             <el-select v-model="form.concurrency_policy" class="w-full">
               <el-option
-                v-for="(v, k) in CONCURRENCY_POLICY"
-                :key="k"
-                :label="v.text"
-                :value="k"
+                v-for="p in CONCURRENCY_POLICY_LIST"
+                :key="p.value"
+                :label="p.text"
+                :value="p.value"
               />
             </el-select>
-            <p class="mt-1 text-[11px] text-warn">
-              ⚠️ 后端 models.Job 目前没有 concurrency_policy 列，提交后不会生效；
-              该字段随阶段 1 "任务模型 2.0" 一起落库。
+            <p class="mt-1 text-[11px] text-ink-dim">
+              随任务保存并生效：node 执行时按该策略决定「跳过 / 排队 / 取消或终止在跑的」（见
+              common/pkg/runpolicy）。
             </p>
           </el-form-item>
 
