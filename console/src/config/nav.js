@@ -52,6 +52,7 @@ export const navGroups = [
       { label: 'Audit Trail', to: '/audit', icon: 'Files' },
       { label: 'Approvals', to: '/approvals', icon: 'CircleCheck' },
       { label: 'Memory', to: '/memory', icon: 'Collection' },
+      { label: 'Self-Heal', to: '/selfheal', icon: 'FirstAidKit' },
     ],
   },
   {

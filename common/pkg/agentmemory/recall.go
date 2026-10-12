@@ -391,3 +391,10 @@ func clipRunes(s string, n int) string {
 	}
 	return string(r[:n]) + "…"
 }
+
+// ClipRunes 导出的字符级截断。
+//
+// 为什么导出：自愈（阶段 4-C）也要往经验库里写"症状/结果"，它受同一批字段长度限制
+// （symptom 512 / action_text 512 / result_text 1024）。各处各写一份截断函数，
+// 迟早会出现"某处按字节截断把中文切成半个字"这种落库报错。
+func ClipRunes(s string, n int) string { return clipRunes(s, n) }

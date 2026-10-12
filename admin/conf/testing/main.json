@@ -93,5 +93,26 @@
     "sql-max-rows": 100,
     "deny": [],
     "allow": []
+  },
+  "self-heal": {
+    "#policy": "阶段 4-C 自愈调度。默认整段是『关着』的：enabled=false 时扫描只做分类与留痕，绝不动手；即使 enabled=true，还要求任务级 job.self_heal=1 与 tools.allow-write=true 才可能执行动作。三道闸门缺一不可。",
+    "enabled": false,
+    "#interval-seconds": "扫描间隔。循环始终启动（关着时只留痕），这样打开开关前能先看到『它会怎么判』。",
+    "interval-seconds": 60,
+    "#max-attempts-per-job-window": "同一任务在窗口内允许的真实尝试次数（含成功过的尝试）。次数用尽 = 转人工，而不是静默放弃。",
+    "max-attempts-per-job-window": 3,
+    "window-seconds": 1800,
+    "#cooldown-seconds": "同一任务两次自愈之间的最小间隔，防『失败—重跑—再失败』死循环；0 表示不冷却。",
+    "cooldown-seconds": 300,
+    "#extend-timeout-factor": "超时类失败把任务 timeout 放大的倍数（必须先改成功再重跑）。",
+    "extend-timeout-factor": 2,
+    "#max-extend-timeout-seconds": "超时上限的绝对天花板，不允许无限放大。",
+    "max-extend-timeout-seconds": 3600,
+    "#max-concurrent": "同时在观测的自愈上限。事实来源是 job_heal 里 status=executed 的行数。",
+    "max-concurrent": 2,
+    "#observe-window-seconds": "自愈后等待新执行的观测窗口；窗口内没有新执行 = 判失败，不能算成功。",
+    "observe-window-seconds": 900,
+    "scan-limit": 50,
+    "lookback-seconds": 1800
   }
 }

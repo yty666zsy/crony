@@ -1747,4 +1747,184 @@ func TestAcceptanceSuite(t *testing.T) {
 		}
 		cc.note("run %s：step_count=%d，明细行数=%d，其中跳过 %d 步（跳过均带原因与产物）", runID, stepCount, len(steps), skipped)
 	})
+
+	/* ----------------------------- 阶段 4-C：自愈调度 ----------------------------- */
+
+	// AC-34：自愈的**安全边界必须可读**——运维在打开总开关之前，要能看见它会做什么、会被什么挡住。
+	run("AC-34", "自愈策略边界可读：动作白名单闭合、三道闸门可见、分类→动作映射完整", func(cc *caseCtx) {
+		data, err := c.postOK("/agent/heal/policy", map[string]any{})
+		if err != nil {
+			cc.t.Fatalf("读取自愈策略失败: %v", err)
+		}
+		// 1) 动作白名单必须闭合：多一个就是爆炸半径变大。
+		actions := asMap(data["action_names"])
+		gotActions := make([]string, 0, len(actions))
+		for k := range actions {
+			gotActions = append(gotActions, k)
+		}
+		sort.Strings(gotActions)
+		wantActions := []string{"escalate", "retry_extend_timeout", "retry_same_node"}
+		if strings.Join(gotActions, ",") != strings.Join(wantActions, ",") {
+			cc.t.Fatalf("自愈动作白名单必须恰好是 %v，实际 %v（白名单被改动即爆炸半径变化）", wantActions, gotActions)
+		}
+		// 2) 策略边界字段齐全且为正值。
+		policy := asMap(data["policy"])
+		for _, k := range []string{
+			"enabled", "max_attempts_per_job_window", "window_seconds", "cooldown_seconds",
+			"extend_timeout_factor", "max_extend_timeout_seconds", "max_concurrent",
+			"observe_window_seconds", "scan_limit", "lookback_seconds",
+		} {
+			if _, ok := policy[k]; !ok {
+				cc.t.Fatalf("自愈策略缺少字段 %q（运维看不到边界就不敢打开）: %+v", k, policy)
+			}
+		}
+		if asNum(policy["max_attempts_per_job_window"]) <= 0 {
+			cc.t.Fatalf("尝试上限必须为正（否则等于永不自愈）: %+v", policy)
+		}
+		// 3) 三道闸门必须都暴露：写能力是否已开是"能不能真的动手"的关键。
+		if _, ok := data["writes_enabled"]; !ok {
+			cc.t.Fatalf("策略接口必须回报 writes_enabled（写能力是否已开）")
+		}
+		// 4) 分类→动作映射完整，且引用的动作都在白名单内。
+		classes := asSlice(data["classes"])
+		if len(classes) == 0 {
+			cc.t.Fatalf("分类→动作映射不能为空")
+		}
+		for _, cl := range classes {
+			m := asMap(cl)
+			if asStr(m["class"]) == "" || asStr(m["desc"]) == "" {
+				cc.t.Fatalf("分类条目缺 class/desc: %+v", m)
+			}
+			acts := asSlice(m["actions"])
+			if len(acts) == 0 {
+				cc.t.Fatalf("分类 %s 没有允许的动作（否则它永远不会被处置）", asStr(m["class"]))
+			}
+			for _, a := range acts {
+				if _, ok := actions[asStr(a)]; !ok {
+					cc.t.Fatalf("分类 %s 引用了白名单外的动作 %q", asStr(m["class"]), asStr(a))
+				}
+			}
+		}
+		cc.note("白名单=%v；尝试上限=%v 冷却=%vs 并发=%v 观测窗口=%vs；writes_enabled=%v；分类映射 %d 条均自洽",
+			gotActions, policy["max_attempts_per_job_window"], policy["cooldown_seconds"],
+			policy["max_concurrent"], policy["observe_window_seconds"], data["writes_enabled"], len(classes))
+	})
+
+	// AC-35：手动扫描**不绕过闸门**，且回执必须说清楚"扫到了什么、怎么处置的"。
+	run("AC-35", "手动扫描不绕过闸门：回执字段齐全，指定的坏 run_id 被拒（1025）", func(cc *caseCtx) {
+		// 先跑一轮（enabled 可能是 false：那也应该成功返回，只是全部只分类不动手）。
+		data, err := c.postOK("/agent/heal/scan", map[string]any{})
+		if err != nil {
+			cc.t.Fatalf("手动扫描失败: %v", err)
+		}
+		for _, k := range []string{"scanned", "skipped", "denied", "executed", "escalated", "failed", "observed", "succeeded"} {
+			if _, ok := data[k]; !ok {
+				cc.t.Fatalf("扫描回执缺少 %q，运维看不到这一轮到底发生了什么: %+v", k, data)
+			}
+		}
+		// 指定一个不存在的 run_id：必须被拒为"请求非法"，而不是悄悄当成空扫描。
+		status, env, err := c.do(http.MethodPost, "/agent/heal/scan", map[string]any{"run_id": "no-such-run-acc"}, true)
+		if err != nil {
+			cc.t.Fatalf("扫描坏 run_id 网络错误: %v", err)
+		}
+		if status != http.StatusOK || env.Code != 1025 {
+			cc.t.Fatalf("指定不存在的 run_id 应回 1025，实际 HTTP %d code=%d msg=%q", status, env.Code, truncate(env.Msg, 120))
+		}
+		if strings.TrimSpace(env.Msg) == "" {
+			cc.t.Fatalf("被拒时必须说明原因（运维要知道为什么没动）")
+		}
+		cc.note("扫描：scanned=%v denied=%v executed=%v escalated=%v failed=%v 观测成功=%v；坏 run_id → code=%d msg=%q",
+			data["scanned"], data["denied"], data["executed"], data["escalated"], data["failed"],
+			data["succeeded"], env.Code, truncate(env.Msg, 80))
+	})
+
+	// AC-36：自愈记录查询契约 + 不存在的单号必须用独立业务码（1023）。
+	run("AC-36", "自愈记录查询：条目含复盘字段；不存在单号回 1023，缺锚点回 1001", func(cc *caseCtx) {
+		page, err := c.postOK("/agent/heal/search", map[string]any{"page": 1, "page_size": 20})
+		if err != nil {
+			cc.t.Fatalf("查询自愈记录失败: %v", err)
+		}
+		list := asSlice(page["list"])
+		for _, it := range list {
+			row := asMap(it)
+			if asStr(row["heal_id"]) == "" || !strings.HasPrefix(asStr(row["heal_id"]), "heal-") {
+				cc.t.Fatalf("自愈记录缺 heal_id 或格式不对: %+v", row)
+			}
+			// 复盘三要素：症状、决策理由、来源失败执行。
+			for _, k := range []string{"symptom", "reason", "source_run_id", "status"} {
+				if asStr(row[k]) == "" {
+					cc.t.Fatalf("自愈记录缺少复盘字段 %q（出事无法复盘）: %+v", k, row)
+				}
+			}
+		}
+		// 不存在的单号：独立码，而不是泛泛的 ERROR。
+		status, env, err := c.do(http.MethodPost, "/agent/heal/find", map[string]any{"heal_id": "heal-does-not-exist"}, true)
+		if err != nil {
+			cc.t.Fatalf("读不存在自愈单号网络错误: %v", err)
+		}
+		if status != http.StatusOK || env.Code != 1023 {
+			cc.t.Fatalf("不存在的自愈单号应回 1023，实际 HTTP %d code=%d msg=%q", status, env.Code, truncate(env.Msg, 120))
+		}
+		// 缺锚点：参数错误 1001。
+		status, env, err = c.do(http.MethodPost, "/agent/heal/by_run", map[string]any{"run_id": "   "}, true)
+		if err != nil {
+			cc.t.Fatalf("by_run 缺锚点网络错误: %v", err)
+		}
+		if status != http.StatusOK || env.Code != 1001 {
+			cc.t.Fatalf("by_run 缺 run_id 应回 1001，实际 HTTP %d code=%d msg=%q", status, env.Code, truncate(env.Msg, 120))
+		}
+		cc.note("本页 %d 条记录复盘字段齐全；不存在单号→1023；缺 run_id→1001", len(list))
+	})
+
+	// AC-37：留痕自洽——库里的自愈行必须"为什么/依据什么/结果如何"三者齐全，
+	// 且中间态不得提前写结束时间（"执行中"不等于"成功"）。
+	run("AC-37", "自愈留痕自洽：事件行含策略/证据快照；中间态不写 finished_at", func(cc *caseCtx) {
+		if db == nil {
+			cc.skip("未配置 CRONY_TEST_MYSQL_DSN：无法直接核对 job_heal 行")
+		}
+		var (
+			healID, status string
+			reason         string
+			policyJSON     string
+			evidenceJSON   string
+			finishedAt     int64
+			deadline       int64
+		)
+		err := db.QueryRow(`select heal_id, status, reason, policy_json, evidence_json, finished_at, deadline
+			from ` + models.CronyJobHealTableName + ` order by id desc limit 1`).
+			Scan(&healID, &status, &reason, &policyJSON, &evidenceJSON, &finishedAt, &deadline)
+		if err != nil {
+			cc.skip("库里暂无自愈记录（未触发过失败/未跑过扫描）：%v", err)
+		}
+		if strings.TrimSpace(healID) == "" || !strings.HasPrefix(healID, "heal-") {
+			cc.t.Fatalf("自愈单号格式非法: %q", healID)
+		}
+		if strings.TrimSpace(reason) == "" {
+			cc.t.Fatalf("自愈行必须写清「为什么这么决策」（%s）", healID)
+		}
+		if !strings.Contains(policyJSON, "rule") {
+			cc.t.Fatalf("策略快照必须记录命中的规则（安全边界事后可复盘），实际 %q", truncate(policyJSON, 120))
+		}
+		if strings.TrimSpace(evidenceJSON) == "" || evidenceJSON == "{}" {
+			cc.t.Fatalf("证据快照不能为空（自愈必须依据本系统观测到的事实），heal=%s", healID)
+		}
+		// 中间态（executed）必须有观测截止、不得有结束时间；终态必须有结束时间。
+		switch status {
+		case "executed":
+			if finishedAt != 0 {
+				cc.t.Fatalf("中间态 executed 不得写 finished_at（=还没观测到结果）: heal=%s finished_at=%d", healID, finishedAt)
+			}
+			if deadline <= 0 {
+				cc.t.Fatalf("中间态 executed 必须有观测截止时间: heal=%s", healID)
+			}
+		case "denied", "succeeded", "failed", "escalated":
+			if finishedAt <= 0 {
+				cc.t.Fatalf("终态 %s 必须写结束时间: heal=%s", status, healID)
+			}
+		default:
+			cc.t.Fatalf("自愈状态取值非法: %q（heal=%s）", status, healID)
+		}
+		cc.note("最新自愈行 %s：status=%s reason 非空 policy 含 rule 证据非空 finished_at=%d deadline=%d（三要素齐全）",
+			healID, status, finishedAt, deadline)
+	})
 }

@@ -133,6 +133,18 @@ func configRoute(r *gin.Engine) {
 		agentGroup.POST("/memory/stats", defaultAgentRouter.MemoryStats)
 		agentGroup.POST("/memory/disable", defaultAgentRouter.MemoryDisable)
 		agentGroup.POST("/memory/enable", defaultAgentRouter.MemoryEnable)
+
+		// 阶段 4-C（自愈调度）。
+		//
+		// 权限说明：查询与"读策略"登录即可（运维要能看见边界）；
+		// `/heal/scan` 也只要登录——它是"现在就跑一轮扫描"，**不绕过任何闸门**，
+		// 与后台定时轮次的判定完全一致；真正决定"能不能动手"的是策略（配置）。
+		// 也不提供"直接执行某个动作"的接口：闸门旁边不开门（理由见 handler 文件头）。
+		agentGroup.POST("/heal/search", defaultHealRouter.HealSearch)
+		agentGroup.POST("/heal/find", defaultHealRouter.HealFind)
+		agentGroup.POST("/heal/by_run", defaultHealRouter.HealByRun)
+		agentGroup.POST("/heal/policy", defaultHealRouter.HealPolicy)
+		agentGroup.POST("/heal/scan", defaultHealRouter.HealScan)
 	}
 
 	user := r.Group("/user")

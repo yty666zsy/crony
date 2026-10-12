@@ -1216,3 +1216,331 @@ export function memorySetEnabled({ memory_id: memoryId, enabled, reason } = {}) 
   row.disabled_at = ''
   return { code: 200, data: { memory: { ...row }, source: memorySourceBlock() }, msg: '已启用' }
 }
+
+/* ==========================================================================
+ * 阶段 4-C：自愈调度 —— Mock 处理器
+ *
+ * 与后端 job_heal.go 逐条对齐的约定（Mock 里也必须成立，否则切到真机会翻车）：
+ *  1. **没有"直接执行动作"的接口**：只有 search/find/by_run/policy/scan；
+ *  2. **scan 不绕过闸门**：它跟自动轮次走同一套判定，返回值里必须带 policy 快照；
+ *  3. **executed ≠ 成功**：中间态保留 deadline，且不写 finished_at；
+ *  4. **每个动作都留痕**：连"被拒绝、没动手"也有记录（denied 是结论，不是没发生）。
+ * ========================================================================== */
+
+/** 后端 models.HealStatus → 中文（与 common/models/job_heal.go 一致）。 */
+const HEAL_STATUS_NAMES = {
+  planned: '已规划',
+  denied: '被策略拒绝（未动手）',
+  executed: '已执行待观测',
+  succeeded: '自愈成功',
+  failed: '自愈失败',
+  escalated: '已转人工',
+}
+
+/** 后端 models.HealActionNames。 */
+const HEAL_ACTION_NAMES = {
+  retry_same_node: '原节点重跑',
+  retry_extend_timeout: '调大超时后重跑',
+  escalate: '转人工处理',
+}
+
+/** 每类失败允许的动作（与 handler/job_heal.go 的 classes 同源）。 */
+const HEAL_CLASS_ACTIONS = [
+  { class: 'node_unreachable', desc: '节点不可达', actions: ['escalate'] },
+  { class: 'timeout', desc: '执行超时', actions: ['retry_extend_timeout', 'retry_same_node'] },
+  { class: 'command_failed', desc: '命令执行失败', actions: ['retry_same_node'] },
+  { class: 'delivery_failed', desc: '投递失败', actions: ['retry_same_node'] },
+  { class: 'orchestration_invalid', desc: '编排非法', actions: ['escalate'] },
+  { class: 'unknown', desc: '未知失败', actions: ['escalate'] },
+]
+
+/** Mock 策略：默认整段是"关着"的那一档，与仓库默认配置一致。 */
+const healPolicyState = {
+  enabled: true,
+  interval_seconds: 60,
+  max_attempts_per_job_window: 3,
+  window_seconds: 1800,
+  cooldown_seconds: 300,
+  extend_timeout_factor: 2,
+  max_extend_timeout_seconds: 3600,
+  max_concurrent: 2,
+  observe_window_seconds: 900,
+  scan_limit: 50,
+  lookback_seconds: 1800,
+}
+
+const nowSec = () => Math.floor(Date.now() / 1000)
+
+/** 自愈记录（事件，不可去重）。status 覆盖全部 6 种，便于前端把状态机画全。 */
+const healRows = [
+  {
+    heal_id: 'heal-1700000001000000000-1',
+    source_run_id: 'j910001-t1700000000',
+    job_id: 910001,
+    job_name: '每日对账（示例）',
+    attempt: 1,
+    status: 'executed',
+    failure_class: 'command_failed',
+    symptom: '任务「每日对账（示例）」(#910001) 命令执行失败：exit status 1（最近输出：对账差异 3 条）',
+    action: 'retry_same_node',
+    action_json: '{"job_id":910001,"node_uuid":"node-it-01","max_attempts":1}',
+    reason: '命令失败：原地重跑一次（失败原因可能是瞬时的，重跑成本低且可逆）',
+    policy_json: '{"allowed":true,"rule":"allowed","reason":"策略允许：任务已开启自愈、写能力已开、窗口内第 1 次（上限 3）","attempts":1,"window_count":0}',
+    evidence_json: '{"run_id":"j910001-t1700000000","status":"failed","exit_code":1,"error":"exit status 1","node_reachable":true}',
+    memory_json: '{"used":1,"top_score":0.62,"hint":"历史经验：本任务同类失败在 node-it-01 上原地重跑成功率 2/3"}',
+    node_uuid: 'node-it-01',
+    new_run_id: '',
+    outcome_note: '已投递重跑，等待观测（窗口内没有新执行则判失败，不算成功）',
+    deadline: nowSec() + 900,
+    memory_ids: '',
+    executed_by: 'self_heal_loop',
+    created: nowSec() - 60,
+    created_ms: 0,
+    updated: nowSec() - 60,
+    updated_ms: 0,
+    finished_at: 0,
+  },
+  {
+    heal_id: 'heal-1700000002000000000-2',
+    source_run_id: 'j910002-t1699999000',
+    job_id: 910002,
+    job_name: '数据同步（示例）',
+    attempt: 1,
+    status: 'succeeded',
+    failure_class: 'timeout',
+    symptom: '任务「数据同步（示例）」(#910002) 执行超时：已超过 timeout=60s 仍未结束',
+    action: 'retry_extend_timeout',
+    action_json: '{"job_id":910002,"from_timeout":60,"to_timeout":120,"node_uuid":"node-it-01","max_attempts":1}',
+    reason: '超时：先把超时上限 60s 调到 120s 再重跑（先改配置、改成功才动手）',
+    policy_json: '{"allowed":true,"rule":"allowed","reason":"策略允许：任务已开启自愈、写能力已开、窗口内第 2 次（上限 3）","attempts":2,"window_count":1}',
+    evidence_json: '{"run_id":"j910002-t1699999000","status":"timeout","node_reachable":true}',
+    memory_json: '{"used":0,"top_score":0,"hint":"无相似历史经验"}',
+    node_uuid: 'node-it-01',
+    new_run_id: 'j910002-t1700000100',
+    outcome_note: '自愈后观测到新执行成功（101s，未再超时）',
+    deadline: 0,
+    memory_ids: '["mem-1700000100000000000-1"]',
+    executed_by: 'self_heal_loop',
+    created: nowSec() - 900,
+    created_ms: 0,
+    updated: nowSec() - 600,
+    updated_ms: 0,
+    finished_at: nowSec() - 600,
+  },
+  {
+    heal_id: 'heal-1700000003000000000-3',
+    source_run_id: 'j910003-t1699998000',
+    job_id: 910003,
+    job_name: '日志清理（示例）',
+    attempt: 2,
+    status: 'failed',
+    failure_class: 'delivery_failed',
+    symptom: '任务「日志清理（示例）」(#910003) 投递失败：重跑请求未能送达节点',
+    action: 'retry_same_node',
+    action_json: '{"job_id":910003,"node_uuid":"node-it-02","max_attempts":1}',
+    reason: '投递失败：原地重跑一次（投递通道抖动是常见的瞬时故障）',
+    policy_json: '{"allowed":true,"rule":"allowed","reason":"策略允许：任务已开启自愈、写能力已开、窗口内第 2 次（上限 3）","attempts":2,"window_count":1}',
+    evidence_json: '{"run_id":"j910003-t1699998000","status":"failed","error":"put key failed","node_reachable":true}',
+    memory_json: '{"used":1,"top_score":0.41,"hint":"历史经验：投递失败多与 etcd 抖动相关，重跑一次即可"}',
+    node_uuid: 'node-it-02',
+    new_run_id: '',
+    outcome_note: '动作未能生效：投递失败（观测窗口内没有出现新的执行）',
+    deadline: 0,
+    memory_ids: '["mem-1700000200000000000-2"]',
+    executed_by: 'manual:admin',
+    created: nowSec() - 1800,
+    created_ms: 0,
+    updated: nowSec() - 1700,
+    updated_ms: 0,
+    finished_at: nowSec() - 1700,
+  },
+  {
+    heal_id: 'heal-1700000004000000000-4',
+    source_run_id: 'j910004-t1699997000',
+    job_id: 910004,
+    job_name: '证书续签（示例）',
+    attempt: 1,
+    status: 'denied',
+    failure_class: 'node_unreachable',
+    symptom: '任务「证书续签（示例）」(#910004) 失败：连接被拒绝（节点不可达）',
+    action: 'retry_same_node',
+    action_json: '',
+    reason: '节点不可达：本动作不可执行（应当转人工，而不是往不可达节点重投）',
+    policy_json: '{"allowed":false,"rule":"unsafe_action","reason":"节点不可达时不允许重跑（会把失败再制造一次）","attempts":1,"window_count":0}',
+    evidence_json: '{"run_id":"j910004-t1699997000","status":"failed","error":"connection refused","node_reachable":false}',
+    memory_json: '{"used":0,"top_score":0,"hint":"无相似历史经验"}',
+    node_uuid: 'node-it-03',
+    new_run_id: '',
+    outcome_note: '策略闸门：节点不可达时不允许重跑（会把失败再制造一次）',
+    deadline: 0,
+    memory_ids: '[]',
+    executed_by: 'self_heal_loop',
+    created: nowSec() - 3000,
+    created_ms: 0,
+    updated: nowSec() - 3000,
+    updated_ms: 0,
+    finished_at: nowSec() - 3000,
+  },
+  {
+    heal_id: 'heal-1700000005000000000-5',
+    source_run_id: 'j910005-t1699996000',
+    job_id: 910005,
+    job_name: '镜像构建（示例）',
+    attempt: 3,
+    status: 'escalated',
+    failure_class: 'command_failed',
+    symptom: '任务「镜像构建（示例）」(#910005) 命令执行失败：exit status 2（编译错误）',
+    action: 'escalate',
+    action_json: '',
+    reason: '窗口内已尝试 3 次仍未恢复：交给人接手（继续自动重跑只是消耗预算）',
+    policy_json: '{"allowed":false,"rule":"attempt_cap","reason":"窗口内真实尝试已达上限（3）：交给人接手","attempts":4,"window_count":3}',
+    evidence_json: '{"run_id":"j910005-t1699996000","status":"failed","exit_code":2,"error":"exit status 2"}',
+    memory_json: '{"used":2,"top_score":0.55,"hint":"历史经验：编译错误类失败重跑无效（成功率 0/4）"}',
+    node_uuid: 'node-it-01',
+    new_run_id: '',
+    outcome_note: '超过尝试上限，已转人工并通知',
+    deadline: 0,
+    memory_ids: '["mem-1700000300000000000-3"]',
+    executed_by: 'self_heal_loop',
+    created: nowSec() - 5400,
+    created_ms: 0,
+    updated: nowSec() - 5000,
+    updated_ms: 0,
+    finished_at: nowSec() - 5000,
+  },
+]
+
+/** 视图化：补中文名与"是中间态吗"这两个前端必须照着渲染的字段。 */
+function healView(row) {
+  const status = row.status
+  return {
+    ...row,
+    status_text: HEAL_STATUS_NAMES[status] || status,
+    action_text: HEAL_ACTION_NAMES[row.action] || row.action || '',
+    // executed/planned 是中间态：页面上不能当成功渲染，也不能写结束时间。
+    pending_observation: status === 'executed' || status === 'planned',
+    finished: status === 'denied' || status === 'succeeded' || status === 'failed' || status === 'escalated',
+  }
+}
+
+/** POST /agent/heal/search */
+export function healSearch(params = {}) {
+  const { page, pageSize } = normalizePage(params)
+  let list = healRows.map((r) => healView({ ...r }))
+  if (params.job_id) list = list.filter((r) => Number(r.job_id) === Number(params.job_id))
+  if (params.status) list = list.filter((r) => r.status === params.status)
+  if (params.failure_class) list = list.filter((r) => r.failure_class === params.failure_class)
+  if (params.action) list = list.filter((r) => r.action === params.action)
+  if (params.source_run_id) list = list.filter((r) => includes(r.source_run_id, params.source_run_id))
+  if (params.node_uuid) list = list.filter((r) => includes(r.node_uuid, params.node_uuid))
+  // 最近发生的靠前（事故看的是最近发生了什么，不是最早）。
+  list.sort((a, b) => b.created - a.created)
+  return {
+    code: 200,
+    data: {
+      ...paginate(list, { page, pageSize }),
+      status_names: { ...HEAL_STATUS_NAMES },
+      action_names: { ...HEAL_ACTION_NAMES },
+      // 机器可读的约束：页面上"没有直接执行按钮"不是遗漏，而是设计。
+      source: {
+        direct_action_api: false,
+        manual_scan_bypasses_gates: false,
+        executed_is_success: false,
+      },
+    },
+    msg: 'operation success',
+  }
+}
+
+/** POST /agent/heal/find */
+export function healFind({ heal_id: healId } = {}) {
+  const row = healRows.find((r) => r.heal_id === healId)
+  if (!row) return bizErr(1023, '自愈记录不存在（Mock）')
+  return {
+    code: 200,
+    data: {
+      heal: healView({ ...row }),
+      status_names: { ...HEAL_STATUS_NAMES },
+      action_names: { ...HEAL_ACTION_NAMES },
+    },
+    msg: 'operation success',
+  }
+}
+
+/** POST /agent/heal/by_run（按触发它的那次失败执行查） */
+export function healByRun({ run_id: runId } = {}) {
+  const id = String(runId || '').trim()
+  if (!id) return bizErr(1001, 'run_id 不能为空（自愈记录以失败执行为锚点）')
+  const list = healRows.filter((r) => r.source_run_id === id).map((r) => healView({ ...r }))
+  return { code: 200, data: { list, total: list.length }, msg: 'operation success' }
+}
+
+/** POST /agent/heal/policy（只读边界） */
+export function healPolicy() {
+  return {
+    code: 200,
+    data: {
+      policy: { ...healPolicyState },
+      // 与仓库默认一致：写能力默认关闭。写能力关着时，重跑/改超时都会被拒（denied）。
+      writes_enabled: false,
+      status_names: { ...HEAL_STATUS_NAMES },
+      classes: HEAL_CLASS_ACTIONS.map((c) => ({ ...c, actions: [...c.actions] })),
+      action_names: { ...HEAL_ACTION_NAMES },
+      source: {
+        direct_action_api: false,
+        manual_scan_bypasses_gates: false,
+        three_gates: ['self_heal.enabled', 'job.self_heal=1', 'tools.allow-write'],
+      },
+    },
+    msg: 'operation success',
+  }
+}
+
+/**
+ * POST /agent/heal/scan —— 手动跑一轮（Mock 只做"判定预览"，不产生新的历史）。
+ *
+ * 关键点：返回值里带上 policy 快照与"本次没有绕过闸门"的自述；
+ * 若传了 run_id 但该执行不存在/不是失败态，返回 1025（与后端一致）。
+ */
+export function healScan({ run_id: runId } = {}) {
+  const id = String(runId || '').trim()
+  if (id) {
+    const row = healRows.find((r) => r.source_run_id === id)
+    if (!row) return bizErr(1023, `指定的执行记录没有失败自愈记录（run_id=${id}）`)
+    return {
+      code: 200,
+      data: {
+        heal: healView({ ...row }),
+        policy: { ...healPolicyState },
+        writes_enabled: false,
+        gates_skipped: [],
+        note: '手动触发不绕过闸门：本次判定与自动轮次完全一致',
+      },
+      msg: `已处置该次失败（结论：${HEAL_STATUS_NAMES[row.status] || row.status}）`,
+    }
+  }
+  const executed = healRows.filter((r) => r.status === 'executed').length
+  const succeeded = healRows.filter((r) => r.status === 'succeeded').length
+  const denied = healRows.filter((r) => r.status === 'denied').length
+  const escalated = healRows.filter((r) => r.status === 'escalated').length
+  const failed = healRows.filter((r) => r.status === 'failed').length
+  return {
+    code: 200,
+    data: {
+      scanned: healRows.length,
+      skipped: 0,
+      denied,
+      executed,
+      escalated,
+      failed,
+      observed: 0,
+      succeeded,
+      errors: [],
+      policy: { ...healPolicyState },
+      writes_enabled: false,
+      gates_skipped: [],
+      note: '手动触发不绕过闸门：本次判定与自动轮次完全一致',
+    },
+    msg: '扫描完成',
+  }
+}

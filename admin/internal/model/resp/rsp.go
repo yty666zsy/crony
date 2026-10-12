@@ -80,6 +80,18 @@ const (
 	ErrorJobPlanInvalid = 1021
 	// ErrorJobPlanNotFound 该任务没有编排定义（steps_json 为空）。
 	ErrorJobPlanNotFound = 1022
+
+	// 阶段 4-C（自愈调度）业务码。
+	//
+	// 为什么"自愈记录不存在"要单独一个码：控制台是从"这次失败执行"跳进自愈详情的，
+	// 单号失效与"没有自愈记录"是两件事（后者在任务未开启自愈时很常见），
+	// 前端据此显示"该次失败没有自愈记录"而不是报错。
+	// ErrorHealNotFound 自愈记录不存在。
+	ErrorHealNotFound = 1023
+	// ErrorHealDenied 自愈被策略拒绝（消息里带命中的闸门规则与原因）。
+	ErrorHealDenied = 1024
+	// ErrorHealInvalid 自愈请求非法（例如指定的执行记录不存在、没有可处置的失败）。
+	ErrorHealInvalid = 1025
 )
 
 func Result(code int, data interface{}, msg string, c *gin.Context) {

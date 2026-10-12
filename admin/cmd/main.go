@@ -51,10 +51,20 @@ func main() {
 	if period > 0 {
 		closeChan = service.RunLogCleaner(time.Duration(period)*time.Minute, config.GetConfigModels().System.LogCleanExpiration)
 	}
+	// 阶段 4-C（自愈调度）：周期扫描失败执行 → 分类 → 白名单动作 → 闸门 → 观测 → 沉淀。
+	// 循环无条件启动（enabled=false 时只分类与留痕，不动手），
+	// 这样"打开自愈到底会发生什么"可以先用真实数据预演，而不是靠承诺。
+	var selfHealClose chan struct{}
+	service.InitSelfHeal(&selfHealClose)
 	err = srv.ListenAndServe()
 	if err != nil {
 		logger.GetLogger().Error(fmt.Sprintf("startup api server error:%v", err.Error()))
-		close(closeChan)
+		if closeChan != nil {
+			close(closeChan)
+		}
+		if selfHealClose != nil {
+			close(selfHealClose)
+		}
 		os.Exit(1)
 	}
 	os.Exit(0)

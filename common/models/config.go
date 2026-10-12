@@ -142,6 +142,37 @@ type (
 		// 而且"这台部署到底放开了什么"可以从配置文件直接读出来——
 		// 安全边界的可读性和它的正确性一样重要。
 		Tools Tools `mapstructure:"tools" json:"tools" yaml:"tools" ini:"tools"`
+		// SelfHeal 自愈调度策略（阶段 4-C 新增）。
+		//
+		// 为什么单独一段配置而不是塞进 tools：自愈不是"模型调工具"，
+		// 它有自己的开关语义（总开关 + 任务级 opt-in + 动作白名单 + 频次闸门），
+		// 和工具网关的自治级别不是一回事。混在一起会让两边都说不清"到底谁在管"。
+		SelfHeal SelfHeal `mapstructure:"self-heal" json:"selfHeal" yaml:"self-heal" ini:"self-heal"`
+	}
+	// SelfHeal 自愈调度配置。所有默认值都是关闭/收紧的一档（见 selfheal.DefaultPolicy）。
+	SelfHeal struct {
+		// Enabled 总开关（默认 false）。关着时扫描只做分类与留痕，不做任何动作。
+		Enabled bool `mapstructure:"enabled" json:"enabled" yaml:"enabled" ini:"enabled"`
+		// IntervalSeconds 扫描间隔（默认 60s）。
+		IntervalSeconds int64 `mapstructure:"interval-seconds" json:"intervalSeconds" yaml:"interval-seconds" ini:"interval-seconds"`
+		// MaxAttemptsPerJobWindow 同一任务在窗口内的自愈尝试上限（默认 3）。
+		MaxAttemptsPerJobWindow int `mapstructure:"max-attempts-per-job-window" json:"maxAttemptsPerJobWindow" yaml:"max-attempts-per-job-window" ini:"max-attempts-per-job-window"`
+		// WindowSeconds 尝试次数统计窗口（默认 1800s）。
+		WindowSeconds int64 `mapstructure:"window-seconds" json:"windowSeconds" yaml:"window-seconds" ini:"window-seconds"`
+		// CooldownSeconds 同一任务两次自愈的最小间隔（默认 300s）。
+		CooldownSeconds int64 `mapstructure:"cooldown-seconds" json:"cooldownSeconds" yaml:"cooldown-seconds" ini:"cooldown-seconds"`
+		// ExtendTimeoutFactor 超时自愈的放大倍数（默认 2）。
+		ExtendTimeoutFactor float64 `mapstructure:"extend-timeout-factor" json:"extendTimeoutFactor" yaml:"extend-timeout-factor" ini:"extend-timeout-factor"`
+		// MaxExtendTimeoutSeconds 超时上限的绝对天花板（默认 3600s）。
+		MaxExtendTimeoutSeconds int64 `mapstructure:"max-extend-timeout-seconds" json:"maxExtendTimeoutSeconds" yaml:"max-extend-timeout-seconds" ini:"max-extend-timeout-seconds"`
+		// MaxConcurrent 同时待观测的自愈上限（默认 2）。
+		MaxConcurrent int `mapstructure:"max-concurrent" json:"maxConcurrent" yaml:"max-concurrent" ini:"max-concurrent"`
+		// ObserveWindowSeconds 自愈后等待新执行的观测窗口（默认 900s）。
+		ObserveWindowSeconds int64 `mapstructure:"observe-window-seconds" json:"observeWindowSeconds" yaml:"observe-window-seconds" ini:"observe-window-seconds"`
+		// ScanLimit 单轮最多处置多少条失败执行（默认 50）。
+		ScanLimit int `mapstructure:"scan-limit" json:"scanLimit" yaml:"scan-limit" ini:"scan-limit"`
+		// LookbackSeconds 只扫描该时间窗内结束的失败执行（默认 1800s）。
+		LookbackSeconds int64 `mapstructure:"lookback-seconds" json:"lookbackSeconds" yaml:"lookback-seconds" ini:"lookback-seconds"`
 	}
 	// Tools 工具网关策略（阶段 4）。所有字段都有保守默认值；
 	// 缺失/留空 = 用默认值，且默认值一律是"关着"的那一档。

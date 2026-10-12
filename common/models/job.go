@@ -78,9 +78,16 @@ type Job struct {
 	// 因此老任务升级后行为**逐字节不变**，不需要任何数据迁移。
 	// 存成一列而不是拆表，理由见 job_steps.go 顶部注释。
 	StepsJSON string `json:"steps_json" gorm:"type:text;column:steps_json"`
-	Note      string `json:"note" gorm:"size:512;column:note;default:''"`
-	Created   int64  `json:"created" gorm:"column:created;not null"`
-	Updated   int64  `json:"updated" gorm:"column:updated;default:0"`
+	// SelfHeal 阶段 4-C：该任务是否允许自愈调度自动处置失败（0=不允许，1=允许）。
+	//
+	// 为什么是**按任务开关且默认关闭**，而不是"全局一开就全自动"：
+	// 自愈是写动作（会重跑任务、可能改超时配置）。默认关着意味着"升级后行为不变"，
+	// 运维必须对具体任务显式点头——这和 allow_write 默认关是同一个原则：
+	// 能力先存在、边界先收紧。
+	SelfHeal int    `json:"self_heal" gorm:"size:1;column:self_heal;not null;default:0"`
+	Note     string `json:"note" gorm:"size:512;column:note;default:''"`
+	Created  int64  `json:"created" gorm:"column:created;not null"`
+	Updated  int64  `json:"updated" gorm:"column:updated;default:0"`
 
 	Hostname string   `json:"host_name" gorm:"-"`
 	Ip       string   `json:"ip" gorm:"-"`

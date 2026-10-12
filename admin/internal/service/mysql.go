@@ -54,6 +54,10 @@ func RegisterTables(db *gorm.DB) error {
 		// dedupe_key 上有唯一索引：同一"症状+动作+目标"只留一行并累加计数，
 		// 否则经验库会退化成"每次诊断多一条重复行"，召回时全是同一件事的碎片。
 		models.AgentMemory{},
+		// 阶段 4-C（自愈调度）：一次自愈尝试一行事实记录。
+		// heal_id 唯一（幂等写），source_run_id 索引（"这次失败被怎么处置的"最常按它查），
+		// status/action/failure_class 建索引：控制台按状态与动作筛选是主要用法。
+		models.JobHeal{},
 	)
 	if err != nil {
 		return errors.Wrap(err, "register table failed")

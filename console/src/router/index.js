@@ -211,6 +211,17 @@ const routes = [
       icon: 'Collection',
     },
   },
+  {
+    path: '/selfheal',
+    name: 'selfheal',
+    component: () => import('@/views/SelfHealView.vue'),
+    meta: {
+      title: 'Self-Heal',
+      subtitle: '自愈调度 · 失败自动处置（白名单动作 + 三道闸门），只读与手动催一轮',
+      group: 'AI Agent',
+      icon: 'FirstAidKit',
+    },
+  },
 
   /* ----------------------------- System ------------------------- */
   {

@@ -332,6 +332,95 @@ check('阶段 4-B 编排 Mock：单步任务查编排返回 1022，而不是一�
   assert.ok(!res.data.plan, '没有编排时不应伪造 plan')
 })
 
+/* ===================== 阶段 4-C：自愈调度 Mock ===================== */
+
+check('阶段 4-C 自愈 Mock：状态机六态齐全，中间态带观测截止且不写结束时间', () => {
+  const d = mock.healSearch({ page: 1, page_size: 50 }).data
+  assert.ok(d.list.length >= 5)
+  for (const row of d.list) {
+    assert.ok(row.heal_id.startsWith('heal-'), `自愈单号格式: ${row.heal_id}`)
+    assert.ok(row.status_text && row.status_text !== row.status, '状态必须有中文解释（回执给人看）')
+    assert.ok(row.reason, '为什么这么决策必须能看见')
+    assert.ok(row.symptom, '症状必须落库（复盘的锚点）')
+  }
+  const pending = d.list.filter((r) => r.pending_observation)
+  assert.ok(pending.length > 0, '至少有一条中间态用于验证"执行中不等于成功"')
+  for (const p of pending) {
+    assert.ok(p.deadline > 0, '中间态必须带观测截止时间')
+    assert.equal(p.finished_at, 0, '中间态不得写结束时间')
+  }
+  for (const f of d.list.filter((r) => r.finished)) {
+    assert.ok(f.finished_at > 0, '终态必须有结束时间')
+  }
+})
+
+check('阶段 4-C 自愈 Mock：自述"没有直接执行动作的接口"且手动扫描不绕过闸门', () => {
+  const d = mock.healSearch({ page: 1, page_size: 10 }).data
+  assert.equal(d.source.direct_action_api, false)
+  assert.equal(d.source.manual_scan_bypasses_gates, false)
+  assert.equal(d.source.executed_is_success, false)
+  const scan = mock.healScan({}).data
+  assert.deepEqual(scan.gates_skipped, [], '手动扫描不得跳过任何闸门')
+  assert.equal(scan.writes_enabled, false, 'Mock 默认写能力关闭（与仓库默认 tools.allow-write=false 一致）')
+})
+
+check('阶段 4-C 自愈 Mock：策略边界可读（次数/冷却/并发/观测窗口/超时天花板）', () => {
+  const d = mock.healPolicy().data
+  const p = d.policy
+  for (const k of [
+    'enabled',
+    'max_attempts_per_job_window',
+    'window_seconds',
+    'cooldown_seconds',
+    'extend_timeout_factor',
+    'max_extend_timeout_seconds',
+    'max_concurrent',
+    'observe_window_seconds',
+  ]) {
+    assert.ok(k in p, `策略缺少字段 ${k}`)
+  }
+  assert.equal(p.max_attempts_per_job_window, 3, '默认尝试上限必须与后端 DefaultPolicy 一致')
+  assert.equal(
+    Object.keys(d.action_names).sort().join(','),
+    'escalate,retry_extend_timeout,retry_same_node',
+    '动作白名单必须闭合：多一个就是爆炸半径变大'
+  )
+  for (const c of d.classes) {
+    assert.ok(c.class && c.desc && Array.isArray(c.actions), `分类映射需完整: ${JSON.stringify(c)}`)
+    for (const a of c.actions) assert.ok(d.action_names[a], `分类 ${c.class} 引用了不存在的动作 ${a}`)
+  }
+  assert.deepEqual(d.source.three_gates, ['self_heal.enabled', 'job.self_heal=1', 'tools.allow-write'])
+})
+
+check('阶段 4-C 自愈 Mock：查询与错误分支（不存在→1023，空 run_id→1001）', () => {
+  const okOne = mock.healFind({ heal_id: mock.healSearch({}).data.list[0].heal_id })
+  assert.equal(okOne.code, 200)
+  assert.ok(okOne.data.heal.heal_id)
+
+  assert.equal(mock.healFind({ heal_id: 'heal-none' }).code, 1023, '不存在的自愈单号必须用独立业务码')
+  assert.equal(mock.healByRun({ run_id: '   ' }).code, 1001, 'by_run 缺锚点必须报参数错误')
+
+  const byRun = mock.healByRun({ run_id: 'j910002-t1699999000' }).data
+  assert.equal(byRun.total, 1)
+  assert.equal(byRun.list[0].job_id, 910002)
+
+  const filtered = mock.healSearch({ status: 'denied' }).data
+  assert.ok(filtered.list.length > 0 && filtered.list.every((r) => r.status === 'denied'))
+
+  const byJob = mock.healSearch({ job_id: 910005 }).data
+  assert.equal(byJob.total, 1)
+  assert.equal(byJob.list[0].status, 'escalated', '次数用尽的语义是转人工，不是静默放弃')
+})
+
+check('阶段 4-C 自愈 Mock：前端 api 层没有"直接执行动作"的函数（缺失即约束）', async () => {
+  const api = await server.ssrLoadModule('/src/api/selfheal.js')
+  const exported = Object.keys(api).sort()
+  assert.deepEqual(exported, ['fetchHealPolicy', 'findHeal', 'healsByRun', 'scanHeals', 'searchHeals'])
+  for (const name of exported) {
+    assert.ok(!/execute|apply|invoke|run_action|doAction/i.test(name), `不得存在直接执行动作的入口: ${name}`)
+  }
+})
+
 let failed = 0
 for (const { name, fn } of checks) {
   try {
