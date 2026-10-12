@@ -8,15 +8,20 @@ import { formatRelative, formatTime } from '@/utils/format'
 /**
  * /audit —— 审计追溯。
  *
- * ⚠️ 阶段 2 规划页：POST /audit/search 尚未实现。
- *   阶段 0/1 的审计事实来源是 admin 的访问日志 + job 操作记录；
- *   阶段 2 会引入统一 audit_event 表（operator 可以是 user / system / agent），
- *   并保证 Agent 的每一次工具调用都留痕（AI 运维可解释性的硬要求）。
+ * 数据来自后端**真实**接口 `POST /audit/search`，它合并两个事实源：
+ *   1. `agent_tool_audit` —— 工具网关每次调用一行（含被拒 / 转审批，append-only）；
+ *   2. `approval_request` —— 写动作审批单（谁批的、结果如何）。
+ * 每行带 `source` 标注来源；响应的 `notice` 写明合并窗口（每个来源最近 N 行）。
+ *
+ * 注意：平台**没有**独立的"用户登录审计"表，因此这里不显示登录类事件（不编造）。
  */
 
 const loading = ref(false)
 const rows = ref([])
 const total = ref(0)
+// notice / source_window：后端如实告知"合并了哪些来源、窗口多大"。
+const notice = ref('')
+const sourceWindow = ref(0)
 const detail = reactive({ visible: false, row: null })
 
 const query = reactive({
@@ -36,11 +41,23 @@ const operatorTypeMeta = {
   anonymous: { text: '匿名', color: '#ef4444' },
 }
 
+/** 审计行来源 → 中文（与后端 `source` 字段一一对应）。 */
+const sourceMeta = {
+  tool_audit: { text: '工具调用', color: '#3b82f6' },
+  approval: { text: '写动作审批', color: '#f59e0b' },
+}
+
+/**
+ * 动作筛选可选项。
+ *
+ * 后端对 `action` 是**大小写不敏感的子串匹配**（同时匹配 `action` 与 `action_text`），
+ * 所以这里给"前缀 / 关键词"而不是穷举值：`tool.` 命中全部工具调用，
+ * `approval.` 命中全部审批单，中文关键词命中 action_text。
+ */
 const actionGroups = [
-  { label: '任务', items: ['job.once', 'job.failed', 'job.success', 'job.skip', 'job.kill'] },
-  { label: '用户', items: ['user.login', 'user.change_pw', 'user.register'] },
-  { label: '节点', items: ['node.delete', 'node.register'] },
-  { label: 'Agent', items: ['baseline.scan', 'agent.dispatch', 'kb.write'] },
+  { label: '工具调用（前缀）', items: ['tool.'] },
+  { label: '写动作审批（前缀）', items: ['approval.'] },
+  { label: '决策关键词', items: ['已执行', '被拒绝', '转人工审批', '审批后执行'] },
 ]
 
 async function load() {
@@ -57,10 +74,14 @@ async function load() {
     })
     rows.value = res?.list || []
     total.value = res?.total || 0
+    notice.value = res?.notice || ''
+    sourceWindow.value = Number(res?.source_window) || 0
   } catch {
-    // 规划中接口（后端未实现）：展示空结果，不弹错。
+    // 后端不可达时展示空结果（不在页面里反复弹错误提示）。
     rows.value = []
     total.value = 0
+    notice.value = ''
+    sourceWindow.value = 0
   } finally {
     loading.value = false
   }
@@ -88,7 +109,9 @@ function openDetail(row) {
 const eventJson = computed(() => (detail.row ? JSON.stringify(detail.row, null, 2) : ''))
 
 const agentEvents = computed(() => rows.value.filter((r) => r.operator_type === 'agent').length)
-const failedEvents = computed(() => rows.value.filter((r) => r.result === 'failed' || r.result === 'forbidden').length)
+// 异常结果 = 后端结果枚举里**非成功/非待审**的那些（denied 是"没动手被拦"，也算异常）。
+const ABNORMAL_RESULTS = ['failed', 'denied', 'expired', 'canceled', 'blocked']
+const failedEvents = computed(() => rows.value.filter((r) => ABNORMAL_RESULTS.includes(r.result)).length)
 
 onMounted(load)
 </script>
@@ -112,9 +135,11 @@ onMounted(load)
         <p class="mt-1 text-[11px] text-ink-dim">失败 / 被拒绝</p>
       </div>
       <div class="card card-pad">
-        <p class="card-sub">保留策略</p>
-        <p class="mt-1 text-xl font-semibold text-brand-300">180 天</p>
-        <p class="mt-1 text-[11px] text-ink-dim">阶段 2 支持导出与冷备</p>
+        <p class="card-sub">数据来源</p>
+        <p class="mt-1 text-xl font-semibold text-brand-300">2 个事实源合并</p>
+        <p class="mt-1 text-[11px] text-ink-dim">
+          工具调用审计 + 写动作审批（各取最近 {{ sourceWindow || '—' }} 行）
+        </p>
       </div>
     </section>
 
@@ -133,8 +158,11 @@ onMounted(load)
           <el-select v-model="query.result" placeholder="结果" clearable class="!w-[130px]">
             <el-option label="成功" value="success" />
             <el-option label="失败" value="failed" />
-            <el-option label="已跳过" value="skipped" />
-            <el-option label="被拒绝" value="forbidden" />
+            <el-option label="被拒绝（未执行）" value="denied" />
+            <el-option label="待审批" value="pending" />
+            <el-option label="已过期" value="expired" />
+            <el-option label="已撤销" value="canceled" />
+            <el-option label="复核未通过" value="blocked" />
           </el-select>
           <el-input v-model="query.ip" placeholder="来源 IP" clearable class="!w-[140px]" @keyup.enter="onSearch" />
           <el-button type="primary" @click="onSearch">查询</el-button>
@@ -194,6 +222,20 @@ onMounted(load)
           </template>
         </el-table-column>
 
+        <el-table-column label="来源" width="110">
+          <template #default="{ row }">
+            <span
+              class="chip"
+              :style="{
+                color: sourceMeta[row.source]?.color || '#7c8aa8',
+                borderColor: (sourceMeta[row.source]?.color || '#7c8aa8') + '55',
+              }"
+            >
+              {{ sourceMeta[row.source]?.text || row.source }}
+            </span>
+          </template>
+        </el-table-column>
+
         <el-table-column label="详情" min-width="220">
           <template #default="{ row }">
             <span class="text-[11px] text-ink-dim">{{ row.detail }}</span>
@@ -216,7 +258,7 @@ onMounted(load)
           <EmptyState
             icon="Document"
             title="没有匹配的审计事件"
-            desc="调整筛选条件，或清空条件查看全部事件。审计事件在阶段 2 由统一 audit_event 表提供。"
+            desc="调整筛选条件，或清空条件查看全部事件。数据来自工具调用审计与写动作审批两个真实来源。"
             action-text="重置筛选"
             @action="reset"
           />
@@ -225,7 +267,7 @@ onMounted(load)
 
       <div class="flex flex-wrap items-center justify-between gap-3 border-t border-navy-600 px-5 py-3">
         <p class="text-[11px] text-ink-dim">
-          共 {{ total }} 条 · 接口 POST /audit/search 规划中（阶段 2）
+          共 {{ total }} 条<span v-if="notice"> · {{ notice }}</span>
         </p>
         <el-pagination
           v-model:current-page="query.page"
@@ -265,10 +307,13 @@ onMounted(load)
             </el-descriptions-item>
             <el-descriptions-item label="目标">{{ detail.row.target }}</el-descriptions-item>
             <el-descriptions-item label="目标类型">{{ detail.row.target_type }}</el-descriptions-item>
-            <el-descriptions-item label="来源 IP">
-              <span class="font-mono">{{ detail.row.ip }}</span>
+            <el-descriptions-item label="来源">
+              {{ sourceMeta[detail.row.source]?.text || detail.row.source }}
             </el-descriptions-item>
-            <el-descriptions-item label="trace_id">
+            <el-descriptions-item label="来源 IP">
+              <span class="font-mono">{{ detail.row.ip || '—（当前未采集）' }}</span>
+            </el-descriptions-item>
+            <el-descriptions-item label="trace_id" :span="2">
               <span class="font-mono">{{ detail.row.trace_id }}</span>
             </el-descriptions-item>
           </el-descriptions>
@@ -292,7 +337,7 @@ onMounted(load)
             <el-button size="small" plain @click="$router.push('/jobs')">查看任务定义</el-button>
           </div>
           <p class="mt-2 text-[11px] text-ink-dim">
-            阶段 2：以 trace_id 串联 job_run → job_run_step → audit_event，支持一键回放。
+            trace_id 用于串起同一次会话/运行（工具调用取 run_id，审批单取 run_id 或审批号）。
           </p>
         </div>
       </div>

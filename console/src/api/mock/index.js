@@ -929,7 +929,15 @@ export function auditSearch(params = {}) {
   if (params.target) list = list.filter((l) => includes(l.target, params.target))
   if (params.result) list = list.filter((l) => l.result === params.result)
   if (params.ip) list = list.filter((l) => includes(l.ip, params.ip))
-  return { code: 200, data: paginate(list, { page, pageSize }), msg: 'operation success' }
+  // 与后端契约对齐：每行带 source 标注来源，并写明合并窗口（Mock 也要有同样的响应形状）。
+  const withSource = list.map((l) => ({
+    ...l,
+    source: l.operator_type === 'agent' ? 'tool_audit' : 'approval',
+  }))
+  const data = paginate(withSource, { page, pageSize })
+  data.source_window = withSource.length
+  data.notice = '合并自 agent_tool_audit 与 approval_request 两个真实来源（各取最近 N 行）；ip 当前无采集恒为空。'
+  return { code: 200, data, msg: 'operation success' }
 }
 
 /* ------------------------- 设置 ------------------------- */

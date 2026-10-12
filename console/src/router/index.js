@@ -135,7 +135,7 @@ const routes = [
     path: '/audit',
     name: 'audit',
     component: () => import('@/views/AuditView.vue'),
-    meta: { title: '审计轨迹', subtitle: '谁在何时对什么做了什么（Mock）', group: '治理与运维', icon: 'Files' },
+    meta: { title: '审计轨迹', subtitle: '谁在何时对什么做了什么（工具调用 + 审批合并）', group: '治理与运维', icon: 'Files' },
   },
   {
     path: '/selfheal',

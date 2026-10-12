@@ -16,6 +16,10 @@ const (
 	CronyApprovalRequestTable = CronyApprovalRequestTableName
 )
 
+// JwtIssuer JWT 签发方（`Iss`）。定义在这里是为了让"令牌实际签发的 issuer"与
+// "控制台展示的 issuer"共用同一个常量，永远不会漂移。
+const JwtIssuer = "tmnhs"
+
 type (
 	Mysql struct {
 		Path         string `mapstructure:"path" json:"path" yaml:"path" ini:"path"`

@@ -93,13 +93,13 @@ function handleUnauthorized(msg) {
  * `real=true` 表示来自真实后端（axios）；此时业务码 1000 按"未登录/令牌失效"处理
  * （去重提示 + 广播登录事件），而不是像 Mock 那样当成普通业务错误逐条弹窗。
  */
-export function unwrap(body, { real = false } = {}) {
+export function unwrap(body, { real = false, silent = false } = {}) {
   if (body && typeof body === 'object' && !Array.isArray(body) && 'code' in body) {
     if (body.code !== 200) {
       const msg = body.msg || `业务错误（code=${body.code}）`
       if (real && Number(body.code) === 1000 && body?.data?.reload) {
         handleUnauthorized(msg)
-      } else {
+      } else if (!silent) {
         ElMessage.error(msg)
       }
       return Promise.reject(new BizError(msg, body.code))
@@ -131,7 +131,7 @@ request.interceptors.request.use(
 )
 
 request.interceptors.response.use(
-  (response) => unwrap(response.data, { real: true }),
+  (response) => unwrap(response.data, { real: true, silent: Boolean(response?.config?.silent) }),
   (error) => {
     const status = error?.response?.status
 
@@ -142,14 +142,14 @@ request.interceptors.response.use(
     }
 
     // HTTP 层错误（网络不通 / 超时 / 5xx）。
-    // 只提示一次，避免多个并发请求同时弹窗刷屏。
+    // 只提示一次，避免多个并发请求同时弹窗刷屏；`silent: true` 的后台请求完全不提示。
     const detail =
       error?.response?.data?.msg ||
       error?.response?.data?.message ||
       error?.message ||
       '未知错误'
     const text = status ? `请求失败（HTTP ${status}）：${detail}` : `无法连接到后端：${detail}`
-    if (!error.__notified) {
+    if (!error.__notified && !error?.config?.silent) {
       error.__notified = true
       ElMessage.error(
         USE_MOCK ? text : `${text}（当前 VITE_USE_MOCK=false，请确认 ${API_BASE} 已启动）`,

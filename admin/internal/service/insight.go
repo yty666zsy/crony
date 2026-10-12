@@ -256,6 +256,11 @@ type OverviewKPI struct {
 	AvgDurationMs    int64   `json:"avg_duration_ms"`
 	KBDocs           int64   `json:"kb_docs"`
 	PendingApprovals int64   `json:"pending_approvals"`
+	// Agent 会话（**真实**计数）。平台没有"Agent 在线"这种状态——agent_session 只有终态
+	// completed/failed/canceled，所以这里给的是会话事实，而不是编一个"在线数"。
+	AgentSessionsTotal       int64 `json:"agent_sessions_total"`
+	AgentSessionsToday       int64 `json:"agent_sessions_today"`
+	AgentSessionsFailedToday int64 `json:"agent_sessions_failed_today"`
 }
 
 // OverviewAlert 概览告警（从健康度与 SLO 违约**真实推导**，没有独立告警子系统就不假装有）。
@@ -301,6 +306,12 @@ func (s *OverviewService) Report() OverviewReport {
 			"finished_at >= ? and status = ?", since, int(models.RunStatusSuccess))) * 100 / float64(k.RunsToday))
 	}
 	k.AvgDurationMs = avgDurationSince(since)
+
+	// Agent 会话（真实计数；只有终态，故不报"在线数"）。
+	k.AgentSessionsTotal, _ = countRows(models.CronyAgentSessionTableName, "")
+	k.AgentSessionsToday, _ = countRows(models.CronyAgentSessionTableName, "created >= ?", since)
+	k.AgentSessionsFailedToday, _ = countRows(models.CronyAgentSessionTableName,
+		"created >= ? and status = ?", since, models.AgentStatusFailed)
 
 	rep.Alerts = append(rep.Alerts, alertsFromHealth(s.health())...)
 	rep.Alerts = append(rep.Alerts, alertsFromSlo()...)
@@ -413,26 +424,59 @@ func (s *SettingsService) Get() SettingsSnapshot {
 	if cfg == nil {
 		return snap
 	}
-	snap.Auth = map[string]interface{}{
-		"token_expire_hours":         cfg.Auth.TokenExpireHours,
-		"allow_public_register":      cfg.Auth.AllowPublicRegister,
-		"password_min_length":        crypt.MinPasswordLength,
-		"rbac":                       "已启用：JWTAuth + RequireAdmin",
-		"bootstrap_admin_configured": strings.TrimSpace(cfg.Auth.BootstrapAdminUser) != "",
-		"jwt_secret_configured":      strings.TrimSpace(cfg.Auth.JwtSecret) != "",
-	}
-	snap.Scheduler = map[string]interface{}{
-		"default_concurrency_policy": "skip",
-		"max_retry_times":            models.MaxRetryTimes,
-		"default_allocation":         "auto",
-		"self_heal_enabled":          cfg.SelfHeal.Enabled,
-		"slo_breach_action_enabled":  cfg.Slo.BreachActionEnabled,
-	}
+	snap.Auth = authSnapshot(cfg)
+	snap.Scheduler = schedulerSnapshot(cfg)
 	snap.Notify = map[string]interface{}{
 		"channels": notifyChannels(cfg),
 	}
 	snap.Agent = s.agentSnapshot(cfg)
 	return snap
+}
+
+// authSnapshot 鉴权配置只读快照。
+//
+// 字段名与前端 SettingsView 的读取口径对齐（`jwt_issuer`/`jwt_ttl_hours`/`jwt_secret_source`/
+// `force_password_change`/`bootstrap_admin`），否则页面会显示空白。
+// 只放**可公开**的事实：口令与密钥原文永不出现在这里。
+func authSnapshot(cfg *models.Config) map[string]interface{} {
+	secretSource := "未配置（auth.jwt-secret 与 CRONY_AUTH_JWT_SECRET 均为空）"
+	if strings.TrimSpace(cfg.Auth.JwtSecret) != "" {
+		secretSource = "已配置（admin/conf/app.ini 或环境变量 CRONY_AUTH_JWT_SECRET，环境变量优先）"
+	}
+	bootstrap := "未配置：用户表为空时由首个 /register 成为管理员（引导注册）"
+	if u := strings.TrimSpace(cfg.Auth.BootstrapAdminUser); u != "" && strings.TrimSpace(cfg.Auth.BootstrapAdminPassword) != "" {
+		bootstrap = "已配置初始管理员 " + u + "（仅在用户表为空时创建；口令来自配置/环境变量）"
+	}
+	return map[string]interface{}{
+		"jwt_issuer":            models.JwtIssuer,
+		"jwt_ttl_hours":         cfg.Auth.TokenExpireHours,
+		"jwt_secret_source":     secretSource,
+		"password_min_length":   crypt.MinPasswordLength,
+		"force_password_change": false, // 现状：本系统没有强制改密机制（如实回答"是否强制"= 否）
+		"rbac":                  "已启用：JWTAuth + RequireAdmin",
+		"bootstrap_admin":       bootstrap,
+		// 兼容/补充字段（不影响渲染）。
+		"token_expire_hours":         cfg.Auth.TokenExpireHours,
+		"allow_public_register":      cfg.Auth.AllowPublicRegister,
+		"bootstrap_admin_configured": strings.TrimSpace(cfg.Auth.BootstrapAdminUser) != "",
+		"jwt_secret_configured":      strings.TrimSpace(cfg.Auth.JwtSecret) != "",
+	}
+}
+
+// schedulerSnapshot 调度默认值（只读）。
+//
+// 重试/超时是 models.Job 的真实零值默认；并发策略与分配方式是代码固定口径。
+func schedulerSnapshot(cfg *models.Config) map[string]interface{} {
+	return map[string]interface{}{
+		"default_concurrency_policy": "skip",
+		"default_retry_times":        0,
+		"default_retry_interval":     0,
+		"max_retry_times":            models.MaxRetryTimes,
+		"default_timeout_seconds":    0,
+		"default_allocation":         "auto",
+		"self_heal_enabled":          cfg.SelfHeal.Enabled,
+		"slo_breach_action_enabled":  cfg.Slo.BreachActionEnabled,
+	}
 }
 
 func notifyChannels(cfg *models.Config) []map[string]interface{} {

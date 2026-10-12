@@ -2341,7 +2341,8 @@ func TestAcceptanceSuite(t *testing.T) {
 		}
 		kpi := asMap(over["kpi"])
 		for _, key := range []string{"total_jobs", "enabled_jobs", "online_nodes", "total_nodes",
-			"runs_today", "success_rate_today", "failed_today", "pending_approvals", "kb_docs"} {
+			"runs_today", "success_rate_today", "failed_today", "pending_approvals", "kb_docs",
+			"agent_sessions_total", "agent_sessions_today", "agent_sessions_failed_today"} {
 			if _, ok := kpi[key]; !ok {
 				cc.t.Fatalf("概览 KPI 缺字段 %q: %+v", key, kpi)
 			}
@@ -2358,6 +2359,26 @@ func TestAcceptanceSuite(t *testing.T) {
 			if _, ok := set[sec]; !ok {
 				cc.t.Fatalf("配置快照缺分节 %q: %+v", sec, set)
 			}
+		}
+		// 前端 SettingsView 直接读取这些字段名（缺失就会显示空白），必须钉死。
+		auth := asMap(set["auth"])
+		for _, key := range []string{"jwt_issuer", "jwt_ttl_hours", "jwt_secret_source",
+			"password_min_length", "rbac", "bootstrap_admin"} {
+			if _, ok := auth[key]; !ok {
+				cc.t.Fatalf("鉴权分节缺前端读取字段 %q（会导致设置页空白）: %+v", key, auth)
+			}
+		}
+		if s := strings.TrimSpace(asStr(auth["jwt_issuer"])); s == "" {
+			cc.t.Fatalf("jwt_issuer 不能为空")
+		}
+		sched := asMap(set["scheduler"])
+		for _, key := range []string{"default_concurrency_policy", "default_allocation", "max_retry_times"} {
+			if _, ok := sched[key]; !ok {
+				cc.t.Fatalf("调度分节缺前端读取字段 %q（会导致设置页空白）: %+v", key, sched)
+			}
+		}
+		if _, ok := asMap(set["agent"])["enabled"]; !ok {
+			cc.t.Fatalf("Agent 分节缺 enabled 字段: %+v", set["agent"])
 		}
 		blob, _ := json.Marshal(set)
 		lower := strings.ToLower(string(blob))

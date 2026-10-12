@@ -10,29 +10,44 @@ import { login as loginApi, fetchCurrentUser } from '@/api/auth'
  * 请求拦截器自动带 `Authorization` 头；令牌失效（业务码 1000）时由外壳切回登录页。
  */
 
-/**
- * 从 JWT 载荷里取用户 ID。
- *
- * 后端没有 `GET /me`；"带着令牌刷新页面"时只能从令牌里取（载荷含 `ID`）。
- * 早期实现写死 `id=1`，而真实管理员往往不是 1 号用户，于是
- * `GET /user/find?id=1` 回 `[find_user] db error`，**每个页面加载都弹一次**。
- */
-function userIdFromToken(token) {
+/** 解出 JWT 载荷（真实后端令牌含 `ID` / `UserName` / `Role`）。 */
+function jwtPayload(token) {
   try {
-    const payload = String(token).split('.')[1]
-    if (!payload) return null
-    const base64 = payload.replace(/-/g, '+').replace(/_/g, '/')
+    const part = String(token).split('.')[1]
+    if (!part) return null
+    const base64 = part.replace(/-/g, '+').replace(/_/g, '/')
     const json = decodeURIComponent(
       atob(base64)
         .split('')
         .map((c) => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
         .join(''),
     )
-    const data = JSON.parse(json)
-    const id = data.ID ?? data.id ?? data.user_id
-    return id == null ? null : Number(id)
+    return JSON.parse(json)
   } catch {
     return null
+  }
+}
+
+/**
+ * 从 JWT 载荷直接构造用户身份。
+ *
+ * 后端没有 `GET /me`，但令牌本身就带 `ID` / `UserName` / `Role`——足够撑起控制台外壳。
+ * 早期实现写死 `id=1` 去查 `/user/find`，而真实管理员往往不是 1 号用户，于是
+ * `GET /user/find?id=1` 回 `[find_user] db error`，**每个页面加载都弹一次**。
+ * 现在：外壳身份**优先来自令牌**（不发请求），后端刷新只是"锦上添花"（失败静默）。
+ */
+function userFromToken(token) {
+  const data = jwtPayload(token)
+  if (!data) return null
+  const id = data.ID ?? data.id ?? data.user_id
+  const username = data.UserName ?? data.username
+  const role = Number(data.Role ?? data.role ?? 0)
+  if (id == null && !username) return null
+  return {
+    id: id == null ? undefined : Number(id),
+    username,
+    role,
+    is_admin: role === 2,
   }
 }
 
@@ -83,13 +98,21 @@ export const useAuthStore = defineStore('auth', {
           this.user = normalizeUser(await fetchCurrentUser(1))
           return
         }
-        const id = userIdFromToken(this.token)
-        if (id == null) {
+        const fromToken = userFromToken(this.token)
+        if (!fromToken) {
           // 没有可用令牌：不发请求（否则每个请求都会被回"未登录"刷屏），交给登录页。
           this.user = null
           return
         }
-        this.user = normalizeUser(await fetchCurrentUser(id))
+        // 先用令牌里的身份把外壳撑起来：不发请求 → 后端/DB 抖动也不会弹错误。
+        this.user = normalizeUser(fromToken)
+        // 再尝试用后端刷新一次（**静默**：失败就保持令牌里的身份）。
+        try {
+          const fresh = await fetchCurrentUser(fromToken.id, { silent: true })
+          if (fresh) this.user = normalizeUser(fresh)
+        } catch {
+          /* 保持令牌里的身份，不打扰用户 */
+        }
       } catch {
         // 后端不可达时退化为本地占位用户，保证控制台外壳可用
         this.user = FALLBACK_USER

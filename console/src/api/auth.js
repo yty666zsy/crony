@@ -27,12 +27,15 @@ export function ping() {
 
 /**
  * 当前登录用户信息。
- * 规划中：后端目前只有 GET /user/find?id=，没有 "GET /me"。
- * 因此这里用 GET /user/find 兜底（Mock 下直接返回当前用户）。
+ * 后端只有 `GET /user/find?id=`，没有 `GET /me`；因此这里用 `GET /user/find` 兜底
+ * （Mock 下直接返回当前用户）。
+ *
+ * `silent: true` 用于**页面外壳刷新身份**这种非关键路径：失败不弹错误提示
+ * （调用方已有令牌里的身份可兜底），避免"用户表抖动 → 每个页面加载弹一次错误"。
  */
-export function fetchCurrentUser(id = 1) {
+export function fetchCurrentUser(id = 1, { silent = false } = {}) {
   if (USE_MOCK) return mockResponse(mock.currentUser())
-  return request.get('/user/find', { params: { id } })
+  return request.get('/user/find', { params: { id }, silent })
 }
 
 /** POST /user/change_pw（后端已实现） */

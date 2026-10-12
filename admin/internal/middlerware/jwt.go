@@ -143,7 +143,7 @@ func (j *JWT) CreateClaims(baseClaims BaseClaims) CustomClaims {
 		RegisteredClaims: jwt.RegisteredClaims{
 			NotBefore: jwt.NewNumericDate(now.Add(-1000 * time.Second)), // effective time of signature
 			ExpiresAt: jwt.NewNumericDate(now.Add(tokenExpireDuration(config.GetConfigModels()))),
-			Issuer:    "tmnhs",
+			Issuer:    models.JwtIssuer,
 		},
 	}
 	return claims

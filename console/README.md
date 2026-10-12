@@ -126,7 +126,8 @@ console/
     │   ├── agent.js              # ★ 阶段 2 契约接口：§1/§2/§3.1/§3.2/§4/§5.1/§5.2
     │   ├── stream.js             # ★ 阶段 2 §9：SSE 订阅（fetch + ReadableStream）+ 可单测帧解析器
     │   ├── auth.js job.js run.js node.js script.js statis.js
-    │   └── knowledge.js audit.js settings.js   # 规划中接口（阶段 2 之后）
+    │   ├── knowledge.js          # 仍规划中（平台无文档/RAG 存储，见 §4.2）
+    │   └── audit.js settings.js  # 已接真实接口（合并审计 / 只读配置快照，见 §4.1）
     ├── router/index.js           # 路由表（hash 模式）
     ├── config/nav.js             # 侧边栏导航分组（唯一导航来源）
     ├── stores/{app,auth,agentPanel}.js   # 布局/视图宽度、登录态、右下角会话速查面板
@@ -160,9 +161,9 @@ console/
 | `/terminal` | 终端 | 节点选择 + 命令回显型终端（阶段 2 接真实 PTY） |
 | `/agents` | Agent 会话 | **当前能力边界**（§4 真实只读工具 + 硬配额）、会话列表（§1：kind/status/job_id/run_id 过滤 + 分页）、就地"立即诊断"（§3.2） |
 | `/agents/:session_id` | 会话轨迹 | **轨迹回放**（§2）：model / tool / notice 三类步骤视觉可分，tool 步骤展示 `tool_args` 与 `observation`，顶部展示 `budget` 与 `warnings`，结论只读 |
-| `/knowledge` | 知识库 | Runbook / SOP / 复盘文档检索与正文预览 |
-| `/audit` | 审计日志 | 操作审计检索（操作者、动作、对象、结果） |
-| `/settings` | 设置 | 鉴权/改密、调度默认值、通知、Agent 能力与预算（provider/model/配额，不写"支持 XX 种能力"） |
+| `/knowledge` | 知识库 | **规划中**：后端没有文档/RAG 存储（无 chunks / 向量索引），不拿经验库冒充；真实经验检索见 `/agents` 与经验库 |
+| `/audit` | 审计轨迹 | 检索两个**真实**事实源（工具调用审计 + 写动作审批），每行带"来源"标注与 `notice` 合并窗口说明 |
+| `/settings` | 设置 | 鉴权（issuer/有效期/密钥来源，**只报是否配置、不返回密钥**）、调度默认值、通知渠道、Agent 能力与预算（provider/model/自治级别/预算上限） |
 | `/:pathMatch(.*)*` | 404 | 兜底页 |
 
 响应式：`≥1280px` 完整三栏；`≤1024px` 侧栏收为图标栏（可手动展开/收起/“收起分组”）；
@@ -210,24 +211,21 @@ success_rate, skip_rate, by_status, since }`，其中
 `success_rate = 成功 / (total - skipped)`（被并发策略跳过不算失败）、`skip_rate = 跳过 / total`，
 `since` 缺省为最近 24 小时。总览页前两张 KPI 卡直接使用该接口，卡片底部标注数据来源。
 
-### 4.2 规划中（**后端当前没有这些路由**，前端先约定契约 + Mock；不得当成已实现）
+### 4.2 规划中（**后端当前没有这个路由**，前端先约定契约 + Mock；不得当成已实现）
 
-| 页面 | 前端 API | 约定路由 | 阶段 |
+| 页面 | 前端 API | 约定路由 | 状态 |
 | --- | --- | --- | --- |
-| 总览/大屏 · 节点与耗时 KPI、告警、最近任务 | `statis.fetchOverview` | `GET /statis/overview` | 阶段 1 |
-| 设置 · 系统健康组件 | `statis.fetchHealth` | `GET /statis/health` | 阶段 1 |
-| 知识库 | `knowledge.searchKnowledge` | `POST /knowledge/search` | 阶段 2 |
-| 审计日志 | `audit.searchAuditLogs` | `POST /audit/search` | 阶段 2 |
-| 设置 | `settings.fetchSettings` | `GET /settings` | 阶段 2 |
+| 知识库 | `knowledge.searchKnowledge` | `POST /knowledge/search` | **仍规划中**：平台没有文档/RAG 存储（无 chunks / 向量索引） |
 
-页面中所有使用规划接口的位置都带 "Mock"/阶段标注（卡片 `planned` 徽标或副标题），
-不使用户误以为后端已具备该能力。
+> `GET /statis/overview`、`GET /statis/health`、`GET /settings`、`POST /audit/search` **已实现**
+> （后端 `admin/internal/handler/{insight.go,router.go}`，阶段 5 收尾补齐），本表不再列它们。
+> 知识库**有意不实现**：用经验库（`agent_memory`）冒充文档检索会把"没有"说成"有"；
+> 真实的经验检索走 `/agent/memory/*` 与 MemoryView。
 
-切到真实后端时，这些接口会命中 404。前端对它们打了 `planned: true` 标记
-（`api/{statis,knowledge,audit,settings}.js`）：`api/client.js` 命中 404 时**不弹错误提示**，
-而是抛 `NotImplementedError`，由页面把对应区块渲染成"规划中"占位（列表为空 / KPI 留白）。
+切到真实后端时，**仍规划中**的接口会命中 404。前端对它打了 `planned: true` 标记
+（`api/knowledge.js`）：`api/client.js` 命中 404 时**不弹错误提示**，
+而是抛 `NotImplementedError`，由页面渲染成"规划中"占位（列表为空）。
 早期版本不是这样——它会把 404 当故障逐条弹"请求失败（HTTP 404）"，单页可弹 2~3 条。
-路由补齐后无需改前端即可恢复真实数据。
 
 ### 4.3 阶段 2 Agent 契约接口（冻结契约 `PHASE2-接口契约.md` §1–§5）
 
@@ -335,17 +333,20 @@ Mock 里**可达**的业务错误分支（不是装饰）：`1008`（未知 sess
   令牌存 `localStorage.crony_token`，请求自动带 `Bearer` 头。此前真实模式在无令牌时，
   每个接口都回业务码 1000（未登录），前端**逐条弹窗**——实测单页 4 条；现在：
   无令牌先登录（不发无谓请求）；令牌失效（1000 且 `data.reload`）统一清令牌、去重提示一次并切回登录页。
-- **当前用户 id 取自 JWT**：后端没有 `GET /me`，`loadProfile()` 从令牌载荷的 `ID` 取用户 id
-  （真实管理员往往不是 1 号用户）。早期写死 `id=1` 时，`GET /user/find?id=1` 会回
-  `[find_user] db error`，导致**每个页面加载都弹一次**该错误。
+- **外壳身份取自 JWT，后端刷新静默兜底**：后端没有 `GET /me`，`loadProfile()` 直接用令牌载荷的
+  `ID / UserName / Role` 构造用户身份（**不发请求**），再**静默**回查一次 `GET /user/find` 做刷新
+  （`silent: true`，失败保持令牌身份、不弹错误）。早期写死 `id=1` 去查，而真实管理员往往不是
+  1 号用户，`GET /user/find?id=1` 回 `[find_user] db error`，导致**每个页面加载都弹一次**该错误。
 - **侧边栏状态徽标不再编数字**：阶段 1 写死过 `6 Agent · 12 Job`（Go 侧没有 Agent 实体模型，无从核对）；
   阶段 2 改为 `系统正常 · N Agent 会话`，N 取契约 §1 `POST /agent/session/search` 的 `total`，
   接口不可用时只显示 `系统正常`。
 - **不做聊天框**：阶段 1 右下角是"AI 对话"（`/agent/chat`），但契约里没有这个接口——Agent 的产物是
   **会话 + 轨迹**。阶段 2 换成"Agent 会话速查"（按 run_id/job_id 检索会话 → 跳轨迹），删除了
   `AiChatWidget.vue` 与 `stores/chat.js`，避免用一个不存在的接口撑交互。
-- **服务器页空状态**：`/statis/overview` 未实现时，服务器卡片展示"尚未接入资产台账"的引导态，
-  而不是编造服务器列表。
+- **服务器页空状态**：节点列表为空时展示"尚未接入资产台账"的引导态，而不是编造服务器列表。
+- **KPI 不编造"Agent 在线数"**：`agent_session` 只有终态（completed / failed / canceled），平台没有
+  "Agent 在线"这种状态；因此概览与大屏展示的是**会话计数**（累计 / 今日 / 今日失败），
+  而不是像早期 Mock 那样编一个 `4/6`。
 - **图表不引第三方库**：趋势用内联 SVG（`Sparkline.vue`），大屏条形图用 div 高度实现，
   避免为两张小图引入图表库体积。
 - **成功率的颜色阈值**：`≥95%` 绿、`≥90%` 橙、否则红，卡片与进度条一致。

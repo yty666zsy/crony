@@ -2682,7 +2682,7 @@ export const auditLogs = [
 ]
 
 /* ------------------------------------------------------------------ *
- * 8. 概览与健康（规划中：GET /statis/overview、GET /statis/health）
+ * 8. 概览与健康（真实接口：GET /statis/overview、GET /statis/health）
  * ------------------------------------------------------------------ */
 
 export const overview = {
@@ -2691,8 +2691,10 @@ export const overview = {
     enabled_jobs: 11,
     online_nodes: 5,
     total_nodes: 6,
-    agents_online: 4,
-    agents_total: 6,
+    // Agent 会话（真实计数字段；平台没有"Agent 在线"状态，故不提供 agents_online）。
+    agent_sessions_total: 6,
+    agent_sessions_today: 4,
+    agent_sessions_failed_today: 1,
     runs_today: 184,
     success_rate_today: 96.2,
     failed_today: 5,

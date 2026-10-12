@@ -9,9 +9,9 @@ import { formatNumber, formatDuration } from '@/utils/format'
 /**
  * /big-screen —— 值班大屏（meta.bare = true，不带侧边栏/顶栏）。
  *
- * 数据全部来自**已实现或规划中**的统计接口：
+ * 数据全部来自**真实**统计接口：
  *   POST /statis/week（已实现）、POST /statis/today（已实现）、
- *   GET  /statis/overview（规划中）、GET /statis/health（规划中）、
+ *   GET  /statis/overview（已实现）、GET /statis/health（已实现）、
  *   POST /node/search（已实现）。
  * 没有引入图表库：柱状图用 div 高度实现，保证离线可用、构建体积可控。
  */
@@ -124,11 +124,11 @@ const onlineNodes = computed(() => nodes.value.filter((n) => n.status === 1))
         <p class="mt-1 text-[11px] text-ink-dim">离线 {{ (today?.node_total ?? 0) - (today?.node_online ?? 0) }} 台</p>
       </div>
       <div class="rounded-2xl border border-navy-600 bg-navy-850 p-4">
-        <p class="text-[11px] text-ink-dim">Agent 在线</p>
+        <p class="text-[11px] text-ink-dim">Agent 会话</p>
         <p class="mt-1 text-3xl font-semibold text-violet2">
-          {{ kpi.agents_online }}<span class="text-base text-ink-dim">/{{ kpi.agents_total }}</span>
+          {{ kpi.agent_sessions_today || 0 }}<span class="text-base text-ink-dim">/{{ kpi.agent_sessions_total || 0 }}</span>
         </p>
-        <p class="mt-1 text-[11px] text-ink-dim">阶段 2 运行时未上线</p>
+        <p class="mt-1 text-[11px] text-ink-dim">今日 / 累计 · 今日失败 {{ kpi.agent_sessions_failed_today || 0 }}</p>
       </div>
       <div class="rounded-2xl border border-navy-600 bg-navy-850 p-4">
         <p class="text-[11px] text-ink-dim">平均耗时</p>

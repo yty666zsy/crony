@@ -22,9 +22,9 @@ import { formatDuration, formatRelative, formatTime, formatNumber } from '@/util
  *
  * 数据来源：
  *   - GET /job/run/overview（后端已实现，近 24h 聚合）→ 前两张 KPI 卡（执行次数、成功率）
- *   - GET /statis/overview（规划中，阶段 1）→ 节点/耗时 KPI、告警、最近任务 → 当前走 Mock
+ *   - GET /statis/overview（**已实现**：节点/耗时/Agent 会话 KPI、告警、最近任务）
  *   - POST /agent/session/search（阶段 2 契约 §1）→ 右下 "Recent Agent Sessions" 栏
- *   - GET /knowledge/search（规划中）→ 右侧栏 → 当前走 Mock
+ *   - POST /knowledge/search（仍规划中）→ 右侧栏 → 走 Mock
  *
  * 注意：阶段 1 这里显示的是 6 个编造的 "Agent 实体"（名字/角色/今日运行次数）。
  * Go 侧没有 Agent 实体模型，所以阶段 2 换成**真实存在的会话记录**（consumes token、
@@ -40,8 +40,7 @@ const docs = ref([])
 onMounted(async () => {
   try {
     const [overview, runOv, sessionRes, kbRes] = await Promise.all([
-      // 规划中接口（后端未注册该路由，返回 404）：不弹错、不拖垮整页，
-      // 缺失时由页面上的"规划中 · Mock"占位呈现。
+      // /statis/overview 已实现；Mock 关闭且后端不可达时单独兜底，不拖垮整页。
       fetchOverview().catch(() => null),
       // 该接口后端已实现；Mock 关闭且后端未启动时不应该拖垮整页，因此单独兜底。
       fetchRunOverview().catch(() => null),
@@ -82,7 +81,7 @@ const runsCard = computed(() => {
   return {
     total: k.runs_today,
     hint: `成功 ${(k.runs_today || 0) - (k.failed_today || 0) - (k.timeout_today || 0) - (k.skipped_today || 0)} · 失败 ${k.failed_today} · 跳过 ${k.skipped_today}`,
-    source: '今日 · GET /statis/overview（规划中，Mock）',
+    source: '今日 · GET /statis/overview',
     successRate: k.success_rate_today,
     skipRate: null,
     retryTotal: null,
@@ -147,7 +146,7 @@ function goRunDetail(row) {
           :progress="kpi.total_nodes ? Math.round((kpi.online_nodes / kpi.total_nodes) * 100) : 0"
           :delta="kpi.total_nodes ? `离线 ${kpi.total_nodes - kpi.online_nodes} 台` : ''"
           delta-type="down"
-          :hint="`Agent ${kpi.agents_online}/${kpi.agents_total} 在线`"
+          :hint="`Agent 会话 ${kpi.agent_sessions_total || 0} 个（今日 ${kpi.agent_sessions_today || 0}）`"
         />
         <StatCard
           label="平均执行耗时"
@@ -155,7 +154,7 @@ function goRunDetail(row) {
           icon="Timer"
           color="#3b82f6"
           :trend="trends.avg_duration"
-          hint="全部终态 run 的中位数（Mock）"
+          hint="今日终态 run 的平均耗时"
         />
       </div>
 

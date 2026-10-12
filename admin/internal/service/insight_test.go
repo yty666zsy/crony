@@ -1,6 +1,9 @@
 package service
 
 import (
+	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -54,6 +57,68 @@ func TestRound1(t *testing.T) {
 		if got := round1(c.in); got != c.want {
 			t.Fatalf("round1(%v) = %v，期望 %v", c.in, got, c.want)
 		}
+	}
+}
+
+// 鉴权快照必须暴露前端读取的字段，且**绝不**包含密钥/口令原文。
+func TestAuthSnapshotExposesExpectedKeysAndNoSecrets(t *testing.T) {
+	const secret = "SUPER-SECRET-JWT-KEY-should-not-leak"
+	const pw = "BOOTSTRAP-PASSWORD-should-not-leak"
+	cfg := &models.Config{}
+	cfg.Auth.JwtSecret = secret
+	cfg.Auth.BootstrapAdminUser = "ops-admin"
+	cfg.Auth.BootstrapAdminPassword = pw
+	cfg.Auth.TokenExpireHours = 168
+
+	snap := authSnapshot(cfg)
+	// 前端 SettingsView 读取的字段名必须齐备（否则页面显示空白）。
+	for _, key := range []string{"jwt_issuer", "jwt_ttl_hours", "jwt_secret_source",
+		"password_min_length", "force_password_change", "rbac", "bootstrap_admin"} {
+		if _, ok := snap[key]; !ok {
+			t.Fatalf("鉴权快照缺字段 %q（会导致页面空白）: %+v", key, snap)
+		}
+	}
+	if snap["jwt_issuer"] != models.JwtIssuer {
+		t.Fatalf("jwt_issuer 应为真实签发方 %q，实际 %v", models.JwtIssuer, snap["jwt_issuer"])
+	}
+	if got := fmt.Sprintf("%v", snap["jwt_ttl_hours"]); got != "168" {
+		t.Fatalf("jwt_ttl_hours 应为配置值 168，实际 %v", snap["jwt_ttl_hours"])
+	}
+	if s, _ := snap["jwt_secret_source"].(string); !strings.HasPrefix(s, "已配置") {
+		t.Fatalf("已配置密钥时应说明来源，实际 %q", s)
+	}
+	if b, _ := snap["bootstrap_admin"].(string); !strings.Contains(b, "ops-admin") {
+		t.Fatalf("已配置初始管理员时应点名用户，实际 %q", b)
+	}
+
+	// 序列化后不得出现任何密钥/口令原文。
+	blob, _ := json.Marshal(snap)
+	if strings.Contains(string(blob), secret) || strings.Contains(string(blob), pw) {
+		t.Fatalf("鉴权快照泄露了密钥/口令原文: %s", blob)
+	}
+}
+
+// 未配置密钥/初始管理员时，必须如实说明"未配置"，不能假装已配置。
+func TestAuthSnapshotHonestWhenUnset(t *testing.T) {
+	snap := authSnapshot(&models.Config{})
+	if s, _ := snap["jwt_secret_source"].(string); !strings.HasPrefix(s, "未配置") {
+		t.Fatalf("未配置密钥时应如实说明，实际 %q", s)
+	}
+	if b, _ := snap["bootstrap_admin"].(string); !strings.HasPrefix(b, "未配置") {
+		t.Fatalf("未配置初始管理员时应如实说明，实际 %q", b)
+	}
+}
+
+func TestSchedulerSnapshotKeys(t *testing.T) {
+	snap := schedulerSnapshot(&models.Config{})
+	for _, key := range []string{"default_concurrency_policy", "default_retry_times",
+		"default_retry_interval", "max_retry_times", "default_timeout_seconds", "default_allocation"} {
+		if _, ok := snap[key]; !ok {
+			t.Fatalf("调度快照缺字段 %q（会导致页面空白）: %+v", key, snap)
+		}
+	}
+	if snap["max_retry_times"] != models.MaxRetryTimes {
+		t.Fatalf("max_retry_times 应为 %d，实际 %v", models.MaxRetryTimes, snap["max_retry_times"])
 	}
 }
 
