@@ -142,6 +142,36 @@ func (c *client) getOK(path string) (map[string]any, error) {
 	return env.dataMap(), nil
 }
 
+// llmUnavailable 判断一个业务错误是否属于"模型侧未配置/不可用"。
+//
+// 依据本目录 README §3 的三态口径：AC-07/AC-10 的前置条件是**模型凭据**；
+// 凭据缺失时黑盒侧什么都没观测到，必须 SKIP 并写明原因，而不是当成系统缺陷（FAIL）。
+// 真实踩到过：admin 没注入 CRONY_LLM_API_KEY 时，接口回 code=1000、
+// msg 形如 `[agent/diagnosis/run] llm: provider not configured: HTTP 401（鉴权失败…）
+// You didn't provide an API key`。这里只认这几个明确的"没配凭据"信号，
+// 其它 LLM 错误（超时、限流、返回体解析失败）仍然按 FAIL 处理——它们是真缺陷。
+func llmUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	m := strings.ToLower(err.Error())
+	if !strings.Contains(m, "llm") && !strings.Contains(m, "provider") {
+		return false
+	}
+	for _, needle := range []string{
+		"provider not configured",
+		"not configured",
+		"api key",
+		"鉴权失败",
+		"unauthorized",
+	} {
+		if strings.Contains(m, needle) {
+			return true
+		}
+	}
+	return false
+}
+
 // getRaw 发一次不带鉴权的 GET，返回状态码与原始响应体文本。
 // 用于探测静态资源（静态资源的响应不是 {code,data,msg} 信封）。
 func (c *client) getRaw(path string) (int, string, error) {

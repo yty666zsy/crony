@@ -263,6 +263,11 @@ func TestAcceptanceSuite(t *testing.T) {
 			"run_id": runID, "force": true, "goal": "排查失败原因，并确认端口监听状态",
 		})
 		if err != nil {
+			if llmUnavailable(err) {
+				cc.skip("admin 未配置可用的模型凭据（CRONY_LLM_API_KEY）：AC-07 要验的是真实模型调用，" +
+					"凭据缺失时黑盒侧观测不到任何模型行为。注入凭据后可直接复跑；" +
+					"若只想验证链路本身，可用 offline provider（但报告必须写明 provider=offline，且设 CRONY_ACC_EXPECT_REAL=1 时会判 FAIL）")
+			}
 			cc.t.Fatal(err)
 		}
 		lastSession = asStr(data["session_id"])
@@ -378,6 +383,10 @@ func TestAcceptanceSuite(t *testing.T) {
 			"text": "每天凌晨 3 点打印一行 hello 到日志", "node_uuid": nodeUUID, "timezone": "Asia/Shanghai",
 		})
 		if err != nil {
+			if llmUnavailable(err) {
+				cc.skip("admin 未配置可用的模型凭据（CRONY_LLM_API_KEY）：NL 起草需要真模型产出草案，" +
+					"凭据缺失时观测不到起草行为（AC-11 会随之 SKIP）")
+			}
 			cc.t.Fatal(err)
 		}
 		draft := asMap(data["draft"])
