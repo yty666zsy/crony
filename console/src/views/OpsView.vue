@@ -186,7 +186,8 @@ async function loadAll() {
 }
 
 async function doAllocate() {
-  alloc.value = await explainAllocation(allocJobId.value)
+  const res = await explainAllocation(allocJobId.value)
+  alloc.value = res.decision || {}
 }
 
 async function doEvaluateSlo() {
@@ -209,7 +210,7 @@ async function doChaosDemo() {
     { fault: { kind: 'latency', target: 'db', severity: 1 }, detected: true, handled: true, correct: true, detection_ms: 120 },
     { fault: { kind: 'disk_full', target: 'node', severity: 2 }, detected: true, handled: true, correct: false, detection_ms: 400 },
   ]
-  chaosScore.value = await gradeChaos(attempts)
+  chaosScore.value = (await gradeChaos(attempts)).score || null
 }
 
 async function doShadowDemo(same) {
