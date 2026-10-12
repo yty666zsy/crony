@@ -1,11 +1,31 @@
-/** 时间与数值格式化工具（后端时间统一为 Unix 秒；部分规划接口返回 ISO 字符串）。 */
+/**
+ * 时间与数值格式化工具。
+ *
+ * 时间口径（真机走查时踩过坑）：
+ *   - 普通时间字段是 **Unix 秒**（如 `created`）；
+ *   - ISO 字符串原样解析；
+ *   - `*_ms` 字段是**毫秒**（如 `created_ms`）。
+ * 早期实现对数字一律 `* 1000`，于是毫秒字段被当成秒再乘 1000 → 年份溢出到 58748，
+ * 相对时间也永远显示"刚刚"。统一交给 `toMillis` 按量级归一，避免各调用点各写一遍。
+ */
 
 const pad = (n) => String(n).padStart(2, '0')
 
-/** Unix 秒 / ISO 字符串 → 'YYYY-MM-DD HH:mm:ss' */
+/** 秒级时间戳约 1e9、毫秒级约 1e12：以 1e11 为界区分（1e11 秒 = 公元 5138 年，不会出现）。 */
+const MS_THRESHOLD = 1e11
+
+/** 把 Unix 秒 / 毫秒 / ISO 字符串统一归一成毫秒；无法解析返回 NaN。 */
+export function toMillis(value) {
+  if (value === null || value === undefined || value === '') return NaN
+  if (typeof value === 'string') return Date.parse(value)
+  const n = Number(value)
+  if (!Number.isFinite(n) || n <= 0) return NaN
+  return n >= MS_THRESHOLD ? n : n * 1000
+}
+
+/** Unix 秒 / 毫秒 / ISO 字符串 → 'YYYY-MM-DD HH:mm:ss' */
 export function formatTime(value) {
-  if (!value) return '—'
-  const ms = typeof value === 'string' ? Date.parse(value) : Number(value) * 1000
+  const ms = toMillis(value)
   if (!Number.isFinite(ms) || ms <= 0) return '—'
   const d = new Date(ms)
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(
@@ -21,8 +41,7 @@ export function formatTimeShort(value) {
 
 /** 相对时间：'12 秒前' / '3 分钟前' / '2 小时前' / '5 天前' */
 export function formatRelative(value) {
-  if (!value) return '—'
-  const ms = typeof value === 'string' ? Date.parse(value) : Number(value) * 1000
+  const ms = toMillis(value)
   if (!Number.isFinite(ms) || ms <= 0) return '—'
   const diff = Date.now() - ms
   if (diff < 0) return '刚刚'

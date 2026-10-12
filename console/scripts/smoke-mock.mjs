@@ -495,6 +495,31 @@ check('阶段 4-D/5 Mock：ops api 层只读/计算，无"直接改生产"的入
   assert.ok(exported.includes('effectiveAutonomy'), '应导出自治级别解释接口')
 })
 
+/* ===================== 工具函数：时间口径（秒 / 毫秒 / ISO 三者都要对） ===================== */
+
+check('utils/format：时间格式化兼容 Unix 秒 / 毫秒 / ISO（毫秒字段不得再乘 1000）', async () => {
+  const fmt = await server.ssrLoadModule('/src/utils/format.js')
+  const sec = 1791744690 // 2026-10-11T18:51:30Z
+  const ms = sec * 1000
+  const iso = '2026-10-11T18:51:30Z'
+  const a = fmt.formatTime(sec)
+  const b = fmt.formatTime(ms)
+  const c = fmt.formatTime(iso)
+  // 三者必须一致：早期实现对数字一律 *1000,毫秒字段会溢出到 58748 年。
+  assert.equal(b, a, `毫秒级应与秒级一致（真机曾显示 58748 年）: 秒=${a} 毫秒=${b}`)
+  assert.equal(c, a, `ISO 应与秒级一致: ISO=${c}`)
+  assert.ok(a.startsWith('2026-'), `年份应落在 2026: ${a}`)
+  assert.equal(fmt.toMillis(ms), ms, '毫秒输入不应再乘 1000')
+  assert.equal(fmt.toMillis(sec), ms, '秒输入应乘 1000')
+  assert.equal(fmt.toMillis(iso), ms, 'ISO 应解析为同一时刻')
+  // 相对时间：毫秒被当成秒会变成"未来" → 一律显示"刚刚"（正是真机走查到的错误表现）。
+  const rel = fmt.formatRelative(ms)
+  assert.ok(!rel.includes('刚刚'), `毫秒字段的相对时间不应是"刚刚": ${rel}`)
+  assert.equal(fmt.formatTime(null), '—')
+  assert.equal(fmt.formatTime(0), '—')
+  assert.equal(fmt.formatTime('not-a-date'), '—')
+})
+
 let failed = 0
 for (const { name, fn } of checks) {
   try {
