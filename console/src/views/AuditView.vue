@@ -57,6 +57,10 @@ async function load() {
     })
     rows.value = res?.list || []
     total.value = res?.total || 0
+  } catch {
+    // 规划中接口（后端未实现）：展示空结果，不弹错。
+    rows.value = []
+    total.value = 0
   } finally {
     loading.value = false
   }

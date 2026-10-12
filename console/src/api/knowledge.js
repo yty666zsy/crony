@@ -12,5 +12,5 @@ import * as mock from './mock'
 /** 【规划中·阶段 2】POST /knowledge/search */
 export function searchKnowledge(params = {}) {
   if (USE_MOCK) return mockResponse(mock.knowledgeSearch(params))
-  return request.post('/knowledge/search', params)
+  return request.post('/knowledge/search', params, { planned: true })
 }

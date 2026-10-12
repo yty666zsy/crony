@@ -14,5 +14,5 @@ import * as mock from './mock'
 /** 【规划中·阶段 1-3】POST /audit/search */
 export function searchAuditLogs(params = {}) {
   if (USE_MOCK) return mockResponse(mock.auditSearch(params))
-  return request.post('/audit/search', params)
+  return request.post('/audit/search', params, { planned: true })
 }

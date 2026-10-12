@@ -21,5 +21,5 @@ import * as mock from './mock'
 /** 【规划中·阶段 1】GET /settings */
 export function fetchSettings() {
   if (USE_MOCK) return mockResponse(mock.settingsQuery())
-  return request.get('/settings')
+  return request.get('/settings', { planned: true })
 }

@@ -7,6 +7,8 @@ import { useAuthStore } from '@/stores/auth'
 import AppSidebar from './AppSidebar.vue'
 import AppTopbar from './AppTopbar.vue'
 import AiSessionWidget from './AgentSessionWidget.vue'
+import LoginView from '@/views/LoginView.vue'
+import { USE_MOCK } from '@/api/client'
 
 /**
  * 控制台主布局。
@@ -25,6 +27,10 @@ const { collapsed } = storeToRefs(app)
 const bare = computed(() => Boolean(route.meta?.bare))
 const useMock = String(import.meta.env.VITE_USE_MOCK ?? 'true')
 const apiBase = import.meta.env.VITE_API_BASE || 'http://127.0.0.1:8089'
+
+/** 真实模式且没有令牌 → 先登录，避免每个接口各弹一次"未登录"（Mock 模式永不进入登录页）。 */
+const needLogin = computed(() => !USE_MOCK && !auth.token)
+
 const mainStyle = computed(() => ({
   marginLeft: collapsed.value ? 'var(--sidebar-w-collapsed)' : 'var(--sidebar-w)',
 }))
@@ -33,21 +39,29 @@ function onResize() {
   app.syncViewport()
 }
 
+/** 令牌失效（业务码 1000）：清会话 → needLogin 变真 → 回到登录页。 */
+function onUnauthorized() {
+  auth.logout()
+}
+
 onMounted(() => {
   app.syncViewport()
   app.initTheme()
   window.addEventListener('resize', onResize, { passive: true })
-  // 阶段 1 默认 Mock 用户；loadProfile 在禁用 Mock 时会走真实 GET /user/find
-  auth.loadProfile()
+  window.addEventListener('crony:unauthorized', onUnauthorized)
+  // 有令牌（或 Mock 模式）才回查用户；无令牌时交给登录页，不发无谓请求。
+  if (USE_MOCK || auth.token) auth.loadProfile()
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', onResize)
+  window.removeEventListener('crony:unauthorized', onUnauthorized)
 })
 </script>
 
 <template>
-  <div class="min-h-screen bg-navy-900">
+  <LoginView v-if="needLogin" />
+  <div v-else class="min-h-screen bg-navy-900">
     <template v-if="!bare">
       <AppSidebar />
 

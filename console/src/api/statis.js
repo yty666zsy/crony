@@ -34,11 +34,11 @@ export function fetchSystemInfo() {
 /** 【规划中】GET /statis/overview */
 export function fetchOverview() {
   if (USE_MOCK) return mockResponse(mock.statisOverview())
-  return request.get('/statis/overview')
+  return request.get('/statis/overview', { planned: true })
 }
 
 /** 【规划中】GET /statis/health */
 export function fetchHealth() {
   if (USE_MOCK) return mockResponse(mock.statisHealth())
-  return request.get('/statis/health')
+  return request.get('/statis/health', { planned: true })
 }

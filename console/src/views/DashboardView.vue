@@ -40,11 +40,13 @@ const docs = ref([])
 onMounted(async () => {
   try {
     const [overview, runOv, sessionRes, kbRes] = await Promise.all([
-      fetchOverview(),
+      // 规划中接口（后端未注册该路由，返回 404）：不弹错、不拖垮整页，
+      // 缺失时由页面上的"规划中 · Mock"占位呈现。
+      fetchOverview().catch(() => null),
       // 该接口后端已实现；Mock 关闭且后端未启动时不应该拖垮整页，因此单独兜底。
       fetchRunOverview().catch(() => null),
-      searchAgentSessions({ page: 1, page_size: 5 }),
-      searchKnowledge({ page: 1, page_size: 4 }),
+      searchAgentSessions({ page: 1, page_size: 5 }).catch(() => ({ list: [] })),
+      searchKnowledge({ page: 1, page_size: 4 }).catch(() => ({ list: [] })),
     ])
     data.value = overview
     runOverview.value = runOv

@@ -52,7 +52,11 @@ const pwRules = {
 async function load() {
   loading.value = true
   try {
-    const [s, h] = await Promise.all([fetchSettings(), fetchHealth()])
+    const [s, h] = await Promise.all([
+      // 规划中接口（后端未实现）：缺失时对应区块显示占位，不弹错。
+      fetchSettings().catch(() => null),
+      fetchHealth().catch(() => null),
+    ])
     snapshot.value = s
     health.value = h
   } finally {

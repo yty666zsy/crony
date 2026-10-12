@@ -27,11 +27,12 @@ let timer = null
 
 onMounted(async () => {
   const [w, t, o, h, n] = await Promise.all([
-    fetchWeekStatistics(),
-    fetchTodayStatistics(),
-    fetchOverview(),
-    fetchHealth(),
-    searchNodes({ page: 1, page_size: 20 }),
+    fetchWeekStatistics().catch(() => null),
+    fetchTodayStatistics().catch(() => null),
+    // 规划中接口（后端未实现）：缺失时大屏对应区块显示占位，不弹错。
+    fetchOverview().catch(() => null),
+    fetchHealth().catch(() => null),
+    searchNodes({ page: 1, page_size: 20 }).catch(() => ({ list: [] })),
   ])
   week.value = w
   today.value = t

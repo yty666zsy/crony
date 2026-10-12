@@ -48,14 +48,60 @@ export class BizError extends Error {
 }
 
 /**
+ * 规划中（后端尚未实现）接口的错误对象。
+ *
+ * 前端对"后端约定但还没落地"的接口（README §4.2）会在请求上打 `planned: true`，
+ * 命中 404 时**不弹错误提示**，而是抛这个类型让页面渲染「规划中」占位——
+ * 把"还没做"和"坏了"区分开。
+ */
+export class NotImplementedError extends Error {
+  constructor(url) {
+    super(`接口未实现（规划中）：${url}`)
+    this.name = 'NotImplementedError'
+    this.planned = true
+  }
+}
+
+/**
+ * 未登录 / 令牌失效（业务码 1000，后端同时给 `data.reload = true`）。
+ *
+ * 这类错误会在**每个并发请求上各出现一次**，直接弹窗会刷屏；因此：
+ *   - 清掉本地失效令牌；
+ *   - 去重提示（15s 内只提示一次）；
+ *   - 广播 `crony:unauthorized` 事件，由应用外壳切到登录页（Mock 模式无此路径）。
+ */
+let unauthorizedAt = 0
+
+function handleUnauthorized(msg) {
+  setToken('')
+  const now = Date.now()
+  if (now - unauthorizedAt > 15000) {
+    unauthorizedAt = now
+    ElMessage.warning(msg || '未登录或登录已过期，请重新登录')
+  }
+  try {
+    window.dispatchEvent(new CustomEvent('crony:unauthorized'))
+  } catch {
+    /* Node（SSR 冒烟）里没有 window，忽略 */
+  }
+}
+
+/**
  * 拆信封 + 统一业务错误提示。
  * 真实请求与 Mock 请求共用同一条路径，保证两种模式的调用方行为一致。
+ *
+ * `real=true` 表示来自真实后端（axios）；此时业务码 1000 按"未登录/令牌失效"处理
+ * （去重提示 + 广播登录事件），而不是像 Mock 那样当成普通业务错误逐条弹窗。
  */
-export function unwrap(body) {
+export function unwrap(body, { real = false } = {}) {
   if (body && typeof body === 'object' && !Array.isArray(body) && 'code' in body) {
     if (body.code !== 200) {
       const msg = body.msg || `业务错误（code=${body.code}）`
-      ElMessage.error(msg)
+      if (real && Number(body.code) === 1000 && body?.data?.reload) {
+        handleUnauthorized(msg)
+      } else {
+        ElMessage.error(msg)
+      }
       return Promise.reject(new BizError(msg, body.code))
     }
     return body.data
@@ -85,11 +131,18 @@ request.interceptors.request.use(
 )
 
 request.interceptors.response.use(
-  (response) => unwrap(response.data),
+  (response) => unwrap(response.data, { real: true }),
   (error) => {
+    const status = error?.response?.status
+
+    // 规划中接口：后端没有注册这条路由（404）。这不是故障，页面会渲染「规划中」占位，
+    // 因此不弹错误提示，只把类型化的错误抛给调用方。
+    if (error?.config?.planned && status === 404) {
+      return Promise.reject(new NotImplementedError(error.config.url))
+    }
+
     // HTTP 层错误（网络不通 / 超时 / 5xx）。
     // 只提示一次，避免多个并发请求同时弹窗刷屏。
-    const status = error?.response?.status
     const detail =
       error?.response?.data?.msg ||
       error?.response?.data?.message ||

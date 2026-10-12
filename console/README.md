@@ -221,8 +221,13 @@ success_rate, skip_rate, by_status, since }`，其中
 | 设置 | `settings.fetchSettings` | `GET /settings` | 阶段 2 |
 
 页面中所有使用规划接口的位置都带 "Mock"/阶段标注（卡片 `planned` 徽标或副标题），
-不使用户误以为后端已具备该能力。切到真实后端时，未被实现的接口会返回 404/业务错误，
-解包层会弹错误提示——这是预期行为，路由补齐后即恢复正常。
+不使用户误以为后端已具备该能力。
+
+切到真实后端时，这些接口会命中 404。前端对它们打了 `planned: true` 标记
+（`api/{statis,knowledge,audit,settings}.js`）：`api/client.js` 命中 404 时**不弹错误提示**，
+而是抛 `NotImplementedError`，由页面把对应区块渲染成"规划中"占位（列表为空 / KPI 留白）。
+早期版本不是这样——它会把 404 当故障逐条弹"请求失败（HTTP 404）"，单页可弹 2~3 条。
+路由补齐后无需改前端即可恢复真实数据。
 
 ### 4.3 阶段 2 Agent 契约接口（冻结契约 `PHASE2-接口契约.md` §1–§5）
 
@@ -325,9 +330,14 @@ Mock 里**可达**的业务错误分支（不是装饰）：`1008`（未知 sess
   智能运维）、`系统`（系统设置）。早期版本沿用过演示站基线里的 `DB Connections` / `SSH Keys` /
   `Remote Desktop` / `Containers` 等**无后端支撑的占位项**，已连同对应路由与 `PlaceholderView.vue`
   一并移除——控制台只承载有真实接口或明确契约的能力。
-- **无独立登录页**：本期 9 个必交付页面不含登录；底部用户栏展示当前用户（Mock 为 `admin`），
-  真实登录链路已在 `client.js` 就绪（`Bearer` 头 + `localStorage` 的 `crony_token`），
-  后续把登录页接到 `/login` 即可。
+- **真实模式的登录页（Mock 模式没有）**：Mock 模式仍免登录，底部用户栏展示 `admin`。
+  真实模式（`VITE_USE_MOCK=false`）新增 `views/LoginView.vue`：`POST /login → JWT → 回查用户`，
+  令牌存 `localStorage.crony_token`，请求自动带 `Bearer` 头。此前真实模式在无令牌时，
+  每个接口都回业务码 1000（未登录），前端**逐条弹窗**——实测单页 4 条；现在：
+  无令牌先登录（不发无谓请求）；令牌失效（1000 且 `data.reload`）统一清令牌、去重提示一次并切回登录页。
+- **当前用户 id 取自 JWT**：后端没有 `GET /me`，`loadProfile()` 从令牌载荷的 `ID` 取用户 id
+  （真实管理员往往不是 1 号用户）。早期写死 `id=1` 时，`GET /user/find?id=1` 会回
+  `[find_user] db error`，导致**每个页面加载都弹一次**该错误。
 - **侧边栏状态徽标不再编数字**：阶段 1 写死过 `6 Agent · 12 Job`（Go 侧没有 Agent 实体模型，无从核对）；
   阶段 2 改为 `系统正常 · N Agent 会话`，N 取契约 §1 `POST /agent/session/search` 的 `total`，
   接口不可用时只显示 `系统正常`。
