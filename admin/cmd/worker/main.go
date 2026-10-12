@@ -15,6 +15,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -63,7 +64,12 @@ func main() {
 	var selfHealClose chan struct{}
 	service.InitSelfHeal(&selfHealClose)
 
-	// SLO 评估循环：只评估与留痕，不触发动作（违约的处置在控制面/后续阶段接线）。
+	// 阶段 5 补全（SLO 违约处置）：装配违约处置服务。
+	// 是否**自动动手**由 `slo.breach-action-enabled` 决定（默认 false：
+	// 周期循环只评估 + 打日志，与接线前完全一致）。
+	service.InitSloBreach()
+
+	// SLO 评估循环：评估所有启用契约；违约时按配置决定是否执行 breach_action。
 	sloClose := runSloLoop(time.Duration(cfg.SelfHeal.IntervalSeconds) * time.Second)
 
 	logger.GetLogger().Info(fmt.Sprintf("[cronyworker] 已启动：env=%s mysql=%s:%s/%s",
@@ -81,7 +87,10 @@ func main() {
 	logger.GetLogger().Info("[cronyworker] 已停止")
 }
 
-// runSloLoop 周期评估所有启用契约，把违约的任务打日志（只评估、不动手）。
+// runSloLoop 周期评估所有启用契约。
+//
+// 违约时：默认（`slo.breach-action-enabled=false`）只打日志，与接线前完全一致；
+// 打开后按契约的 breach_action 执行（通知/诊断），并按冷却退避。
 func runSloLoop(interval time.Duration) chan struct{} {
 	if interval <= 0 {
 		interval = defaultInterval
@@ -97,11 +106,31 @@ func runSloLoop(interval time.Duration) chan struct{} {
 					logger.GetLogger().Error(fmt.Sprintf("[cronyworker] SLO 评估失败: %v", err))
 					continue
 				}
+				breached := 0
 				for _, e := range evals {
 					if e.Report.Breached {
+						breached++
 						logger.GetLogger().Warn(fmt.Sprintf("[cronyworker] SLO 违约：契约 %q（任务 %d %s）原因=%v",
 							e.Policy.Name, e.Policy.JobID, e.JobName, e.Report.Reasons))
 					}
+				}
+				if breached == 0 {
+					continue
+				}
+				svc := service.DefaultSloBreachService()
+				if svc == nil || !svc.AutoEnabled() {
+					continue
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), interval)
+				rep := svc.HandleBreaches(ctx, evals, service.SloBreachOptions{
+					Allowed:    true,
+					ExecutedBy: "auto",
+				})
+				cancel()
+				if rep.Breached > 0 {
+					logger.GetLogger().Info(fmt.Sprintf(
+						"[cronyworker] SLO 违约处置：违约=%d 已动作=%d 仅观测=%d 跳过=%d 失败=%d 错误=%v",
+						rep.Breached, rep.Acted, rep.Observed, rep.Skipped, rep.Failed, rep.Errors))
 				}
 			case <-closed:
 				t.Stop()

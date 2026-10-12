@@ -2,19 +2,28 @@
 import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAppStore } from '@/stores/app'
+import { useAuthStore } from '@/stores/auth'
 import { formatRelative } from '@/utils/format'
 import { ALERT_LEVEL } from '@/utils/dict'
+import { USE_MOCK } from '@/api/client'
 
 /**
- * 顶栏：当前页标题 + 副标题（面包屑风格）+ 右侧 "Visit Website" / 主题切换 / 通知。
+ * 顶栏：当前页标题 + 副标题（面包屑风格）+ 右侧 项目主页 / 主题切换 / 通知 / 账户。
  *
- * 通知面板在阶段 1 用本地 Mock 列表（阶段 2 接 告警中心 的真实接口），
- * 目的是让"通知图标 + 未读徽标"这个信息架构先立起来。
+ * 账户菜单提供**退出登录**（真实模式）：令牌存在浏览器里，没有登出入口等于
+ * "换个人用同一台机器只能清缓存"，是联调与值班的实际痛点。
+ * Mock 模式不显示退出（没有真实会话，退出无意义）。
  */
 const app = useAppStore()
+const auth = useAuthStore()
 const route = useRoute()
+const useMock = USE_MOCK
 
 const siteUrl = import.meta.env.VITE_SITE_URL || 'https://github.com/tmnhs/crony'
+
+function onUserCommand(cmd) {
+  if (cmd === 'logout') auth.logout()
+}
 
 const title = computed(() => route.meta?.title || '控制台')
 const subtitle = computed(() => route.meta?.subtitle || '')
@@ -138,6 +147,28 @@ const unread = computed(() => notifications.value.length)
           </p>
         </div>
       </el-popover>
+
+      <!-- 账户菜单：退出登录（真实模式） -->
+      <el-dropdown trigger="click" @command="onUserCommand">
+        <button
+          class="flex h-8 items-center gap-1.5 rounded-lg border border-navy-600 px-2 text-ink-muted transition-colors hover:border-brand-500 hover:text-ink"
+          title="账户"
+        >
+          <el-icon :size="14"><User /></el-icon>
+          <span class="hide-sm hidden max-w-[8rem] truncate text-xs md:inline">{{ auth.displayName }}</span>
+        </button>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item disabled>
+              {{ auth.displayName }} · {{ auth.isAdmin ? '管理员' : '运维' }}
+            </el-dropdown-item>
+            <el-dropdown-item v-if="!useMock" divided command="logout">
+              <el-icon :size="13"><SwitchButton /></el-icon>
+              退出登录
+            </el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
     </div>
   </header>
 </template>

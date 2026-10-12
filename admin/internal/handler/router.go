@@ -16,6 +16,24 @@ func RegisterRouters(r *gin.Engine) {
 	configRoute(r)
 
 	configNoRoute(r)
+
+	configConsole(r)
+}
+
+// configConsole 挂载 AI Agent 控制台（Vue3 打包产物 ./console/dist，阶段 5 补全）。
+//
+// 为什么挂在 /console 而不是根路径：根路径保留给旧版前端（./dist），两者可并存、互不影响。
+// 控制台用 hash 路由（#/dashboard），因此服务端只要能返回静态文件与 index.html 即可，
+// 不需要为每个前端路由配 SPA rewrite；vite 的 base 是相对路径 './'，
+// 同一份 dist 在 /console/ 与独立静态服务器（根路径）下都能正确加载资源。
+func configConsole(r *gin.Engine) {
+	if _, err := os.Stat("./console/dist/index.html"); err != nil {
+		logger.GetLogger().Warn("未找到 ./console/dist/index.html：AI Agent 控制台未挂载" +
+			"（构建命令：node scripts/run-vite.mjs build，工作目录 console/）。")
+		return
+	}
+	r.Static("/console", "./console/dist")
+	logger.GetLogger().Info("AI Agent 控制台已挂载：/console/（hash 路由 + 相对资源路径）")
 }
 
 // configRoute 注册全部业务路由。
@@ -58,7 +76,17 @@ func configRoute(r *gin.Engine) {
 		stat.GET("today", defaultStatRouter.GetTodayStatistics)
 		stat.GET("week", defaultStatRouter.GetWeekStatistics)
 		stat.GET("system", defaultStatRouter.GetSystemInfo)
+		// 阶段 5 补全：控制台概览 + 依赖健康度（只读，真实来源）。
+		stat.GET("overview", defaultInsightRouter.GetOverview)
+		stat.GET("health", defaultInsightRouter.GetHealth)
 
+	}
+
+	// 阶段 5 补全：只读配置快照（登录即可；响应里永不含密钥/口令）。
+	settingsGroup := r.Group("/settings")
+	settingsGroup.Use(middlerware.JWTAuth())
+	{
+		settingsGroup.GET("", defaultInsightRouter.GetSettings)
 	}
 
 	job := r.Group("/job")
@@ -159,6 +187,7 @@ func configRoute(r *gin.Engine) {
 		opsGroup.POST("/slo/search", defaultOpsRouter.SloSearch)
 		opsGroup.POST("/slo/save", defaultOpsRouter.SloSave)
 		opsGroup.POST("/slo/evaluate", defaultOpsRouter.SloEvaluate)
+		opsGroup.POST("/slo/act", defaultOpsRouter.SloAct)
 		opsGroup.POST("/metrics/overview", defaultOpsRouter.MetricsOverview)
 		opsGroup.POST("/eval/score", defaultOpsRouter.EvalScore)
 		opsGroup.POST("/autonomy/list", defaultOpsRouter.AutonomyList)

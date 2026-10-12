@@ -148,6 +148,12 @@ type (
 		// 它有自己的开关语义（总开关 + 任务级 opt-in + 动作白名单 + 频次闸门），
 		// 和工具网关的自治级别不是一回事。混在一起会让两边都说不清"到底谁在管"。
 		SelfHeal SelfHeal `mapstructure:"self-heal" json:"selfHeal" yaml:"self-heal" ini:"self-heal"`
+		// Slo SLO 契约的违约处置配置（阶段 5 补全）。
+		//
+		// 为什么不塞进 self-heal：两者负责的是不同的事——
+		// self-heal 对"某次执行失败"负责，SLO 对"一段时间内的结果"负责。
+		// 混在一起会让"周期性结果违约"与"单次失败"共用一套闸门，语义混淆。
+		Slo Slo `mapstructure:"slo" json:"slo" yaml:"slo" ini:"slo"`
 	}
 	// SelfHeal 自愈调度配置。所有默认值都是关闭/收紧的一档（见 selfheal.DefaultPolicy）。
 	SelfHeal struct {
@@ -173,6 +179,18 @@ type (
 		ScanLimit int `mapstructure:"scan-limit" json:"scanLimit" yaml:"scan-limit" ini:"scan-limit"`
 		// LookbackSeconds 只扫描该时间窗内结束的失败执行（默认 1800s）。
 		LookbackSeconds int64 `mapstructure:"lookback-seconds" json:"lookbackSeconds" yaml:"lookback-seconds" ini:"lookback-seconds"`
+	}
+	// Slo SLO 违约处置配置（阶段 5 补全）。缺省 = 关闭动作、冷却 30 分钟。
+	//
+	// 默认关闭 = 与接线前完全一致（worker 仍只评估与打日志），零回归。
+	Slo struct {
+		// BreachActionEnabled 周期评估发现违约后是否**执行**契约里的 breach_action。
+		// 默认 false：worker 只评估 + 打日志，不做任何外部动作。
+		BreachActionEnabled bool `mapstructure:"breach-action-enabled" json:"breachActionEnabled" yaml:"breach-action-enabled" ini:"breach-action-enabled"`
+		// CooldownSeconds 同一契约两次动作之间的最小间隔，默认 1800s。
+		// 它同时充当**跨进程退避**：worker 与 admin 都跑时，靠最近一条 slo_breach 的时间去重，
+		// 而不是各自内存里的 map（重启即丢）。
+		CooldownSeconds int64 `mapstructure:"cooldown-seconds" json:"cooldownSeconds" yaml:"cooldown-seconds" ini:"cooldown-seconds"`
 	}
 	// Tools 工具网关策略（阶段 4）。所有字段都有保守默认值；
 	// 缺失/留空 = 用默认值，且默认值一律是"关着"的那一档。

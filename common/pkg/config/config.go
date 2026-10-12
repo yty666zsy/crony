@@ -129,6 +129,12 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("llm.max-tool-calls", 8)
 	v.SetDefault("llm.offline-tool-call", "")
 	v.SetDefault("llm.offline-response", "")
+
+	// SLO 违约处置（阶段 5 补全）。注册默认值有两个作用：
+	//  1) 配置文件里没有 slo 段时，Unmarshal 得到"关闭 + 冷却 30 分钟"的安全缺省；
+	//  2) 让 CRONY_SLO_BREACH_ACTION_ENABLED / CRONY_SLO_COOLDOWN_SECONDS 可注入。
+	v.SetDefault("slo.breach-action-enabled", false)
+	v.SetDefault("slo.cooldown-seconds", 1800)
 }
 
 // printConfigSummary 打印一份脱敏后的配置摘要。

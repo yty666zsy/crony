@@ -130,6 +130,52 @@ func (o *OpsRouter) SloEvaluate(c *gin.Context) {
 	resp.OkWithDetailed(gin.H{"list": list, "total": len(list), "breached": breached}, "ok", c)
 }
 
+// SloAct POST /ops/slo/act 触发一次违约处置（人工）。
+//
+// 与 /ops/slo/evaluate 的区别：evaluate 只回答"达标没有"，act 会**按契约里的
+// breach_action 动手**（通知 / 诊断）。它是人工显式触发，因此不受自动开关
+// `slo.breach-action-enabled` 约束（该开关只决定周期循环要不要自动动手）；
+// 冷却默认生效，`force=true` 可绕过（人工排障时"再看一次"）。
+func (o *OpsRouter) SloAct(c *gin.Context) {
+	tag := "[ops/slo/act]"
+	var req struct {
+		JobID    int  `json:"job_id"`
+		PolicyID int  `json:"policy_id"`
+		Force    bool `json:"force"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil && !isEOF(err) {
+		resp.FailWithMessage(resp.ErrorRequestParameter, tag+" 请求参数错误: "+err.Error(), c)
+		return
+	}
+	svc := service.DefaultSloBreachService()
+	if svc == nil {
+		resp.FailWithMessage(resp.ERROR, tag+" 违约处置服务未装配", c)
+		return
+	}
+	list, err := service.DefaultSloService.EvaluateSlo(req.JobID)
+	if err != nil {
+		resp.FailWithMessage(resp.ERROR, tag+" 评估失败: "+err.Error(), c)
+		return
+	}
+	// policy_id>0 时只处置这一条契约：人工排障通常只针对某个契约，
+	// 无差别地对全部违约契约动手（可能真的发通知）不是人工触发的本意。
+	if req.PolicyID > 0 {
+		filtered := make([]service.SloEvaluation, 0, 1)
+		for _, e := range list {
+			if e.Policy.ID == req.PolicyID {
+				filtered = append(filtered, e)
+			}
+		}
+		list = filtered
+	}
+	rep := svc.HandleBreaches(c.Request.Context(), list, service.SloBreachOptions{
+		Allowed:        true,
+		BypassCooldown: req.Force,
+		ExecutedBy:     "manual",
+	})
+	resp.OkWithDetailed(gin.H{"report": rep}, "ok", c)
+}
+
 // ---------- 指标看板 ----------
 
 // MetricsOverview POST /ops/metrics/overview 运维核心指标汇总。
@@ -219,7 +265,7 @@ func (o *OpsRouter) AutonomyList(c *gin.Context) {
 			// effective_level 与工具网关用的是同一个函数（EnforcementLevel），
 			// 避免"表里看到的等级"与"决定放行时用的等级"变成两套口径。
 			"effective_level": autonomy.EnforcementLevel(credit).Name(),
-			"streak": r.Streak, "total_up": r.TotalUp, "total_down": r.TotalDown,
+			"streak":          r.Streak, "total_up": r.TotalUp, "total_down": r.TotalDown,
 			"frozen": r.Frozen, "frozen_reason": r.FrozenReason, "updated": r.Updated,
 		})
 	}

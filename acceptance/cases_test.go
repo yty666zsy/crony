@@ -5,6 +5,7 @@ package acceptance
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -1891,7 +1892,7 @@ func TestAcceptanceSuite(t *testing.T) {
 			deadline       int64
 		)
 		err := db.QueryRow(`select heal_id, status, reason, policy_json, evidence_json, finished_at, deadline
-			from ` + models.CronyJobHealTableName + ` order by id desc limit 1`).
+			from `+models.CronyJobHealTableName+` order by id desc limit 1`).
 			Scan(&healID, &status, &reason, &policyJSON, &evidenceJSON, &finishedAt, &deadline)
 		if err != nil {
 			cc.skip("库里暂无自愈记录（未触发过失败/未跑过扫描）：%v", err)
@@ -2207,5 +2208,188 @@ func TestAcceptanceSuite(t *testing.T) {
 		if db != nil {
 			_, _ = db.Exec("delete from "+models.CronyAutonomyCreditTableName+" where scope = ?", scope)
 		}
+	})
+
+	// AC-43：SLO 违约动作接线——违约后按契约的 breach_action 动手（**闭合白名单**），
+	// 每次动作留一行事实（原因 + 说明齐备），且在冷却期内不重复动手。
+	// 用全局契约（job_id=0）让断言与环境无关：无论有没有 LLM，"全局契约没有可诊断的具体执行"
+	// 都是确定性事实（本用例只断言结构不变式，不断言特定状态值）。
+	run("AC-43", "SLO 违约处置：动作闭白名单、必留原因与说明、冷却期内不重复动手", func(cc *caseCtx) {
+		tag := strings.TrimSpace(os.Getenv("CRONY_ACC_RUN_TAG"))
+		if tag == "" {
+			tag = "acc"
+		}
+		okName := "acc-slo-act-" + tag
+		badName := "acc-slo-bad-" + tag
+
+		save := func(name, action string) int {
+			saved, err := c.postOK("/ops/slo/save", map[string]any{
+				"name": name, "job_id": 0,
+				"target_success_rate": 1.0, "target_on_time_rate": 0,
+				"window_seconds": 86400, "grace_seconds": 300,
+				"enabled": true, "breach_action": action,
+			})
+			if err != nil {
+				cc.t.Fatalf("保存 SLO 契约 %s 失败: %v", name, err)
+			}
+			pid := int(asNum(asMap(saved["policy"])["id"]))
+			if pid <= 0 {
+				cc.t.Fatalf("保存后应回显契约 id: %+v", saved)
+			}
+			return pid
+		}
+		okPID := save(okName, "diagnose")
+		badPID := save(badName, "rm -rf /")
+		if db != nil {
+			cc.t.Cleanup(func() {
+				for _, pid := range []int{okPID, badPID} {
+					_, _ = db.Exec("delete from "+models.CronySloBreachTableName+" where policy_id = ?", pid)
+					_, _ = db.Exec("delete from "+models.CronySloPolicyTableName+" where id = ?", pid)
+				}
+			})
+		}
+
+		// 第一次：force 绕过冷却 → 两个契约各产出一行处置事实。
+		act, err := c.postOK("/ops/slo/act", map[string]any{"policy_id": okPID, "force": true})
+		if err != nil {
+			cc.t.Fatalf("触发违约处置失败: %v", err)
+		}
+		rep := asMap(act["report"])
+		if _, ok := rep["auto_enabled"]; !ok {
+			cc.t.Fatalf("处置回执必须回报自动开关状态（默认关闭=零回归）: %+v", rep)
+		}
+		rows := asSlice(rep["rows"])
+		if len(rows) == 0 {
+			cc.t.Fatalf("契约 %s 应产出一行处置记录: %+v", okName, rep)
+		}
+		okRow := asMap(rows[0])
+		if asStr(okRow["action"]) != "diagnose" {
+			cc.t.Fatalf("动作应原样保留 diagnose，实际 %q", asStr(okRow["action"]))
+		}
+		if strings.TrimSpace(asStr(okRow["reason"])) == "" {
+			cc.t.Fatalf("违约处置必须记录原因: %+v", okRow)
+		}
+		if strings.TrimSpace(asStr(okRow["detail"])) == "" {
+			cc.t.Fatalf("违约处置必须记录说明（做了什么/为什么没做）: %+v", okRow)
+		}
+		status := asStr(okRow["status"])
+		if status != "observed" && status != "acted" && status != "failed" {
+			cc.t.Fatalf("状态必须是 observed/acted/failed 之一，实际 %q", status)
+		}
+
+		// 非法动作：必须被归一为 none（闭合白名单：看不懂的配置绝不变成别的动作）。
+		bad, err := c.postOK("/ops/slo/act", map[string]any{"policy_id": badPID, "force": true})
+		if err != nil {
+			cc.t.Fatalf("触发非法动作契约失败: %v", err)
+		}
+		badRows := asSlice(asMap(bad["report"])["rows"])
+		if len(badRows) == 0 {
+			cc.t.Fatalf("非法动作契约也应留痕（白名单判定要可见）")
+		}
+		badRow := asMap(badRows[0])
+		if asStr(badRow["action"]) != "none" {
+			cc.t.Fatalf("非法动作必须归一为 none，实际 %q", asStr(badRow["action"]))
+		}
+		if !strings.Contains(asStr(badRow["detail"]), "未知") {
+			cc.t.Fatalf("非法动作应说明按 none 处理: %q", asStr(badRow["detail"]))
+		}
+
+		// 第二次：不带 force → 冷却期内不得重复动手。
+		act2, err := c.postOK("/ops/slo/act", map[string]any{"policy_id": okPID})
+		if err != nil {
+			cc.t.Fatalf("二次触发失败: %v", err)
+		}
+		rep2 := asMap(act2["report"])
+		if asNum(rep2["skipped"]) < 1 {
+			cc.t.Fatalf("冷却期内应跳过重复动作，实际 skipped=%v（report=%+v）", rep2["skipped"], rep2)
+		}
+		cc.note("契约 %q：动作=diagnose 留痕（状态=%s、原因与说明齐备）；非法动作归一为 none；二次触发命中冷却 skipped=%v",
+			okName, status, rep2["skipped"])
+	})
+
+	// AC-44：控制台只读接口补齐——概览/健康度/配置快照都返回真实结构，且**绝不泄露密钥**。
+	run("AC-44", "概览/健康度/配置快照：真实来源、结构完整、不含任何密钥", func(cc *caseCtx) {
+		health, err := c.getOK("/statis/health")
+		if err != nil {
+			cc.t.Fatalf("读取健康度失败: %v", err)
+		}
+		comps := asSlice(health["components"])
+		if len(comps) < 4 {
+			cc.t.Fatalf("健康度必须列出各依赖组件，实际 %d: %+v", len(comps), health)
+		}
+		if s := asStr(health["status"]); s != "ok" && s != "degraded" && s != "down" {
+			cc.t.Fatalf("整体健康度状态非法: %q", s)
+		}
+		if strings.TrimSpace(asStr(health["checked_at"])) == "" {
+			cc.t.Fatalf("健康度必须带检查时间")
+		}
+		names := map[string]bool{}
+		for _, x := range comps {
+			m := asMap(x)
+			names[asStr(m["name"])] = true
+			if strings.TrimSpace(asStr(m["status"])) == "" || strings.TrimSpace(asStr(m["detail"])) == "" {
+				cc.t.Fatalf("组件必须带状态与说明: %+v", m)
+			}
+		}
+		if !names["MySQL"] {
+			cc.t.Fatalf("健康度必须包含组件 MySQL: %v", names)
+		}
+
+		over, err := c.getOK("/statis/overview")
+		if err != nil {
+			cc.t.Fatalf("读取概览失败: %v", err)
+		}
+		kpi := asMap(over["kpi"])
+		for _, key := range []string{"total_jobs", "enabled_jobs", "online_nodes", "total_nodes",
+			"runs_today", "success_rate_today", "failed_today", "pending_approvals", "kb_docs"} {
+			if _, ok := kpi[key]; !ok {
+				cc.t.Fatalf("概览 KPI 缺字段 %q: %+v", key, kpi)
+			}
+		}
+		if _, ok := over["alerts"]; !ok {
+			cc.t.Fatalf("概览必须给出 alerts（可为空数组）: %+v", over)
+		}
+
+		set, err := c.getOK("/settings")
+		if err != nil {
+			cc.t.Fatalf("读取配置快照失败: %v", err)
+		}
+		for _, sec := range []string{"auth", "scheduler", "notify", "agent"} {
+			if _, ok := set[sec]; !ok {
+				cc.t.Fatalf("配置快照缺分节 %q: %+v", sec, set)
+			}
+		}
+		blob, _ := json.Marshal(set)
+		lower := strings.ToLower(string(blob))
+		for _, bad := range []string{"jwtsecret", "api_key", "apikey", "bootstrap_admin_password", `password":`} {
+			if strings.Contains(lower, bad) {
+				cc.t.Fatalf("配置快照疑似泄露敏感字段 %q: %s", bad, truncate(string(blob), 300))
+			}
+		}
+		cc.note("健康度组件 %d 个（含 MySQL）；概览 KPI %d 字段 + alerts；配置快照 4 分节且不含密钥",
+			len(comps), len(kpi))
+	})
+
+	// AC-45：控制台静态资源挂载在 /console/（hash 路由 + 相对资源路径）。
+	// 该部署未放置 ./console/dist 时 SKIP——"没挂载"不等于"挂载失败"。
+	run("AC-45", "控制台挂载：/console/ 返回 index.html 且资源为相对路径", func(cc *caseCtx) {
+		status, body, err := c.getRaw("/console/")
+		if err != nil {
+			cc.t.Fatalf("请求 /console/ 失败: %v", err)
+		}
+		if status == http.StatusNotFound {
+			cc.skip("该部署未挂载控制台（./console/dist 不存在）：HTTP 404")
+		}
+		if status != http.StatusOK {
+			cc.t.Fatalf("/console/ 期望 HTTP 200，实际 %d", status)
+		}
+		lower := strings.ToLower(body)
+		if !strings.Contains(lower, "<html") || !strings.Contains(body, `id="app"`) {
+			cc.t.Fatalf("/console/ 应返回控制台 index.html，实际: %s", truncate(body, 240))
+		}
+		if strings.Contains(body, `src="/assets/`) || strings.Contains(body, `href="/assets/`) {
+			cc.t.Fatalf("控制台资源应为相对路径（可挂任意子路径），实际用了绝对 /assets/: %s", truncate(body, 320))
+		}
+		cc.note("/console/ 返回 index.html（%d 字节），资源为相对路径", len(body))
 	})
 }

@@ -129,6 +129,35 @@ func (c *client) postOK(path string, body any) (map[string]any, error) {
 	return env.dataMap(), nil
 }
 
+// getOK 发一次已鉴权 GET，要求 HTTP 200 且 code=200，返回 data。
+func (c *client) getOK(path string) (map[string]any, error) {
+	status, env, err := c.do(http.MethodGet, path, nil, true)
+	if err != nil {
+		return nil, fmt.Errorf("GET %s 网络错误: %w", path, err)
+	}
+	if status != http.StatusOK || env.Code != 200 {
+		return nil, fmt.Errorf("GET %s 期望 HTTP 200/code 200，实际 HTTP %d/code %d msg=%q",
+			path, status, env.Code, truncate(env.Msg, 200))
+	}
+	return env.dataMap(), nil
+}
+
+// getRaw 发一次不带鉴权的 GET，返回状态码与原始响应体文本。
+// 用于探测静态资源（静态资源的响应不是 {code,data,msg} 信封）。
+func (c *client) getRaw(path string) (int, string, error) {
+	req, err := http.NewRequest(http.MethodGet, c.base+path, nil)
+	if err != nil {
+		return 0, "", err
+	}
+	res, err := c.http.Do(req)
+	if err != nil {
+		return 0, "", err
+	}
+	defer res.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(res.Body, 2<<20))
+	return res.StatusCode, string(raw), nil
+}
+
 // login 用真实口令换 token；口令永远不进报告（失败信息里也不回显）。
 func (c *client) login(user, pass string) error {
 	status, env, err := c.do(http.MethodPost, "/login", map[string]any{"username": user, "password": pass}, false)

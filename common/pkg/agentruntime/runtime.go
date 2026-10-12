@@ -243,6 +243,19 @@ func (r *Runtime) SetAutonomyResolver(fn tools.AutonomyResolver) {
 	r.registry.SetAutonomyResolver(fn)
 }
 
+// SetAutonomyOutcomeRecorder 装配"写动作结果回写"回调（阶段 5 补全）。
+//
+// 与 SetAutonomyResolver 成对使用：解析器决定"信用参与放行"，回写回调让信用**自己会动**
+// （执行成功累积连续成功、失败立即降级冻结）。只调用解析器而不装配回写，信用就永远停在
+// 初始值——"自动升降级"会变成一个需要人工喂数据的摆设。
+// 传 nil 或不调用 = 不回写（默认，零回归）。
+func (r *Runtime) SetAutonomyOutcomeRecorder(fn func(tool string, success bool)) {
+	if r == nil || r.registry == nil {
+		return
+	}
+	r.registry.SetAutonomyOutcomeRecorder(fn)
+}
+
 // EffectiveAutonomyForTool 报告某工具**当下**实际生效的自治级别（控制台/接口解释用）。
 // 与网关用的是同一条计算路径（policy.EffectiveAutonomy），因此"看到的"等于"生效的"。
 func (r *Runtime) EffectiveAutonomyForTool(tool string) tools.AutonomyLevel {

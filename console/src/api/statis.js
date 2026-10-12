@@ -31,14 +31,14 @@ export function fetchSystemInfo() {
   return request.get('/statis/system')
 }
 
-/** 【规划中】GET /statis/overview */
+/** GET /statis/overview 控制台概览（真实：KPI + 由健康度/SLO 推导的告警） */
 export function fetchOverview() {
   if (USE_MOCK) return mockResponse(mock.statisOverview())
-  return request.get('/statis/overview', { planned: true })
+  return request.get('/statis/overview')
 }
 
-/** 【规划中】GET /statis/health */
+/** GET /statis/health 依赖健康度（真实） */
 export function fetchHealth() {
   if (USE_MOCK) return mockResponse(mock.statisHealth())
-  return request.get('/statis/health', { planned: true })
+  return request.get('/statis/health')
 }

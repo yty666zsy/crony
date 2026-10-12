@@ -7,6 +7,7 @@ import (
 
 	"github.com/tmnhs/crony/common/pkg/agentconfig"
 	"github.com/tmnhs/crony/common/pkg/agentruntime"
+	"github.com/tmnhs/crony/common/pkg/autonomy"
 	"github.com/tmnhs/crony/common/pkg/config"
 	"github.com/tmnhs/crony/common/pkg/logger"
 	"github.com/tmnhs/crony/common/pkg/probechannel"
@@ -123,6 +124,21 @@ func InitAgentRuntime() (*agentruntime.Runtime, error) {
 	if cfg.Tools.AutonomyCredit {
 		resolver := AutonomyResolverFor(cfg.Tools.AutonomyEnv)
 		rt.SetAutonomyResolver(resolver)
+		// 阶段 5 补全：把**结果回写**也接上，让信用自己会动（而不是等人喂数据）。
+		//
+		// 只在真正执行过的写动作后回写：成功累积、失败降级冻结（判定在信用内核里）。
+		// 与解析器共用同一个环境段（ConfiguredAutonomyEnv），避免"放行按 acc、回写按 prod"两套口径。
+		rt.SetAutonomyOutcomeRecorder(func(tool string, success bool) {
+			scope := AutonomyScope(tool, ConfiguredAutonomyEnv())
+			row, err := DefaultAutonomyService.ObserveAutonomy(scope, success)
+			if err != nil {
+				logger.GetLogger().Warn(fmt.Sprintf("[agent] 自治信用回写失败 scope=%s success=%v: %v", scope, success, err))
+				return
+			}
+			logger.GetLogger().Info(fmt.Sprintf(
+				"[agent] 自治信用回写 scope=%s success=%v -> 等级=%s 连成=%d 冻结=%v",
+				scope, success, autonomy.Level(row.Level).Name(), row.Streak, row.Frozen))
+		})
 		logger.GetLogger().Info(fmt.Sprintf(
 			"[agent] 自治信用已接入放行判定：环境段=%q（scope 形如 <工具>@%s）；配置上限=%s 只可收紧不可越权；无历史沿用配置",
 			strings.TrimSpace(cfg.Tools.AutonomyEnv), ConfiguredAutonomyEnv(), toolsPolicy.Autonomy))

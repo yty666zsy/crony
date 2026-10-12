@@ -62,6 +62,9 @@ func RegisterTables(db *gorm.DB) error {
 		models.SloPolicy{},
 		// 阶段 5（灰度与自治升降级）：动作×环境的自治信用表。
 		models.AutonomyCredit{},
+		// 阶段 5 补全（SLO 违约处置）：一次违约处置一行事实记录。
+		// policy_id 索引（冷却退避按它查最近一行）= 跨进程去重的锚点。
+		models.SloBreach{},
 	)
 	if err != nil {
 		return errors.Wrap(err, "register table failed")

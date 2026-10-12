@@ -56,6 +56,9 @@ func main() {
 	// 这样"打开自愈到底会发生什么"可以先用真实数据预演，而不是靠承诺。
 	var selfHealClose chan struct{}
 	service.InitSelfHeal(&selfHealClose)
+	// 阶段 5 补全（SLO 违约处置）：装配服务（周期评估在 worker；admin 侧提供
+	// `/ops/slo/act` 人工触发）。默认关闭动作 = 与接线前一致，零回归。
+	service.InitSloBreach()
 	err = srv.ListenAndServe()
 	if err != nil {
 		logger.GetLogger().Error(fmt.Sprintf("startup api server error:%v", err.Error()))

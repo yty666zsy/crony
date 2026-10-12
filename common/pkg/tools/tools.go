@@ -408,7 +408,10 @@ type Registry struct {
 	approver Approver
 	// autonomy 阶段 5：自治信用解析器（nil = 未启用，按配置级别判定，零回归）。
 	autonomy AutonomyResolver
-	sessions map[string]*sessionState
+	// autonomyOutcome 阶段 5 补全：写动作**真正执行后**的结果回写回调（nil = 不回写，零回归）。
+	// 只回写"执行过"的写动作成功/失败，不记"被策略拒绝 / 转人工审批 / 只读工具"。
+	autonomyOutcome func(tool string, success bool)
+	sessions        map[string]*sessionState
 	// sem 进程级并发信号量（容量 = policy.MaxConcurrentCalls）。
 	sem chan struct{}
 	// rate 进程级速率滑窗。
@@ -605,6 +608,42 @@ func (r *Registry) SetAutonomyResolver(fn AutonomyResolver) {
 		return
 	}
 	r.autonomy = fn
+}
+
+// SetAutonomyOutcomeRecorder 后置装配"写动作结果回写"回调（阶段 5 补全）。
+//
+// 语义与 SetAutonomyResolver 一致的克制：**只允许装配一次**。回写目标（哪个环境段的
+// 信用）在进程生命周期内应当唯一；允许热换会让"这次为什么升了级"变成查不出来的谜。
+// 传 nil 表示不回写（默认 = 与接线前一致，零回归）。
+func (r *Registry) SetAutonomyOutcomeRecorder(fn func(tool string, success bool)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.autonomyOutcome != nil && fn != nil {
+		return
+	}
+	r.autonomyOutcome = fn
+}
+
+// recordAutonomyOutcome 把一次**真正执行过的写动作**的结果回写自治信用。
+//
+// 只回写两类事实，其余一律不记（避免污染信用）：
+//   - 写动作执行成功（OK=true）→ 一次成功：连续成功到门槛即可升级（在信用内核里判定）；
+//   - 写动作执行失败/超时（OK=false）→ 一次不良后果：立即降级并冻结，回落到人工审批。
+//
+// 为什么"没有执行"的路径（策略拒绝 / 转人工审批 / 只读工具）不记：
+// 它们不是"动作结果"。记了等于凭空给信用加减分——被拒绝一次本就该是中性事实，
+// 而只读工具的调用量会稀释"写动作连续成功"的语义，把升级门槛变成噪声。
+func (r *Registry) recordAutonomyOutcome(risk RiskLevel, tool string, ok bool) {
+	if !risk.IsWrite() {
+		return
+	}
+	r.mu.RLock()
+	fn := r.autonomyOutcome
+	r.mu.RUnlock()
+	if fn == nil {
+		return
+	}
+	fn(tool, ok)
 }
 
 // EffectiveAutonomyForTool 报告某工具**当下**实际生效的自治级别（配置上限 ∩ 信用）。
@@ -851,6 +890,8 @@ func (r *Registry) call(ctx context.Context, sessionID, name string, args map[st
 		rec.Err = res.Err
 		rec.DurationMS = res.DurationMS
 		r.observe(rec)
+		// 阶段 5 补全：执行失败/超时是一次"不良后果"，回写信用（降级并冻结）。
+		r.recordAutonomyOutcome(risk, name, false)
 		return res, nil
 	}
 
@@ -879,6 +920,8 @@ func (r *Registry) call(ctx context.Context, sessionID, name string, args map[st
 	rec.OutputBytes = len(res.Output)
 	rec.Evidence = len(res.Evidence)
 	r.observe(rec)
+	// 阶段 5 补全：执行成功是一次成功证据，回写信用（连续成功可升级）。
+	r.recordAutonomyOutcome(risk, name, res.OK)
 	return res, nil
 }
 
