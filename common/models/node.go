@@ -61,6 +61,40 @@ func (n *Node) Insert() (insertId int, err error) {
 	return
 }
 
+// Upsert 按 uuid 就地登记：已有该 uuid 的行则**更新**，没有才插入。
+//
+// 为什么不能只 Insert（20 节点舰队重启实测暴露）：节点进程每次启动都会调一次登记，
+// 而 uuid 在库里**不是唯一键**。于是"同一节点重启一次 → 同一 uuid 多一行"，
+// 直接后果有三个：
+//   - 节点页出现重复行，在线数被重复计数；
+//   - FindByUUID 用 First 取的是**最旧**一行，状态更新写到旧行上，新行永远是脏的；
+//   - Delete 按 uuid 删，会把重复行一起删——这本来是唯一能自愈的地方，但太粗暴。
+//
+// 只更新"进程自身事实"字段（pid/ip/hostname/version/status/up/down）：
+// Labels / Capacity 是**运维在库里配的属性**，节点不知道它们，不能被节点启动覆盖掉。
+func (n *Node) Upsert() (id int, err error) {
+	var existID int
+	if err = dbclient.GetMysqlDB().Table(CronyNodeTableName).
+		Where("uuid = ?", n.UUID).Pluck("id", &existID).Error; err != nil {
+		return
+	}
+	if existID > 0 {
+		err = dbclient.GetMysqlDB().Table(CronyNodeTableName).Where("id = ?", existID).
+			Updates(map[string]interface{}{
+				"pid":      n.PID,
+				"ip":       n.IP,
+				"hostname": n.Hostname,
+				"version":  n.Version,
+				"status":   n.Status,
+				"up":       n.UpTime,
+				"down":     0,
+			}).Error
+		n.ID = existID
+		return existID, err
+	}
+	return n.Insert()
+}
+
 func (n *Node) Update() error {
 	return dbclient.GetMysqlDB().Table(CronyNodeTableName).Updates(n).Error
 }

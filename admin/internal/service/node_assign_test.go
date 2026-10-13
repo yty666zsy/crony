@@ -62,3 +62,19 @@ func TestRequestAssignWithNilChannelIsSafe(t *testing.T) {
 		t.Fatal("requestAssign 在 assignCh 为 nil 时阻塞了")
 	}
 }
+
+// nodeKeyExists 在"没有 etcd 客户端"时必须安全返回 false（保持旧行为：按真的失联处理），
+// 而不是 panic。它在 watcher 的 DELETE 分支里被调用，panic 会拖垮整个节点监控。
+func TestNodeKeyExistsWithoutClientIsSafe(t *testing.T) {
+	w := &NodeWatcherService{}
+	if w.nodeKeyExists("00000000-0000-0000-0000-000000000001") {
+		t.Fatal("无 etcd 客户端时 nodeKeyExists 必须返回 false")
+	}
+	var nilW *NodeWatcherService
+	if nilW.nodeKeyExists("x") {
+		t.Fatal("nil 接收者下 nodeKeyExists 必须返回 false")
+	}
+	if w.nodeKeyExists("") {
+		t.Fatal("空 uuid 必须返回 false（避免查询到前缀整批节点键）")
+	}
+}

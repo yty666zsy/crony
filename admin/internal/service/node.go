@@ -81,6 +81,17 @@ func (n *NodeWatcherService) watcher() {
 				uuid := n.GetUUID(string(ev.Kv.Key))
 				n.delNodeList(uuid)
 				logger.GetLogger().Warn(fmt.Sprintf("crony node[%s] DELETE event detected", uuid))
+				// 防御：DELETE 事件可能是**陈旧的**。节点重启时会先删自己的旧注册键、
+				// 再写新键；旧租约过期与新注册也可能交错。watcher 收到的顺序不保证是最终状态，
+				// 于是"先 DELETE 后 PUT"会让这条 DELETE 在节点已经复活之后才被处理。
+				// 若此刻 etcd 里该 uuid 的节点键又存在，说明节点已经重新注册，这条事件已过期：
+				// 此时做 FailOver / 删行会把一个**健康节点**上的任务白搬一次，
+				// 并删掉它刚写入的库内行（造成"etcd 有、库里没有"的漂移）。
+				if n.nodeKeyExists(uuid) {
+					logger.GetLogger().Warn(fmt.Sprintf(
+						"crony node[%s] DELETE event is stale（该节点键已重新出现，节点已重新注册），跳过 FailOver", uuid))
+					continue
+				}
 				node := &models.Node{UUID: uuid}
 				err := node.FindByUUID()
 				if err != nil {
@@ -225,6 +236,22 @@ func (n *NodeWatcherService) anyNodeUUID() string {
 		return k
 	}
 	return ""
+}
+
+// nodeKeyExists 查 etcd 里该 uuid 的节点注册键当前是否还在。
+//
+// 用于识别**陈旧的 DELETE 事件**：节点重启（先删旧键、再写新键）或"旧租约过期"
+// 与"新注册"交错时，watcher 可能先收到 DELETE、此时节点其实已经复活。
+// 客户端不可用时返回 false（保持旧行为：按真的失联处理）。
+func (n *NodeWatcherService) nodeKeyExists(uuid string) bool {
+	if n == nil || n.client == nil || uuid == "" {
+		return false
+	}
+	resp, err := n.client.Get(context.Background(), fmt.Sprintf(etcdclient.KeyEtcdNode, uuid))
+	if err != nil {
+		return false
+	}
+	return len(resp.Kvs) > 0
 }
 
 func (n *NodeWatcherService) delNodeList(key string) {
