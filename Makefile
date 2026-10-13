@@ -84,6 +84,22 @@ fmt:
 	@echo "hello"
 	@go mod tidy
 
+# 一键门禁：与 gate.ps1 同序（格式 → 构建 → vet → 带标签 vet → 单测）。
+# 带标签的 vet 必须单独跑：普通 go vet ./... **不覆盖**带构建标签的验收代码。
+gate:
+	@echo "== gofmt"
+	@out="$$(gofmt -l admin common node acceptance)"; \
+	if [ -n "$$out" ]; then echo "$$out"; echo "以上文件未 gofmt（go fmt admin common node acceptance）"; exit 1; fi
+	@echo "== go build ./..."; go build ./...
+	@echo "== go vet ./..."; go vet ./...
+	@echo "== go vet -tags acceptance ./acceptance/"; go vet -tags acceptance ./acceptance/
+	@echo "== go test ./..."; go test ./... -count=1
+	@echo "gate ok"
+
+# 在 gate 之上追加黑盒验收（需被测系统在跑 + 已配置 CRONY_ACC_* 变量）。
+gate-acceptance: gate
+	@echo "== go test -tags acceptance ./acceptance/"; go test -tags acceptance ./acceptance/ -count=1 -timeout 900s
+
 clean:
 	@#echo $(PROJECTBIN)
 	@rm -rf $(PROJECTBIN)/* &>/dev/null
@@ -93,4 +109,4 @@ gitpull: fmt
 	git add .
 	git commit -m "$(m) changed at $(TIMESTAMP)"
 	git pull
-.PHONY: fmt clean git
+.PHONY: fmt clean git gate gate-acceptance

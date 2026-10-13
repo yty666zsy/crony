@@ -34,6 +34,10 @@ go test -tags acceptance ./acceptance/ -v -count=1 -timeout 900s
 
 可选：`CRONY_ACC_SSE_SHORT_SECONDS`（默认 16）、`CRONY_ACC_SSE_RUN_SECONDS`（默认 20）。
 
+> 一键写法：`pwsh -File ..\gate.ps1 -Acceptance`（先跑格式/构建/vet/单测，再跑本目录）。
+> 机器相关的 Go 缓存路径与上面的 `CRONY_ACC_*` 变量可放在仓库根的 `.gate.env.ps1`
+> （不入库，`gate.ps1` 会自动载入）。
+
 ### 1.1 run 夹具：为什么允许套件自己插数据
 
 AC-06/AC-07/AC-08/AC-09/AC-15 都需要**一条已结束的执行记录**。两种来源：

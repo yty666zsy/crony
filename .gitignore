@@ -22,6 +22,9 @@ bin
 # 本机 Go 构建缓存（沙箱/CI 中重定向到工作区内时不要入库）
 .gocache
 
+# 本机门禁环境（gate.ps1 自动载入：Go 缓存路径 + 黑盒验收变量，因机器而异）
+.gate.env.ps1
+
 # 部署密钥
 .env
 .env.local

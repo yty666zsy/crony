@@ -85,6 +85,22 @@ make
 
 运行后访问地址:http://localhost:8089
 
+### 3.3 开发门禁（改完代码先过这一关）
+
+```powershell
+pwsh -File gate.ps1                # 格式 + 构建 + vet + 单测
+pwsh -File gate.ps1 -Acceptance    # 再跑一遍黑盒验收（需被测系统已在跑）
+make gate                          # Linux / CI 的等价入口
+```
+
+为什么不是直接 `go test ./...`：只跑单测会漏掉三类真实问题——**格式漂移**（gofmt）、
+**带构建标签的验收代码编译不过**（普通 `go vet ./...` 覆盖不到，必须单独跑
+`go vet -tags acceptance ./acceptance/`）、以及某个 main 包编译不过。
+
+脚本只描述"跑什么"，**机器相关的** Go 缓存路径与 `CRONY_ACC_*` 变量放在仓库根、
+不入库的 `.gate.env.ps1`（`gate.ps1` 会自动载入它）。黑盒验收的前置条件与三态口径
+见 `acceptance/README.md`。
+
 ## 4. 技术选型
 
 - 前端： [Vue](https://vuejs.org) + [Element](https://github.com/ElemeFE/element)
