@@ -21,7 +21,7 @@
     "#log-clean-period":"The unit is minute. By default, it is cleared twice a day",
     "log-clean-period":720,
     "log-clean-expiration":604800,
-    "#cmd-auto-allocation": "Whether the cmd command is used to automatically allocate nodes. By default, the command is not supported. If the command is used, ensure that each node has the corresponding configuration",
+    "#cmd-auto-allocation": "是否允许 cmd 类型任务自动分配节点（true 时由 admin 决定落哪台机器；每个节点都必须具备该 cmd 的运行配置）。**只有 admin 读这个键**：node/conf 里已不再提供取值，避免被误当成节点侧开关。默认 false：cmd 任务不自动分配，必须人工指定节点。",
     "cmd-auto-allocation":false
   },
   "etcd": {

@@ -21,8 +21,7 @@
     "#log-clean-period":"The unit is minute. By default, it is cleared twice a day",
     "log-clean-period":720,
     "log-clean-expiration":604800,
-    "#cmd-auto-allocation": "Whether the cmd command is used to automatically allocate nodes. By default, the command is not supported. If the command is used, ensure that each node has the corresponding configuration",
-    "cmd-auto-allocation":true,
+    "#cmd-auto-allocation": "是否允许 cmd 类型任务自动分配节点。**只有 admin 读这个键**（见 admin/conf/*/main.json）——节点进程从不读它，所以这里不再提供取值，避免被误当成『节点自己会分配』。",
     "version": "v1.1.0"
   },
   "etcd": {
