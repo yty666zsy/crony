@@ -23,7 +23,7 @@ func (srv *NodeServer) watchJobs() {
 					err = fmt.Errorf("watch job[%s] create json umarshal err: %s", string(ev.Kv.Key), err.Error())
 					continue
 				}
-				srv.jobs[job.ID] = &job
+				srv.setJob(job.ID, &job)
 				job.InitNodeInfo(models.JobStatusAssigned, srv.UUID, srv.Hostname, srv.IP)
 				srv.addJob(&job)
 			case ev.IsModify():
@@ -138,7 +138,7 @@ func (srv *NodeServer) watchOnce() {
 				if len(ev.Kv.Value) != 0 && string(ev.Kv.Value) != srv.UUID {
 					continue
 				}
-				j, ok := srv.jobs[handler.GetJobIDFromKey(string(ev.Kv.Key))]
+				j, ok := srv.getJob(handler.GetJobIDFromKey(string(ev.Kv.Key)))
 				if !ok {
 					continue
 				}

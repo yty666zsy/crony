@@ -16,6 +16,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -25,7 +26,43 @@ type NodeServer struct {
 	*models.Node
 	*cron.Cron
 
-	jobs handler.Jobs
+	// jobsMu 保护 jobs：etcd watch goroutine（watchJobs/watchOnce）与
+	// HTTP 触发/重载路径（loadJobs/modifyJob/deleteJob）会并发读写该 map。
+	jobsMu sync.RWMutex
+	jobs   handler.Jobs
+}
+
+// getJob 返回指定任务（只读，加读锁）。
+func (srv *NodeServer) getJob(jobID int) (*handler.Job, bool) {
+	srv.jobsMu.RLock()
+	defer srv.jobsMu.RUnlock()
+	j, ok := srv.jobs[jobID]
+	return j, ok
+}
+
+// setJob 写入指定任务（加写锁）。
+func (srv *NodeServer) setJob(jobID int, j *handler.Job) {
+	srv.jobsMu.Lock()
+	defer srv.jobsMu.Unlock()
+	srv.jobs[jobID] = j
+}
+
+// dropJob 删除指定任务，返回其原先是否存在（加写锁）。
+func (srv *NodeServer) dropJob(jobID int) bool {
+	srv.jobsMu.Lock()
+	defer srv.jobsMu.Unlock()
+	if _, ok := srv.jobs[jobID]; !ok {
+		return false
+	}
+	delete(srv.jobs, jobID)
+	return true
+}
+
+// replaceJobs 整体替换任务表（加写锁）。
+func (srv *NodeServer) replaceJobs(jobs handler.Jobs) {
+	srv.jobsMu.Lock()
+	defer srv.jobsMu.Unlock()
+	srv.jobs = jobs
 }
 
 func NewNodeServer() (*NodeServer, error) {
@@ -233,7 +270,7 @@ func (srv *NodeServer) loadJobs() (err error) {
 	if len(jobs) == 0 {
 		return
 	}
-	srv.jobs = jobs
+	srv.replaceJobs(jobs)
 
 	for _, j := range jobs {
 		j.InitNodeInfo(models.JobStatusAssigned, srv.UUID, srv.Hostname, srv.IP)
@@ -288,7 +325,7 @@ func (srv *NodeServer) jobCronName(jobId int) string {
 }
 
 func (srv *NodeServer) modifyJob(j *handler.Job) {
-	oldJob, ok := srv.jobs[j.ID]
+	oldJob, ok := srv.getJob(j.ID)
 	if !ok {
 		srv.addJob(j)
 		return
@@ -299,10 +336,9 @@ func (srv *NodeServer) modifyJob(j *handler.Job) {
 }
 
 func (srv *NodeServer) deleteJob(jobId int) {
-	if _, ok := srv.jobs[jobId]; ok {
-		srv.Cron.RemoveJob(srv.jobCronName(jobId))
-		delete(srv.jobs, jobId)
+	if !srv.dropJob(jobId) {
 		return
 	}
+	srv.Cron.RemoveJob(srv.jobCronName(jobId))
 	return
 }

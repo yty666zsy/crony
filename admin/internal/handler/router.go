@@ -59,6 +59,7 @@ func configRoute(r *gin.Engine) {
 			err = c.ShouldBindJSON(&h)
 			if err != nil {
 				c.JSON(resp.ERROR, err.Error())
+				return
 			}
 			c.JSON(200, "hello,"+h.Name)
 		})

@@ -15,6 +15,7 @@ import (
 	"github.com/tmnhs/crony/common/pkg/orchestration"
 	"github.com/tmnhs/crony/common/pkg/retry"
 	"github.com/tmnhs/crony/common/pkg/runpolicy"
+	"unicode/utf8"
 )
 
 // 阶段 1（任务模型 2.0）执行协调器。
@@ -721,6 +722,11 @@ func policySnapshot(job *Job, policy runpolicy.ConcurrencyPolicy) string {
 }
 
 // truncateText 截断文本到指定字节上限（按 rune 边界，避免把 UTF-8 切成乱码）。
+//
+// 修复：原实现先按 len(s)（字节数）判断是否超限，再用 runes[:limit] 截断（limit 被当成
+// rune 数）。中文文本 len(s)>limit 但 len(runes)<=limit 时，runes[:limit] 必然越界，
+// 触发 "slice bounds out of range" panic 并拖垮整个节点进程。
+// 现在按 rune 边界累加字节，保证结果不超过 limit 字节且不切坏 UTF-8。
 func truncateText(s string, limit int) string {
 	if limit <= 0 {
 		return ""
@@ -728,9 +734,13 @@ func truncateText(s string, limit int) string {
 	if len(s) <= limit {
 		return s
 	}
-	runes := []rune(s)
-	if len(runes) <= limit {
-		return string(runes[:limit])
+	var b strings.Builder
+	b.Grow(limit)
+	for _, r := range s {
+		if b.Len()+utf8.RuneLen(r) > limit {
+			break
+		}
+		b.WriteRune(r)
 	}
-	return string(runes[:limit])
+	return b.String()
 }

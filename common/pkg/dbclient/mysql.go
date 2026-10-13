@@ -20,7 +20,12 @@ func Init(dsn, logMode string, maxIdleConns, maxOpenConns int) (*gorm.DB, error)
 	if db, err := gorm.Open(mysql.New(mysqlConfig), setConfig(logMode)); err != nil {
 		return nil, err
 	} else {
-		sqlDB, _ := db.DB()
+		// 原实现忽略 db.DB() 的错误：失败时 sqlDB 为 nil，随后的 SetMaxIdleConns
+		// 会空指针 panic（且没有任何日志），启动期直接崩溃。
+		sqlDB, err := db.DB()
+		if err != nil {
+			return nil, fmt.Errorf("get sql.DB from gorm failed: %w", err)
+		}
 		sqlDB.SetMaxIdleConns(maxIdleConns)
 		sqlDB.SetMaxOpenConns(maxOpenConns)
 		_defaultDB = db

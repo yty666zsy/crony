@@ -79,7 +79,13 @@ func (j *JobRouter) CreateOrUpdate(c *gin.Context) {
 			return
 		}
 		node := &models.Node{UUID: req.RunOn}
-		_ = node.FindByUUID()
+		if err = node.FindByUUID(); err != nil {
+			// 原实现忽略该错误（`_ = node.FindByUUID()`），节点不存在时 Status 是零值，
+			// 不等于 NodeConnFail，检查会被绕过 → 任务被派发到"幽灵节点"。
+			logger.GetLogger().Error(fmt.Sprintf("[create_job] find node[%s] error:%s", req.RunOn, err.Error()))
+			resp.FailWithMessage(resp.ERROR, "[create_job] manually assigned node not exist", c)
+			return
+		}
 		if node.Status == models.NodeConnFail {
 			resp.FailWithMessage(resp.ERROR, "[create_job] manually assigned node inactivation", c)
 			return

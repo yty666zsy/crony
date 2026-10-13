@@ -153,6 +153,14 @@ func (n *NodeWatcherService) extractNodes(resp *clientv3.GetResponse) []string {
 // 这个 5s 就是给"节点把 watch 建起来"留的余量——它不能删，只能不阻塞别人。
 const nodeReadyDelay = 5 * time.Second
 
+// getNodeList 在锁内读取节点快照，避免与 watch work 协程的 setNodeList/delNodeList 并发读写 map。
+func (n *NodeWatcherService) getNodeList(key string) (models.Node, bool) {
+	n.lock.Lock()
+	defer n.lock.Unlock()
+	node, ok := n.nodeList[key]
+	return node, ok
+}
+
 func (n *NodeWatcherService) setNodeList(key, val string) {
 	var node models.Node
 	err := json.Unmarshal([]byte(val), &node)
@@ -363,7 +371,7 @@ func (n *NodeWatcherService) assignJob(nodeUUID string, job *models.Job) (err er
 	if nodeUUID == "" {
 		return fmt.Errorf("node uuid can't be null")
 	}
-	node, ok := n.nodeList[nodeUUID]
+	node, ok := n.getNodeList(nodeUUID)
 	if !ok {
 		return fmt.Errorf("assign unassigned job[%d] but  node[%s] not exist ", job.ID, nodeUUID)
 	}

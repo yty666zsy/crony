@@ -179,12 +179,18 @@ func (u *UserRouter) Delete(c *gin.Context) {
 			return
 		}
 	}
+	failed := 0
 	for _, id := range req.IDS {
 		userModel := models.User{ID: id}
 		err := userModel.Delete()
 		if err != nil {
+			failed++
 			logger.GetLogger().Error(fmt.Sprintf("[delete_user] db error:%v", err))
 		}
+	}
+	if failed > 0 {
+		resp.FailWithMessage(resp.ERROR, fmt.Sprintf("[delete_user] %d/%d delete failed", failed, len(req.IDS)), c)
+		return
 	}
 	logger.GetLogger().Info(fmt.Sprintf("[audit][delete_user] operator=%s target_ids=%v", operatorName(c), req.IDS))
 	resp.OkWithMessage("delete success", c)
