@@ -946,10 +946,19 @@ export function settingsQuery() {
   return { code: 200, data: settingsSnapshot, msg: 'operation success' }
 }
 
-export function changePassword({ username, old_pw: oldPw, new_pw: newPw }) {
-  if (!oldPw || !newPw) return { code: 1001, data: {}, msg: '口令不能为空' }
-  if (String(newPw).length < 8) return { code: 1000, data: {}, msg: '新口令长度不足 8 位' }
-  return { code: 200, data: { username }, msg: '口令修改成功（Mock）' }
+// changePassword 必须与真后端 `POST /user/change_pw` 的契约一致：
+// 请求体是 {password, new_password}（不是 old_pw/new_pw），校验是 alphanum + 4~20 位。
+// 以前这里编的是 old_pw/new_pw + "至少 8 位"，于是控制台按 mock 写出来的调用在真后端
+// 必然失败（code 1009 request parameter error），而 mock 模式又"一切正常"，
+// 把不一致悄悄藏了起来——mock 的职责是复现真契约，不是另立一套。
+export function changePassword({ password, new_password: newPassword, username } = {}) {
+  const PW = /^[A-Za-z0-9]{4,20}$/
+  if (!password || !newPassword) return { code: 1001, data: {}, msg: '口令不能为空' }
+  if (!PW.test(String(password)) || !PW.test(String(newPassword))) {
+    // 1001 = resp.ErrorRequestParameter，与真后端绑定失败时的返回码一致。
+    return { code: 1001, data: {}, msg: '[change_password] request parameter error' }
+  }
+  return { code: 200, data: { username: username || 'admin' }, msg: '口令修改成功（Mock）' }
 }
 
 export { runSteps }

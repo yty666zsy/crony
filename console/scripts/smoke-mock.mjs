@@ -585,6 +585,31 @@ check('utils/format：时间格式化兼容 Unix 秒 / 毫秒 / ISO（毫秒字�
   assert.equal(fmt.formatTime('not-a-date'), '—')
 })
 
+/* ===================== 修改口令：Mock 必须复现真后端的契约，而不是另立一套 ===================== */
+
+// 历史缺陷（2026-10-13 用户实测触发）：
+//   控制台 /settings 按 Mock 自造的 {old_pw,new_pw} 发送，而真后端 POST /user/change_pw
+//   要的是 {password,new_password}（admin/internal/model/request/user.go），
+//   于是真环境下改口令一律回 `[change_password] request parameter error`（code 1001），
+//   而 Mock 模式下"一切正常"，把这个不一致藏了起来。
+// 这里钉死：Mock 与真后端同契约、同校验（alphanum + 4~20），旧字段名不再被接受。
+check('修改口令 Mock：与真后端同契约（{password,new_password}、alphanum、4~20 位）', () => {
+  const ok = mock.changePassword({ password: 'Abcd1234', new_password: 'Efgh5678' })
+  assert.equal(ok.code, 200, `合法入参应成功: ${JSON.stringify(ok)}`)
+  // 旧字段名（页面曾经发的）必须失败，否则 Mock 又会掩盖契约漂移。
+  assert.equal(
+    mock.changePassword({ old_pw: 'Abcd1234', new_pw: 'Efgh5678' }).code,
+    1001,
+    'old_pw/new_pw 不是真后端的字段，Mock 不应接受',
+  )
+  // 含符号：真后端 binding 的 alphanum 会拒（返回 1001 ErrorRequestParameter）。
+  assert.equal(mock.changePassword({ password: 'Abcd1234', new_password: 'bad-pass!' }).code, 1001)
+  // 长度越界：<4 也不通过。
+  assert.equal(mock.changePassword({ password: 'Abcd1234', new_password: 'abc' }).code, 1001)
+  // 空口令。
+  assert.equal(mock.changePassword({ password: '', new_password: 'Efgh5678' }).code, 1001)
+})
+
 let failed = 0
 for (const { name, fn } of checks) {
   try {

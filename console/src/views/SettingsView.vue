@@ -4,7 +4,6 @@ import { ElMessage } from 'element-plus'
 import { fetchSettings } from '@/api/settings'
 import { fetchHealth } from '@/api/statis'
 import { changePassword } from '@/api/auth'
-import { useAuthStore } from '@/stores/auth'
 import { useAppStore } from '@/stores/app'
 import { HEALTH_STATUS, BIZ_CODE } from '@/utils/dict'
 import { formatTime } from '@/utils/format'
@@ -21,7 +20,6 @@ import { formatTime } from '@/utils/format'
  *
  * 主题切换（深色/浅色）在顶栏，这里也放一个开关，因为它是用户级偏好而非系统配置。
  */
-const auth = useAuthStore()
 const app = useAppStore()
 
 const loading = ref(false)
@@ -33,11 +31,20 @@ const pwFormRef = ref(null)
 const pwSubmitting = ref(false)
 const pwForm = reactive({ old_pw: '', new_pw: '', confirm_pw: '' })
 
+// 与后端 request.ReqChangePassword 的 binding 完全对齐：
+//   Password / NewPassword 均要求 `required,min=4,max=20,alphanum`
+// 其中 **alphanum = 只接受字母和数字**（不接受符号、空格、下划线）。
+// 以前这里的规则是"至少 8 位"、没有上限也不限字符集，于是用户输入符号或超长口令时，
+// 前端放行、后端回一句语焉不详的 `request parameter error`（code 1009）——
+// 既难排查，也让人以为是自己敲错了。前端规则必须和真后端一致。
+const PW_PATTERN = /^[A-Za-z0-9]{4,20}$/
+const PW_RULE_MESSAGE = '口令必须是 4–20 位字母或数字（后端 alphanum 限制，不接受符号/空格）'
+
 const pwRules = {
   old_pw: [{ required: true, message: '请输入当前口令', trigger: 'blur' }],
   new_pw: [
     { required: true, message: '请输入新口令', trigger: 'blur' },
-    { min: 8, message: '新口令至少 8 位（后端 password_min_length=8）', trigger: 'blur' },
+    { pattern: PW_PATTERN, message: PW_RULE_MESSAGE, trigger: 'blur' },
   ],
   confirm_pw: [
     { required: true, message: '请再次输入新口令', trigger: 'blur' },
@@ -69,12 +76,15 @@ async function submitPassword() {
   if (!valid) return
   pwSubmitting.value = true
   try {
+    // 字段名必须是后端 ReqChangePassword 的名字（password / new_password）。
+    // 这里以前发的是 mock 自己编的 old_pw / new_pw，真后端直接判
+    // `request parameter error`（code 1009）——改口令功能在真环境下从来没能用过。
+    // username 不用发：后端从 JWT claims 取当前用户。
     await changePassword({
-      username: auth.user?.username || 'admin',
-      old_pw: pwForm.old_pw,
-      new_pw: pwForm.new_pw,
+      password: pwForm.old_pw,
+      new_password: pwForm.new_pw,
     })
-    ElMessage.success('口令已修改（Mock 模式下不会真正变更）')
+    ElMessage.success('口令已修改')
     pwFormRef.value?.resetFields()
   } finally {
     pwSubmitting.value = false
@@ -180,7 +190,7 @@ onMounted(load)
                   <el-input v-model="pwForm.old_pw" type="password" show-password placeholder="当前登录口令" />
                 </el-form-item>
                 <el-form-item label="新口令" prop="new_pw">
-                  <el-input v-model="pwForm.new_pw" type="password" show-password placeholder="至少 8 位" />
+                  <el-input v-model="pwForm.new_pw" type="password" show-password placeholder="4–20 位字母或数字" />
                 </el-form-item>
                 <el-form-item label="确认新口令" prop="confirm_pw">
                   <el-input v-model="pwForm.confirm_pw" type="password" show-password placeholder="再次输入" />

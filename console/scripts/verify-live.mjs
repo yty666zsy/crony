@@ -140,6 +140,64 @@ try {
 }
 
 // ---------------------------------------------------------------------------
+// 0.1) 修改口令 —— 走控制台自己的 api/auth.js（/settings 页同一条链路）。
+//   真接口 POST /user/change_pw 的请求体是 { password, new_password }
+//   （admin/internal/model/request/user.go），两字段均受
+//   `required,min=4,max=20,alphanum` 约束。
+//   做一次"真改 + 还原"往返：只有字段名与校验都对齐才可能成功。
+//   历史缺陷（用户 2026-10-13 实测）：页面发的是 Mock 自造的 old_pw/new_pw，
+//   真后端一律回 code=1001 `[change_password] request parameter error`。
+//   注意：本段会**真的改一次口令并改回**；若中途失败，口令会停留在临时口令上
+//   （这是真实写操作，不伪造成功）。
+// ---------------------------------------------------------------------------
+if (token) {
+  const tempPass = `CronyAcc${Date.now().toString().slice(-6)}` // 纯字母+数字，满足 alphanum
+
+  // (a) 含符号的新口令：真后端 binding 的 alphanum 应拒（1001），不能静默通过。
+  const refused = await attempt(() =>
+    mods.auth.changePassword({ password: PASS, new_password: 'no-symbol-allowed!' }),
+  )
+  check(
+    'POST /user/change_pw：含符号的新口令被参数校验拒绝（code=1001，非静默通过）',
+    refused.ok === false && refused.errCode === 1001,
+    refused.ok ? `竟然通过了：${summary(refused.value)}` : `code=${refused.errCode}`,
+  )
+
+  // (b) 真改：{password,new_password} 契约成功。
+  const changed = await attempt(() =>
+    mods.auth.changePassword({ password: PASS, new_password: tempPass }),
+  )
+  check(
+    'POST /user/change_pw：控制台的 {password,new_password} 契约能真正改成功（字段名与真后端对齐）',
+    changed.ok === true,
+    changed.ok ? '已改为临时口令' : `失败：${changed.errMsg}`,
+  )
+
+  // (c) 还原 + 生效取证：用**新**口令当旧口令再改回原口径；
+  //     这条能成功，说明上一步确实改了库里的口令（不是只回了个 200）。
+  if (changed.ok) {
+    const restored = await attempt(() =>
+      mods.auth.changePassword({ password: tempPass, new_password: PASS }),
+    )
+    check(
+      'POST /user/change_pw：改口令真的生效且已还原（用新口令作旧口令可改回）',
+      restored.ok === true,
+      restored.ok ? '已还原' : `还原失败，口令可能停在临时口令，请手动改回：${restored.errMsg}`,
+    )
+
+    // (d) 还原后，临时口令应当已失效——再次用它当旧口令必须被拒。
+    const stale = await attempt(() =>
+      mods.auth.changePassword({ password: tempPass, new_password: PASS }),
+    )
+    check(
+      'POST /user/change_pw：还原后临时口令已失效（旧口令校验真的在读库）',
+      stale.ok === false,
+      stale.ok ? '竟然又成功了：临时口令未被替换' : `code=${stale.errCode}`,
+    )
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 1) 会话列表 / 2) 会话详情 / 3.1) 读诊断 / 3.2) 触发诊断 / 4) 工具清单
 // ---------------------------------------------------------------------------
 async function step(name, fn) {
@@ -148,7 +206,19 @@ async function step(name, fn) {
     return { ok: true, value }
   } catch (err) {
     check(name, false, err?.message || String(err))
-    return { ok: false }
+    return { ok: false, errMsg: err?.message || String(err), errCode: err?.code }
+  }
+}
+
+/**
+ * 与 step 相同，但**不**自己记一条 check：用于"失败才是预期"的用例
+ * （例如非法入参必须被后端拒绝）。调用方负责断言并给出结论。
+ */
+async function attempt(fn) {
+  try {
+    return { ok: true, value: await fn() }
+  } catch (err) {
+    return { ok: false, errMsg: err?.message || String(err), errCode: err?.code }
   }
 }
 
