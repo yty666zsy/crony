@@ -8,7 +8,7 @@
  *   概览       概览 / 值班大屏
  *   调度与执行  定时任务 / 执行记录 / 任务编排     —— crony 的核心能力
  *   节点与资源  节点管理 / 终端
- *   Agent 智能  Agent 会话 / 知识库 / 经验库
+ *   Agent 智能  Agent 会话 / 知识库 / 经验库 / 评测台
  *   治理与运维  审批中心 / 审计轨迹 / 自愈调度 / 智能运维
  *   系统       系统设置
  */
@@ -49,6 +49,7 @@ export const navGroups = [
       { label: 'Agent 会话', to: '/agents', icon: 'MagicStick' },
       { label: '知识库', to: '/knowledge', icon: 'Notebook' },
       { label: '经验库', to: '/memory', icon: 'Collection' },
+      { label: '评测台', to: '/eval', icon: 'TrendCharts' },
     ],
   },
   {

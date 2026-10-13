@@ -547,3 +547,56 @@ func (s *EvalBenchService) GetEvalRun(id int64) (*models.EvalRun, *EvalReport, e
 	rep.RunID = row.ID
 	return &row, &rep, nil
 }
+
+// 历次跑批列表的条数上限（默认值与硬上限）。
+//
+// 列表用于"挑一次看"与"看趋势"，不是导出：一份报告约 20KB 级，
+// 列几百条会把响应体撑成几 MB，而运维真正会看的也就是最近几十次。
+const (
+	defaultEvalRunListLimit = 20
+	maxEvalRunListLimit     = 50
+)
+
+// EvalRunSummary 历次跑批列表的**对外投影**。
+//
+// 刻意不直接返回 models.EvalRun：那个结构带 `report_json`，即使 SQL 不查这一列，
+// JSON 里仍会出现一个恒为空串的 `report_json` —— 读起来像"这次跑批没有报告"，
+// 实际含义是"列表本来就不带报告"。契约要能自证，所以字段显式列出。
+type EvalRunSummary struct {
+	RunID      int64   `json:"run_id" gorm:"column:id"`
+	SetName    string  `json:"set_name" gorm:"column:set_name"`
+	SetVersion string  `json:"set_version" gorm:"column:set_version"`
+	Mode       string  `json:"mode" gorm:"column:mode"`
+	Trigger    string  `json:"trigger" gorm:"column:trigger"`
+	Cases      int     `json:"cases" gorm:"column:cases"`
+	Passed     int     `json:"passed" gorm:"column:passed"`
+	Failed     int     `json:"failed" gorm:"column:failed"`
+	Skipped    int     `json:"skipped" gorm:"column:skipped"`
+	Sessions   int     `json:"sessions" gorm:"column:sessions"`
+	Score      float64 `json:"score" gorm:"column:score"`
+	StartedAt  int64   `json:"started_at" gorm:"column:started_at"`
+	FinishedAt int64   `json:"finished_at" gorm:"column:finished_at"`
+	DurationMs int64   `json:"duration_ms" gorm:"column:duration_ms"`
+}
+
+// ListEvalRuns 列出最近若干次跑批的**汇总行**（按 id 倒序）。
+//
+// 不返回逐样本明细：列表用于"挑一次看"与"看趋势"，明细走 GetEvalRun。
+// 只选列而不是全表投影也是这个原因——否则一次列表查询会把每次跑批的完整报告
+// （逐样本断言明细）全读进内存。
+func (s *EvalBenchService) ListEvalRuns(limit int) ([]EvalRunSummary, error) {
+	if limit <= 0 {
+		limit = defaultEvalRunListLimit
+	}
+	if limit > maxEvalRunListLimit {
+		limit = maxEvalRunListLimit
+	}
+	rows := make([]EvalRunSummary, 0, limit)
+	// `trigger` 是 MySQL 保留字，必须加反引号：否则整条 SQL 语法报错，
+	// 而错误信息会指向"查询失败"，排查时很容易误判成数据库连不上。
+	err := dbclient.GetMysqlDB().Table(models.CronyEvalRunTableName).
+		Select("id, set_name, set_version, mode, `trigger`, cases, passed, failed, skipped, " +
+			"sessions, score, started_at, finished_at, duration_ms").
+		Order("id desc").Limit(limit).Find(&rows).Error
+	return rows, err
+}

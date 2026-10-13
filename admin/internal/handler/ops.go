@@ -236,6 +236,27 @@ func (o *OpsRouter) EvalCases(c *gin.Context) {
 	}, "ok", c)
 }
 
+// EvalRuns POST /ops/eval/runs 列出最近若干次跑批的汇总（供控制台"历次跑批"选择）。
+func (o *OpsRouter) EvalRuns(c *gin.Context) {
+	tag := "[ops/eval/runs]"
+	var req struct {
+		Limit int `json:"limit"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil && !isEOF(err) {
+		resp.FailWithMessage(resp.ErrorRequestParameter, tag+" 请求参数错误: "+err.Error(), c)
+		return
+	}
+	list, err := service.DefaultEvalBenchService.ListEvalRuns(req.Limit)
+	if err != nil {
+		resp.FailWithMessage(resp.ERROR, tag+" 查询失败: "+err.Error(), c)
+		return
+	}
+	resp.OkWithDetailed(gin.H{
+		"list": list, "total": len(list),
+		"note": "只返回汇总行（不含逐样本明细）：列表用于选择与趋势，明细走 /ops/eval/report（带 run_id）。",
+	}, "ok", c)
+}
+
 // EvalSeedSync POST /ops/eval/seed/sync 把内置种子评测集同步进库（幂等，按 case_key）。
 func (o *OpsRouter) EvalSeedSync(c *gin.Context) {
 	tag := "[ops/eval/seed/sync]"

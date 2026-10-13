@@ -485,6 +485,66 @@ check('阶段 5 混沌/影子 Mock：驾照分口径正确、影子有差异即�
   assert.equal(diff.allow_promotion, false, '存在差异必须拒绝放量')
 })
 
+check('阶段 5 评测台 Mock：报告计数自洽、评分口径与后端一致、样本级与逐会话判定不矛盾', () => {
+  const rep = mock.evalReport({}).data.report
+  assert.ok(rep && rep.mode === 'replay', '默认取最近一次跑批，且模式必须是 replay')
+  assert.equal(rep.passed + rep.failed + rep.skipped, rep.cases, '计数必须自洽')
+  const denom = rep.passed + rep.failed
+  assert.equal(rep.score, denom > 0 ? rep.passed / denom : 0, '评分分母不含 skipped')
+  assert.equal((rep.results || []).length, rep.cases)
+  assert.equal(rep.sessions, rep.results.reduce((n, r) => n + (r.sessions || []).length, 0), '判定次数必须等于逐样本会话数之和')
+  for (const r of rep.results) {
+    assert.ok(['passed', 'failed', 'skipped'].includes(r.status), `未知判定：${r.status}`)
+    if (r.status === 'skipped') assert.ok(r.reason, '跳过的样本必须写明原因')
+    if (r.status === 'failed') assert.ok(r.reason, '失败的样本必须写明原因')
+    const bad = (r.per_session || []).filter((p) => !p.passed)
+    assert.equal(r.status === 'passed', bad.length === 0, `${r.case_key}：样本级判定与逐会话判定矛盾`)
+  }
+})
+
+check('阶段 5 评测台 Mock：带失败的旧跑批可复现失败明细（负向样例不是摆设）', () => {
+  const d = mock.evalReport({ run_id: 11 }).data
+  assert.ok(d.report && d.report.run_id === 11, '应能按 run_id 取到历史跑批')
+  assert.equal(d.report.failed, 1)
+  const bad = d.report.results.find((r) => r.status === 'failed')
+  assert.ok(bad, '应有一条失败样本')
+  assert.ok(/no-write/.test(bad.reason || ''), '失败原因必须点名是哪条断言')
+  assert.equal(bad.checks.find((c) => c.name === 'no-write').passed, false, '样本级断言必须标红')
+  assert.ok(bad.per_session.some((p) => !p.passed), '必须能定位到具体会话')
+  assert.equal(mock.evalReport({}).data.report.failed, 0, '最近一次跑批应为全绿')
+})
+
+check('阶段 5 评测台 Mock：样本枚举/同步幂等/历次跑批倒序且列表不带完整报告', () => {
+  const cases = mock.evalCases({}).data
+  assert.equal(cases.total, cases.list.length)
+  assert.equal(cases.enabled, cases.list.filter((r) => r.enabled).length)
+  for (const c of cases.list) {
+    assert.ok(c.case_key && c.set_version && c.expect_json)
+    const e = JSON.parse(c.expect_json) // 期望值必须可解析（坏 JSON 会把不可判定伪装成断言）
+    assert.equal(e.id, c.case_key, '期望值里的 id 必须与 case_key 一致（否则改键名会静默失效）')
+    assert.ok(e.forbid_write || (e.forbid_tools || []).length, '安全样本至少要有一条"不许写"的判据')
+  }
+  const sync = mock.evalSeedSync({}).data
+  assert.equal(sync.added + sync.updated, cases.total, '同步必须覆盖全部种子样本')
+  assert.equal(mock.evalRuns({ limit: 1 }).data.list.length, 1, 'limit 必须生效')
+  const all = mock.evalRuns({ limit: 99 }).data
+  assert.ok(all.list.length >= 2, '应有多次历史跑批可供选择')
+  for (let i = 1; i < all.list.length; i++) {
+    assert.ok(all.list[i - 1].run_id > all.list[i].run_id, '历次跑批必须按 id 倒序')
+  }
+  assert.equal('report_json' in all.list[0], false, '列表不得携带完整报告（明细走 /ops/eval/report）')
+})
+
+check('阶段 5 评测台 Mock：跑一次回放新增一次可回溯的跑批', () => {
+  const before = mock.evalRuns({ limit: 50 }).data.list
+  const rep = mock.evalRun({ trigger: 'manual' }).data.report
+  assert.ok(rep.run_id > before[0].run_id, '新跑批 id 必须递增')
+  assert.equal(rep.passed + rep.failed + rep.skipped, rep.cases, '新报告计数必须自洽')
+  const after = mock.evalRuns({ limit: 50 }).data.list
+  assert.equal(after[0].run_id, rep.run_id, '新跑批必须出现在列表最前（倒序）')
+  assert.equal(mock.evalReport({ run_id: rep.run_id }).data.report.run_id, rep.run_id, '必须能按 id 回溯新跑批')
+})
+
 check('阶段 4-D/5 Mock：ops api 层只读/计算，无"直接改生产"的入口', async () => {
   const api = await server.ssrLoadModule('/src/api/ops.js')
   const exported = Object.keys(api).sort()
@@ -493,6 +553,11 @@ check('阶段 4-D/5 Mock：ops api 层只读/计算，无"直接改生产"的入
   }
   assert.ok(exported.includes('explainAllocation') && exported.includes('reconcileShadow'))
   assert.ok(exported.includes('effectiveAutonomy'), '应导出自治级别解释接口')
+  assert.ok(
+    exported.includes('listEvalCases') && exported.includes('runEvalBench') &&
+      exported.includes('getEvalReport') && exported.includes('listEvalRuns'),
+    '应导出回放评测台接口（样本 / 跑批 / 报告 / 历次跑批）',
+  )
 })
 
 /* ===================== 工具函数：时间口径（秒 / 毫秒 / ISO 三者都要对） ===================== */

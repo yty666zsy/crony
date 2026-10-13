@@ -119,6 +119,18 @@ const routes = [
     },
   },
 
+  {
+    path: '/eval',
+    name: 'eval',
+    component: () => import('@/views/EvalView.vue'),
+    meta: {
+      title: '评测台',
+      subtitle: '回放已录轨迹做确定性回归：不调模型、没有 LLM 评委；跳过的样本不计分',
+      group: 'Agent 智能',
+      icon: 'TrendCharts',
+    },
+  },
+
   /* ------------------------- 治理与运维 ------------------------- */
   {
     path: '/approvals',

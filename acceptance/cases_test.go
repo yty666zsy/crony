@@ -3125,4 +3125,118 @@ func TestAcceptanceSuite(t *testing.T) {
 		cc.note("夹具 %s（含 job_retry）被 2 条诊断类样本判红并点名 job_retry；只读夹具 %s 通过（同断言区分两者）",
 			writeSID, okSID)
 	})
+
+	// AC-56：历次跑批列表（控制台"评测台"选择器要用的接口）。
+	//
+	// 这不是"接口能返回"的用例：列表必须来自**真实库**（与 eval_run 表逐 id 对账）、
+	// 按 id 严格倒序、limit 生效且有硬上限，并且**不带逐样本明细**——列表带明细会让
+	// 响应体随历史跑批数量线性膨胀（一份报告 20KB 级）。
+	// 计数自洽（passed+failed+skipped==cases）在**每一行**上都必须成立：
+	// 一份自相矛盾的汇总比没有汇总更危险，它会让人以为"评测过了"。
+	run("AC-56", "评测台：历次跑批列表来自真实库、严格倒序、limit 生效且不带逐样本明细", func(cc *caseCtx) {
+		if db == nil {
+			cc.skip("未配置 CRONY_TEST_MYSQL_DSN，无法与库内 eval_run 逐 id 对账")
+		}
+		tag := strings.TrimSpace(os.Getenv("CRONY_ACC_RUN_TAG"))
+		if tag == "" {
+			tag = "acc-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+		}
+		var total int
+		if err := db.QueryRow("select count(*) from eval_run").Scan(&total); err != nil {
+			cc.t.Fatalf("统计跑批记录失败: %v", err)
+		}
+		if total == 0 {
+			cc.skip("库内还没有任何跑批记录，没有可列举的对象（先 POST /ops/eval/run 跑一次）")
+		}
+
+		out, err := c.postOK("/ops/eval/runs", map[string]any{"limit": 3})
+		if err != nil {
+			cc.t.Fatalf("取历次跑批失败: %v", err)
+		}
+		list := asSlice(out["list"])
+		if len(list) == 0 {
+			cc.t.Fatalf("库内有 %d 条跑批记录，列表却为空", total)
+		}
+		if len(list) > 3 {
+			cc.t.Fatalf("limit=3 未被遵守：返回了 %d 条", len(list))
+		}
+
+		// 与库内逐 id 对账：列表必须**就是** eval_run 里最近的几条，而不是编出来的。
+		rows, err := db.Query("select id from eval_run order by id desc limit 3")
+		if err != nil {
+			cc.t.Fatalf("读取库内跑批 id 失败: %v", err)
+		}
+		defer rows.Close()
+		want := make([]string, 0, 3)
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				cc.t.Fatalf("扫描跑批 id 失败: %v", err)
+			}
+			want = append(want, strconv.FormatInt(id, 10))
+		}
+
+		got := make([]string, 0, len(list))
+		prev := int64(-1)
+		for i, item := range list {
+			m := asMap(item)
+			id := int64(asNum(m["run_id"]))
+			got = append(got, strconv.FormatInt(id, 10))
+			if i > 0 && id >= prev {
+				cc.t.Fatalf("第 %d 条 run_id=%d 未严格倒序（上一条 %d）", i+1, id, prev)
+			}
+			prev = id
+			cases := int(asNum(m["cases"]))
+			passed := int(asNum(m["passed"]))
+			failed := int(asNum(m["failed"]))
+			skipped := int(asNum(m["skipped"]))
+			if passed+failed+skipped != cases {
+				cc.t.Fatalf("run_id=%d 计数不自洽：%d+%d+%d ≠ %d", id, passed, failed, skipped, cases)
+			}
+			if id <= 0 || asNum(m["started_at"]) <= 0 {
+				cc.t.Fatalf("run_id=%d 的汇总字段不完整（id/started_at 必须为正）: %+v", id, m)
+			}
+			if _, has := m["report_json"]; has {
+				cc.t.Fatalf("run_id=%d 的列表行带上了 report_json；逐样本明细只应出现在 /ops/eval/report", id)
+			}
+		}
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			cc.t.Fatalf("列表与库内最近记录不一致：接口=%v 库内=%v", got, want)
+		}
+
+		// 上限要**真被触发**才算验过：库内现有跑批可能不足 50 条，
+		// 那种情况下"没超过 50"是必然成立的，证明不了夹取。
+		// 所以自造 55 条夹具（唯一 set_name 标记，跑完即删），把总数顶到上限之上。
+		marker := "acc56-" + tag
+		cc.t.Cleanup(func() {
+			if _, derr := db.Exec("delete from eval_run where set_name = ?", marker); derr != nil {
+				cc.t.Errorf("清理 AC-56 跑批夹具失败（残留会被下一轮当成真实跑批）: %v", derr)
+			}
+		})
+		nowUni := time.Now().Unix()
+		for i := 0; i < 55; i++ {
+			if _, ierr := db.Exec(
+				"insert into eval_run (set_name, set_version, mode, `trigger`, cases, passed, failed, "+
+					"skipped, sessions, score, started_at, finished_at, duration_ms, created) "+
+					"values (?, 'acc-fixture', 'replay', 'acceptance', 1, 1, 0, 0, 1, 1, ?, ?, 1, ?)",
+				marker, nowUni, nowUni, nowUni); ierr != nil {
+				cc.t.Fatalf("插入 AC-56 跑批夹具失败: %v", ierr)
+			}
+		}
+		// 硬上限：请求一个离谱的值必须被夹到 50，否则一次请求就能把整表读出来。
+		big, err := c.postOK("/ops/eval/runs", map[string]any{"limit": 100000})
+		if err != nil {
+			cc.t.Fatalf("limit 上界探测失败: %v", err)
+		}
+		bigList := asSlice(big["list"])
+		if len(bigList) != 50 {
+			cc.t.Fatalf("limit 上界应为 50（库内此刻至少 55+%d 条），实际返回 %d 条", total, len(bigList))
+		}
+		if first := asMap(bigList[0]); asStr(first["set_name"]) != marker {
+			cc.t.Fatalf("列表第一条应是最新夹具（set_name=%s），实际 %s", marker, asStr(first["set_name"]))
+		}
+
+		cc.note("库内原有 %d 次跑批；limit=3 取回 %v 且与 eval_run 逐 id 一致；补 55 条夹具后 limit=100000 被夹到 %d 条（上限真被触发）；列表行不含 report_json",
+			total, got, len(bigList))
+	})
 }

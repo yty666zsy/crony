@@ -9,6 +9,11 @@
  *   POST /ops/slo/evaluate        评估契约（只回报事实，不触发动作）
  *   POST /ops/metrics/overview    核心指标汇总
  *   POST /ops/eval/score          对一次会话轨迹做确定性回归打分
+ *   POST /ops/eval/cases          列出评测样本（种子评测集 + 手工样本）
+ *   POST /ops/eval/runs           列出最近若干次跑批的汇总（历次跑批选择器）
+ *   POST /ops/eval/seed/sync      把内置种子评测集同步进库（幂等）
+ *   POST /ops/eval/run            对已录制的真实轨迹回放跑批
+ *   POST /ops/eval/report         取一次跑批报告（run_id<=0 取最近一次）
  *   POST /ops/autonomy/list       自治信用列表（含实际生效等级）
  *   POST /ops/autonomy/observe    记录一次动作结果，推进信用
  *   POST /ops/autonomy/unfreeze   人工解冻
@@ -53,6 +58,42 @@ export function fetchMetricsOverview() {
 export function scoreSession(sessionId, expectedTools = [], maxSteps = 0) {
   if (USE_MOCK) return mockResponse({ code: 200, data: { result: { case_id: sessionId, passed: true, score: 1, checks: [{ name: 'tool-sequence', passed: true, detail: '序列匹配：[log_search,node_status]' }] } }, msg: 'ok' })
   return request.post('/ops/eval/score', { session_id: sessionId, expected_tools: expectedTools, max_steps: maxSteps })
+}
+
+/* ---------------------- 回放评测台（阶段 5） ---------------------- */
+
+// 列出评测样本。样本期望值全部可机械判定（没有 LLM 评委）。
+export function listEvalCases(setName = '') {
+  if (USE_MOCK) return mockResponse(mock.evalCases({ set_name: setName }))
+  return request.post('/ops/eval/cases', { set_name: setName })
+}
+
+// 历次跑批的汇总（不含逐样本明细）。列表只够"挑一次看"，明细走 getEvalReport。
+export function listEvalRuns(limit = 20) {
+  if (USE_MOCK) return mockResponse(mock.evalRuns({ limit }))
+  return request.post('/ops/eval/runs', { limit })
+}
+
+// 把内置种子评测集同步进库（幂等：按 case_key）。已存在样本的启停以库里为准。
+export function syncEvalSeed() {
+  if (USE_MOCK) return mockResponse(mock.evalSeedSync({}))
+  return request.post('/ops/eval/seed/sync', {})
+}
+
+// 跑一次回放。**不调用模型**：回放对象是库里 status=completed 的历史会话。
+export function runEvalBench({ setName = '', limitPerCase = 0, trigger = 'manual', persist = true } = {}) {
+  if (USE_MOCK) {
+    return mockResponse(mock.evalRun({ set_name: setName, limit_per_case: limitPerCase, trigger, persist }))
+  }
+  return request.post('/ops/eval/run', {
+    set_name: setName, limit_per_case: limitPerCase, trigger, persist,
+  })
+}
+
+// 取一次跑批报告（run_id<=0 取最近一次）。
+export function getEvalReport(runId = 0) {
+  if (USE_MOCK) return mockResponse(mock.evalReport({ run_id: runId }))
+  return request.post('/ops/eval/report', { run_id: runId })
 }
 
 export function listAutonomy() {

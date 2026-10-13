@@ -198,6 +198,7 @@ func configRoute(r *gin.Engine) {
 		opsGroup.POST("/metrics/overview", defaultOpsRouter.MetricsOverview)
 		opsGroup.POST("/eval/score", defaultOpsRouter.EvalScore)
 		opsGroup.POST("/eval/cases", defaultOpsRouter.EvalCases)
+		opsGroup.POST("/eval/runs", defaultOpsRouter.EvalRuns)
 		opsGroup.POST("/eval/seed/sync", defaultOpsRouter.EvalSeedSync)
 		opsGroup.POST("/eval/run", defaultOpsRouter.EvalRun)
 		opsGroup.POST("/eval/report", defaultOpsRouter.EvalReport)

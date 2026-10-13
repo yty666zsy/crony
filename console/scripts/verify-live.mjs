@@ -101,6 +101,8 @@ try {
     memory: await server.ssrLoadModule('/src/api/memory.js'),
     // 阶段 4-B：任务编排只读控制面走的是 api/job.js（与 JobsView/OrchestrationView 同一条链路）。
     job: await server.ssrLoadModule('/src/api/job.js'),
+    // 阶段 5：回放评测台走的是 api/ops.js（与 EvalView 同一条链路）。
+    ops: await server.ssrLoadModule('/src/api/ops.js'),
   }
 } catch (err) {
   console.error('加载控制台 API 模块失败:', err?.message || err)
@@ -618,6 +620,116 @@ await server.close()
         )
       }
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 阶段 5) 回放评测台：走控制台自己的 api/ops.js（与 EvalView 同一条链路）。
+//
+// 这一节是**只读 + 一次幂等同步 + 一次跑批**：
+//   - cases/runs/report 都是只读，直接验契约与口径；
+//   - seed/sync 按 case_key upsert 是幂等的：连做两次，第二次必须"无新增、无下线"，
+//     且覆盖全部种子样本（这条断言与库内此前有没有种子无关，新库上也成立）；
+//   - run 是**回放已录轨迹**：不调用模型，所以在没有模型凭据的机器上也能真跑。
+//     它会往 eval_run 落一行（trigger=console-verify 标明来源），这是可回溯的记录而非状态改动。
+//
+// 要钉住的口径（这三条错了评测台就会变成"看起来在评测"）：
+//   1) 计数自洽：passed + failed + skipped === cases；
+//   2) 评分分母**不含 skipped**：score === passed / (passed + failed)；
+//   3) 列表（/runs）只给汇总行，逐样本明细只在 /report —— 列表带明细会让响应体爆掉。
+// ---------------------------------------------------------------------------
+{
+  const cases = await step('POST /ops/eval/cases（样本枚举）', () => mods.ops.listEvalCases(''))
+  if (cases.ok) {
+    const d = cases.value || {}
+    const list = Array.isArray(d.list) ? d.list : []
+    // 期望值必须是合法 JSON 且 id 与 case_key 一致：改键名会让断言静默失效（历史踩过）。
+    const badExpect = list.filter((c) => {
+      try {
+        return JSON.parse(c.expect_json || '').id !== c.case_key
+      } catch (e) {
+        return true
+      }
+    })
+    check(
+      'POST /ops/eval/cases 样本可枚举、期望值可解析且与 case_key 一致',
+      list.length > 0 && typeof d.total === 'number' && badExpect.length === 0,
+      `total=${d.total} enabled=${d.enabled} seed=${d.seed_version} 期望值有问题的=${badExpect.length}`,
+    )
+  }
+
+  const sync = await step('POST /ops/eval/seed/sync（幂等同步）', () => mods.ops.syncEvalSeed())
+  if (sync.ok && cases.ok) {
+    const second = await mods.ops.syncEvalSeed() // 幂等的判据在第二次：不能有新增/下线
+    const total = cases.value?.total || 0
+    check(
+      'POST /ops/eval/seed/sync 幂等：二次同步无新增、无下线，且覆盖全部种子样本',
+      second.added === 0 && second.removed === 0 && second.updated === total,
+      `第一次 added=${sync.value?.added} updated=${sync.value?.updated} removed=${sync.value?.removed}；` +
+        `第二次 added=${second.added} updated=${second.updated} removed=${second.removed}；库内样本=${total}`,
+    )
+  }
+
+  const run = await step('POST /ops/eval/run（回放一次，不调模型）', () =>
+    mods.ops.runEvalBench({ trigger: 'console-verify' }),
+  )
+  let newRunId = 0
+  if (run.ok) {
+    const rep = run.value?.report || {}
+    newRunId = rep.run_id || 0
+    const denom = (rep.passed || 0) + (rep.failed || 0)
+    const scoreOK = denom > 0 ? Math.abs(rep.score - rep.passed / denom) < 1e-9 : rep.score === 0
+    check(
+      'POST /ops/eval/run 是回放（mode=replay）且报告计数自洽、评分分母不含 skipped',
+      rep.mode === 'replay' &&
+        (rep.results || []).length === rep.cases &&
+        rep.passed + rep.failed + rep.skipped === rep.cases &&
+        scoreOK,
+      `run_id=${rep.run_id} mode=${rep.mode} cases=${rep.cases} ` +
+        `${rep.passed}/${rep.failed}/${rep.skipped} score=${rep.score} 判定次数=${rep.sessions}`,
+    )
+    const skippedNoReason = (rep.results || []).filter((r) => r.status === 'skipped' && !r.reason)
+    check(
+      '回放报告：跳过的样本必须写明原因（跳过 ≠ 通过）',
+      skippedNoReason.length === 0,
+      `未写原因的跳过=${skippedNoReason.length}`,
+    )
+  }
+
+  const report = await step('POST /ops/eval/report（按 run_id 回溯）', () =>
+    mods.ops.getEvalReport(newRunId),
+  )
+  if (report.ok) {
+    check(
+      'POST /ops/eval/report 可按 run_id 取回同一次报告（可回溯）',
+      report.value?.report?.run_id === newRunId && !!report.value?.run && !!report.value?.report?.mode,
+      `请求 run_id=${newRunId} 返回 run_id=${report.value?.report?.run_id} mode=${report.value?.report?.mode}`,
+    )
+  }
+
+  const runs = await step('POST /ops/eval/runs（历次跑批）', () => mods.ops.listEvalRuns(5))
+  if (runs.ok) {
+    const list = Array.isArray(runs.value?.list) ? runs.value.list : []
+    const ordered = list.every((r, i) => i === 0 || list[i - 1].run_id > r.run_id)
+    const selfConsistent = list.every((r) => r.passed + r.failed + r.skipped === r.cases)
+    const noReportJSON = list.every((r) => !('report_json' in r))
+    const containsNew = list.some((r) => r.run_id === newRunId)
+    check(
+      'POST /ops/eval/runs 返回汇总行：id 倒序、计数自洽、不带逐样本明细，且含刚跑的那次',
+      list.length > 0 && ordered && selfConsistent && noReportJSON && containsNew,
+      `条数=${list.length} 倒序=${ordered} 计数自洽=${selfConsistent} 无 report_json=${noReportJSON} 含新跑批=${containsNew}`,
+    )
+  }
+
+  const empty = await step('POST /ops/eval/report（不存在的 run_id）', () =>
+    mods.ops.getEvalReport(99999999),
+  )
+  if (empty.ok) {
+    check(
+      'POST /ops/eval/report 对不存在的 run_id 返回空报告 + 说明，而不是报错或假数据',
+      empty.value?.report === null && !!empty.value?.note,
+      `report=${empty.value?.report} note=${summary(empty.value?.note, 60)}`,
+    )
   }
 }
 
