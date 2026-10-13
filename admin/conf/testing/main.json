@@ -77,7 +77,11 @@
     "enabled": false,
     "provider": "openai",
     "base-url": "http://122.159.210.211:17864/v1",
-    "model": "cn:deepseek-v4.1-flash"
+    "model": "cn:deepseek-v4.1-flash",
+    "#budget": "真模型比离线桩『话多』：阶段 5 真机实测，cn:deepseek-v4.1-flash 一次失败诊断会用满默认的 8 次工具预算还要第 9 次，于是以『达到工具调用次数上限』保护性终止（AC-07 首跑就 FAIL 在这）。这里把额度放宽到 steps=8 / tool-calls=16 / session-tokens=120000；内核『超预算即终止、且不执行超预算工具』的语义不变，放的只是额度。",
+    "max-steps": 8,
+    "max-tool-calls": 16,
+    "max-tokens-per-session": 120000
   },
   "tools": {
     "#policy": "阶段 4 工具网关策略。默认一律是『关着』的那一档：不注册写工具、写动作一律需要人工审批。放开某一项都必须是有意识的决定，而不是忘配置的结果。",
