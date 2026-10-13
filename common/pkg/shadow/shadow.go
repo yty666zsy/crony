@@ -26,9 +26,9 @@ type SideEffect struct {
 
 // Observation 一次执行的可观测结果（基线或影子）。
 type Observation struct {
-	ExitCode   int          `json:"exit_code"`
-	StdoutHash string       `json:"stdout_hash"`
-	StderrHash string       `json:"stderr_hash"`
+	ExitCode    int          `json:"exit_code"`
+	StdoutHash  string       `json:"stdout_hash"`
+	StderrHash  string       `json:"stderr_hash"`
 	SideEffects []SideEffect `json:"side_effects"`
 }
 

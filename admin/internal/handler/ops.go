@@ -9,6 +9,7 @@ import (
 	"github.com/tmnhs/crony/common/models"
 	"github.com/tmnhs/crony/common/pkg/autonomy"
 	"github.com/tmnhs/crony/common/pkg/chaos"
+	"github.com/tmnhs/crony/common/pkg/eval"
 	"github.com/tmnhs/crony/common/pkg/scheduling"
 	"github.com/tmnhs/crony/common/pkg/shadow"
 )
@@ -203,6 +204,106 @@ func (o *OpsRouter) EvalScore(c *gin.Context) {
 		return
 	}
 	resp.OkWithDetailed(gin.H{"result": res}, "ok", c)
+}
+
+// ---------- 回放评测台（阶段 5） ----------
+
+// EvalCases POST /ops/eval/cases 列出评测样本（种子评测集 + 手工样本）。
+func (o *OpsRouter) EvalCases(c *gin.Context) {
+	tag := "[ops/eval/cases]"
+	var req struct {
+		SetName string `json:"set_name"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil && !isEOF(err) {
+		resp.FailWithMessage(resp.ErrorRequestParameter, tag+" 请求参数错误: "+err.Error(), c)
+		return
+	}
+	list, err := service.DefaultEvalBenchService.ListEvalCases(req.SetName)
+	if err != nil {
+		resp.FailWithMessage(resp.ERROR, tag+" 查询失败: "+err.Error(), c)
+		return
+	}
+	enabled := 0
+	for i := range list {
+		if list[i].Enabled {
+			enabled++
+		}
+	}
+	resp.OkWithDetailed(gin.H{
+		"list": list, "total": len(list), "enabled": enabled,
+		"seed_version": eval.SeedVersion,
+		"note":         "样本期望值全部可机械判定（无 LLM 评委）；非内置工具的风险级别为未分类，安全断言会明确失败而不是默认放行。",
+	}, "ok", c)
+}
+
+// EvalSeedSync POST /ops/eval/seed/sync 把内置种子评测集同步进库（幂等，按 case_key）。
+func (o *OpsRouter) EvalSeedSync(c *gin.Context) {
+	tag := "[ops/eval/seed/sync]"
+	added, updated, removed, err := service.DefaultEvalBenchService.SyncEvalCases()
+	if err != nil {
+		resp.FailWithMessage(resp.ERROR, tag+" 同步失败: "+err.Error(), c)
+		return
+	}
+	resp.OkWithDetailed(gin.H{
+		"added": added, "updated": updated, "removed": removed, "seed_version": eval.SeedVersion,
+		"note": "已存在样本的启停状态以库里的为准（不会被同步悄悄打开）；代码里已删除的种子样本会被一并下线（removed）。",
+	}, "ok", c)
+}
+
+// EvalRun POST /ops/eval/run 对已录制的真实轨迹回放跑批。
+//
+// 跑批**不调用模型**：回放对象是库里 status=completed 的历史会话，
+// 因此在没有 LLM 凭据的环境里也能真跑、真出结论。
+func (o *OpsRouter) EvalRun(c *gin.Context) {
+	tag := "[ops/eval/run]"
+	var req struct {
+		SetName      string `json:"set_name"`
+		LimitPerCase int    `json:"limit_per_case"`
+		Trigger      string `json:"trigger"`
+		Persist      *bool  `json:"persist"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil && !isEOF(err) {
+		resp.FailWithMessage(resp.ErrorRequestParameter, tag+" 请求参数错误: "+err.Error(), c)
+		return
+	}
+	persist := true // 默认落库：不落库的报告无法回溯
+	if req.Persist != nil {
+		persist = *req.Persist
+	}
+	rep, err := service.DefaultEvalBenchService.RunEval(service.EvalRunOptions{
+		SetName:      req.SetName,
+		LimitPerCase: req.LimitPerCase,
+		Trigger:      req.Trigger,
+		Persist:      persist,
+	})
+	if err != nil {
+		resp.FailWithMessage(resp.ERROR, tag+" 跑批失败: "+err.Error(), c)
+		return
+	}
+	resp.OkWithDetailed(gin.H{"report": rep}, "ok", c)
+}
+
+// EvalReport POST /ops/eval/report 取一次跑批报告（run_id<=0 取最近一次）。
+func (o *OpsRouter) EvalReport(c *gin.Context) {
+	tag := "[ops/eval/report]"
+	var req struct {
+		RunID int64 `json:"run_id"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil && !isEOF(err) {
+		resp.FailWithMessage(resp.ErrorRequestParameter, tag+" 请求参数错误: "+err.Error(), c)
+		return
+	}
+	run, rep, err := service.DefaultEvalBenchService.GetEvalRun(req.RunID)
+	if err != nil {
+		resp.FailWithMessage(resp.ERROR, tag+" 查询失败: "+err.Error(), c)
+		return
+	}
+	if run == nil {
+		resp.OkWithDetailed(gin.H{"run": nil, "report": nil,
+			"note": "还没有任何跑批记录，请先 POST /ops/eval/run。"}, "ok", c)
+		return
+	}
+	resp.OkWithDetailed(gin.H{"run": run, "report": rep}, "ok", c)
 }
 
 // ---------- 影子执行对账（阶段 5） ----------

@@ -23,8 +23,8 @@ type AutonomyCredit struct {
 	// FrozenReason 冻结原因。
 	FrozenReason string `json:"frozen_reason" gorm:"size:256;column:frozen_reason;default:''"`
 
-	Created int64 `json:"created" gorm:"column:created;not null"`
-	Updated int64 `json:"updated" gorm:"column:updated;default:0"`
+	Created   int64 `json:"created" gorm:"column:created;not null"`
+	Updated   int64 `json:"updated" gorm:"column:updated;default:0"`
 	UpdatedMS int64 `json:"updated_ms" gorm:"column:updated_ms;default:0"`
 }
 

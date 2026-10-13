@@ -73,12 +73,12 @@ func TestEnforcementLevelHasApprovalFloor(t *testing.T) {
 		in   Credit
 		want Level
 	}{
-		{Credit{Level: LevelAdvisory}, LevelApproval},                    // L0 → 底线 L1
-		{Credit{Level: LevelApproval}, LevelApproval},                    // L1 保持
-		{Credit{Level: LevelWhitelist}, LevelWhitelist},                  // L2 保持
-		{Credit{Level: LevelFull}, LevelFull},                            // L3 保持（是否真放行由配置上限再夹）
-		{Credit{Level: LevelAdvisory, Frozen: true}, LevelApproval},      // 冻结 → L1
-		{Credit{Level: LevelFull, Frozen: true}, LevelApproval},          // 冻结 → L1（不是 L3）
+		{Credit{Level: LevelAdvisory}, LevelApproval},               // L0 → 底线 L1
+		{Credit{Level: LevelApproval}, LevelApproval},               // L1 保持
+		{Credit{Level: LevelWhitelist}, LevelWhitelist},             // L2 保持
+		{Credit{Level: LevelFull}, LevelFull},                       // L3 保持（是否真放行由配置上限再夹）
+		{Credit{Level: LevelAdvisory, Frozen: true}, LevelApproval}, // 冻结 → L1
+		{Credit{Level: LevelFull, Frozen: true}, LevelApproval},     // 冻结 → L1（不是 L3）
 	}
 	for _, c := range cases {
 		if got := EnforcementLevel(c.in); got != c.want {

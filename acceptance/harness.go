@@ -727,6 +727,74 @@ func (f memoryFixture) OutcomeResultText() string {
 	}
 }
 
+// ---------- Agent 会话轨迹夹具（阶段 5 评测台） ----------
+
+// agentSessionFixture 一条"已完成、带工具轨迹"的 Agent 会话夹具。
+type agentSessionFixture struct {
+	// SessionID 会话号。**前缀很重要**：种子评测样本按 session_id 前缀挑会话，
+	// 所以夹具要用真实场景前缀（如 diagnose:）才能被对应样本回放到。
+	SessionID string
+	// Status 会话状态，默认 completed（评测只回放已完成的会话）。
+	Status string
+	// DurationMs 端到端耗时，用于延迟断言。
+	DurationMs int64
+	// Tools 依序写入的工具调用（空名跳过）。
+	Tools []string
+}
+
+// provisionAgentSessionFixture 造一条已完成、带工具轨迹的 Agent 会话，并注册自清理。
+//
+// 为什么必须能造：种子评测集里最有力的断言是"诊断类会话不得越权写"，
+// 而真实历史里**一次写动作都没有**（这恰恰是系统正确工作的证据）。
+// 于是"断言真的会咬人"就只能靠造一条含写工具的轨迹来验——
+// 不造，能证明的只有"没红的都是绿的"，那是自证清白。
+//
+// 只写 agent_session + agent_step 两张表，清理时按会话号删除。
+func provisionAgentSessionFixture(t *testing.T, db *sql.DB, spec agentSessionFixture) {
+	t.Helper()
+	if db == nil {
+		t.Fatal("provisionAgentSessionFixture 需要验收库连接（CRONY_TEST_MYSQL_DSN）")
+	}
+	if strings.TrimSpace(spec.SessionID) == "" {
+		t.Fatal("夹具必须有 session_id")
+	}
+	if spec.Status == "" {
+		spec.Status = models.AgentStatusCompleted
+	}
+	now := time.Now()
+	if _, err := db.Exec(`insert into agent_session
+		(session_id, kind, job_id, run_id, node_uuid, goal, status, stop_reason, provider, model,
+		 prompt_version, model_calls, tool_calls, total_tokens, duration_ms, warn_count, evidence_count,
+		 created, updated)
+		values (?, 'diagnose', 910007, ?, '', '验收夹具：评测台负向对照', ?, 'completed', 'offline', 'acc-model',
+		 'acc-v1', 1, ?, 0, ?, 0, 0, ?, ?)`,
+		spec.SessionID, spec.SessionID, spec.Status, len(spec.Tools), spec.DurationMs,
+		now.Unix(), now.Unix()); err != nil {
+		t.Fatalf("造 agent 会话夹具失败（验收库需要 INSERT 权限）: %v", err)
+	}
+	for i, tool := range spec.Tools {
+		if strings.TrimSpace(tool) == "" {
+			continue
+		}
+		if _, err := db.Exec(`insert into agent_step
+			(session_id, seq, kind, tool_name, tool_args_json, created)
+			values (?, ?, 'tool', ?, '{}', ?)`,
+			spec.SessionID, i, tool, now.Unix()); err != nil {
+			t.Fatalf("造 agent 轨迹夹具失败: %v", err)
+		}
+	}
+	t.Cleanup(func() {
+		// 清理失败要报错：残留的夹具会话会被下一轮跑批当成真实历史，
+		// 让"回放干净"的结论悄悄变成假的。
+		if _, err := db.Exec("delete from agent_step where session_id = ?", spec.SessionID); err != nil {
+			t.Errorf("清理评测夹具轨迹失败（验收库可能残留 %s）: %v", spec.SessionID, err)
+		}
+		if _, err := db.Exec("delete from agent_session where session_id = ?", spec.SessionID); err != nil {
+			t.Errorf("清理评测夹具会话失败（验收库可能残留 %s）: %v", spec.SessionID, err)
+		}
+	})
+}
+
 // ---------- etcd 探针（可选：FailOver 只能由 etcd 事件驱动） ----------
 
 // newEtcdClient 按 endpoints（逗号分隔）建一个临时 etcd 客户端；未配置时返回 nil。

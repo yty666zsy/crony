@@ -2849,4 +2849,280 @@ func TestAcceptanceSuite(t *testing.T) {
 		cc.note("合成节点接入事件后，带无人满足硬约束的任务 %d 仍保持未分配（未分配节点=%d 个，兜底没有越过硬约束）",
 			jobID, nodes)
 	})
+
+	// AC-52：评测台样本集契约（可枚举 + 同步幂等 + 期望值可解析）。
+	//
+	// 幂等是**功能性**要求而不是洁癖：每次同步都新增的话，同一条断言会在库里
+	// 堆积成多行，历史跑批结果就挂不到"同一条断言"上，跨次比较立刻失效。
+	run("AC-52", "评测台：种子评测集可枚举、同步幂等、期望值可解析", func(cc *caseCtx) {
+		first, err := c.postOK("/ops/eval/seed/sync", map[string]any{})
+		if err != nil {
+			cc.t.Fatalf("同步种子评测集失败: %v", err)
+		}
+		second, err := c.postOK("/ops/eval/seed/sync", map[string]any{})
+		if err != nil {
+			cc.t.Fatalf("二次同步种子评测集失败: %v", err)
+		}
+		if added := int(asNum(second["added"])); added != 0 {
+			cc.t.Fatalf("同步必须幂等（二次 added 应为 0），实际 added=%d", added)
+		}
+		// 代码里已删除的种子样本必须被一并下线：留着"幽灵样本"会一直报红且没人能修。
+		if removed := int(asNum(second["removed"])); removed != 0 {
+			cc.t.Fatalf("同步应下线代码中已不存在的种子样本（二次 removed 应为 0），实际 removed=%d", removed)
+		}
+		out, err := c.postOK("/ops/eval/cases", map[string]any{})
+		if err != nil {
+			cc.t.Fatalf("列出评测样本失败: %v", err)
+		}
+		version := asStr(out["seed_version"])
+		if version == "" {
+			cc.t.Fatal("响应缺少 seed_version")
+		}
+		list := asSlice(out["list"])
+		if len(list) < 4 {
+			cc.t.Fatalf("种子集样本数应 ≥4，实际 %d", len(list))
+		}
+		enabled := 0
+		for _, item := range list {
+			m := asMap(item)
+			key := asStr(m["case_key"])
+			if key == "" {
+				cc.t.Fatalf("样本缺少 case_key: %+v", m)
+			}
+			if asStr(m["set_version"]) == "" {
+				cc.t.Fatalf("样本 %s 缺少 set_version（版本是两次跑批可比的前提）", key)
+			}
+			if asStr(m["scenario"]) == "" {
+				cc.t.Fatalf("样本 %s 缺少场景说明", key)
+			}
+			var parsed map[string]any
+			if err := json.Unmarshal([]byte(asStr(m["expect_json"])), &parsed); err != nil {
+				cc.t.Fatalf("样本 %s 的 expect_json 不是 JSON 对象: %v", key, err)
+			}
+			if len(parsed) == 0 {
+				cc.t.Fatalf("样本 %s 的期望值为空（会变成永远通过的假样本）", key)
+			}
+			if asBool(m["enabled"]) {
+				enabled++
+			}
+		}
+		if enabled < 4 {
+			cc.t.Fatalf("启用的样本数应 ≥4，实际 %d", enabled)
+		}
+		cc.note("种子集版本=%s，样本 %d 条（启用 %d）；首次同步 added=%d、二次 added=%d（幂等）",
+			version, len(list), enabled, int(asNum(first["added"])), int(asNum(second["added"])))
+	})
+
+	// AC-53：对**库内真实历史会话**回放打分，并验证报告自洽、可回溯。
+	//
+	// 这条用例要的不是"接口能返回"，而是：真的回放到了历史轨迹（不是全部跳过）、
+	// 计数自洽、评分口径是 passed/(passed+failed)（skipped 不进分母）、
+	// 且落库后能按 run_id 取回同一次报告。
+	run("AC-53", "评测台：对库内真实历史会话回放打分、报告自洽且可回溯", func(cc *caseCtx) {
+		if db == nil {
+			cc.skip("未配置 CRONY_TEST_MYSQL_DSN，无法确认存在可回放的历史会话")
+		}
+		var completed int
+		if err := db.QueryRow("select count(*) from agent_session where status = 'completed'").Scan(&completed); err != nil {
+			cc.t.Fatalf("统计已完成会话失败: %v", err)
+		}
+		if completed == 0 {
+			cc.skip("库内没有 status=completed 的会话，回放没有对象")
+		}
+		out, err := c.postOK("/ops/eval/run", map[string]any{})
+		if err != nil {
+			cc.t.Fatalf("回放跑批失败: %v", err)
+		}
+		rep := asMap(out["report"])
+		if len(rep) == 0 {
+			cc.t.Fatalf("跑批没有返回报告: %+v", out)
+		}
+		if mode := asStr(rep["mode"]); mode != "replay" {
+			cc.t.Fatalf("模式应为 replay，实际 %q", mode)
+		}
+		cases := int(asNum(rep["cases"]))
+		passed := int(asNum(rep["passed"]))
+		failed := int(asNum(rep["failed"]))
+		skipped := int(asNum(rep["skipped"]))
+		if cases < 4 {
+			cc.t.Fatalf("跑批样本数应 ≥4，实际 %d", cases)
+		}
+		if passed+failed+skipped != cases {
+			cc.t.Fatalf("报告计数不自洽：passed=%d failed=%d skipped=%d ≠ cases=%d", passed, failed, skipped, cases)
+		}
+		if passed+failed == 0 {
+			cc.t.Fatalf("全部样本被跳过，这次跑批不构成证据（库内有 %d 个已完成会话）", completed)
+		}
+		if want := float64(passed) / float64(passed+failed); asNum(rep["score"]) != want {
+			cc.t.Fatalf("评分口径应为 passed/(passed+failed)=%.4f（skipped 不进分母），实际 %.4f",
+				want, asNum(rep["score"]))
+		}
+		runID := int64(asNum(rep["run_id"]))
+		if runID <= 0 {
+			cc.t.Fatal("跑批未落库（run_id<=0），报告不可回溯")
+		}
+		for _, item := range asSlice(rep["results"]) {
+			m := asMap(item)
+			key := asStr(m["case_key"])
+			switch st := asStr(m["status"]); st {
+			case "passed", "failed":
+			case "skipped":
+				if asStr(m["reason"]) == "" {
+					cc.t.Fatalf("样本 %s 被跳过却没有写明原因（跳过必须可解释）", key)
+				}
+			default:
+				cc.t.Fatalf("样本 %s 的判定非法：%q（只允许 passed/failed/skipped）", key, st)
+			}
+		}
+		again, err := c.postOK("/ops/eval/report", map[string]any{"run_id": runID})
+		if err != nil {
+			cc.t.Fatalf("按 run_id 回查报告失败: %v", err)
+		}
+		if got := int64(asNum(asMap(again["run"])["id"])); got != runID {
+			cc.t.Fatalf("按 run_id=%d 回查拿到的是 %d，报告不可回溯", runID, got)
+		}
+		cc.note("对 %d 个已完成会话回放 %d 条样本：passed=%d failed=%d skipped=%d score=%.3f run_id=%d（库内已完成会话 %d）",
+			int(asNum(rep["sessions"])), cases, passed, failed, skipped, asNum(rep["score"]), runID, completed)
+	})
+
+	// AC-54：轨迹词汇回归 + 断言有效性负向对照。
+	//
+	// 背景（真缺陷）：轨迹里 kind 的真实取值是 tool，而评测内核最初只认 tool_call，
+	// 于是对真实轨迹恒算出空序列——内核自测用的又恰好是错词汇，所以"测试全绿、真实数据全错"。
+	// 这里用**真实历史会话**验：拿它自己的工具序列去比，必须通过；错一位，必须失败。
+	run("AC-54", "评测内核：真实轨迹的工具步可被识别（词汇回归）+ 错误序列判失败", func(cc *caseCtx) {
+		if db == nil {
+			cc.skip("未配置 CRONY_TEST_MYSQL_DSN，无法定位一条带工具轨迹的历史会话")
+		}
+		var sid string
+		err := db.QueryRow(`select session_id from agent_session
+			where status = 'completed' and tool_calls > 0 order by id desc limit 1`).Scan(&sid)
+		if err == sql.ErrNoRows {
+			cc.skip("库内没有「已完成且带工具调用」的会话，无法验词汇回归")
+		}
+		if err != nil {
+			cc.t.Fatalf("定位会话失败: %v", err)
+		}
+		find, err := c.postOK("/agent/session/find", map[string]any{"session_id": sid})
+		if err != nil {
+			cc.t.Fatalf("读取会话轨迹失败（session_id=%s）: %v", sid, err)
+		}
+		steps := asSlice(find["steps"])
+		seq := make([]string, 0, len(steps))
+		for _, s := range steps {
+			m := asMap(s)
+			if asStr(m["kind"]) != "tool" {
+				continue
+			}
+			if name := asStr(m["tool_name"]); name != "" {
+				seq = append(seq, name)
+			}
+		}
+		if len(seq) == 0 {
+			cc.skip("会话 %s 的轨迹里没有具名工具步，无法验词汇回归", sid)
+		}
+		good, err := c.postOK("/ops/eval/score", map[string]any{
+			"session_id": sid, "expected_tools": seq, "max_steps": len(steps) + 5,
+		})
+		if err != nil {
+			cc.t.Fatalf("按真实工具序列打分失败: %v", err)
+		}
+		if res := asMap(good["result"]); !asBool(res["passed"]) {
+			cc.t.Fatalf("真实工具序列与自身比对未通过（说明工具步没被识别）：%+v", res["checks"])
+		}
+		wrong := make([]string, len(seq))
+		copy(wrong, seq)
+		wrong[0] += "-not-exist"
+		bad, err := c.postOK("/ops/eval/score", map[string]any{
+			"session_id": sid, "expected_tools": wrong, "max_steps": len(steps) + 5,
+		})
+		if err != nil {
+			cc.t.Fatalf("按错误工具序列打分失败: %v", err)
+		}
+		if asBool(asMap(bad["result"])["passed"]) {
+			cc.t.Fatal("错误工具序列被判通过：工具序列断言是空转的")
+		}
+		cc.note("会话 %s 的真实工具序列 %v（共 %d 步）：自身比对通过、错一位判失败", sid, seq, len(steps))
+	})
+
+	// AC-55：安全断言负向对照——写动作轨迹必须被判红，且必须能区分只读轨迹。
+	//
+	// 为什么必须造夹具：真实历史里**一次写动作都没有**（这恰恰是系统正确工作的证据），
+	// 所以"不得越权写"这条断言在真实数据上永远是绿的。不造一条含写工具的轨迹，
+	// 能证明的只有"没红的都是绿的"——那是自证清白，不是验证。
+	run("AC-55", "评测台：写动作轨迹判失败、只读轨迹通过（安全断言负向对照）", func(cc *caseCtx) {
+		if db == nil {
+			cc.skip("未配置 CRONY_TEST_MYSQL_DSN，无法造会话轨迹夹具")
+		}
+		tag := strings.TrimSpace(os.Getenv("CRONY_ACC_RUN_TAG"))
+		if tag == "" {
+			tag = "acc-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+		}
+		writeSID := "diagnose:" + tag + "-eval-write"
+		okSID := "diagnose:" + tag + "-eval-ok"
+		// 两条轨迹的唯一差别就是"有没有写工具"，因此同一断言必须给出相反判定。
+		provisionAgentSessionFixture(cc.t, db, agentSessionFixture{
+			SessionID: writeSID, DurationMs: 3000, Tools: []string{"log_search", "job_retry"},
+		})
+		provisionAgentSessionFixture(cc.t, db, agentSessionFixture{
+			SessionID: okSID, DurationMs: 2000, Tools: []string{"log_search", "node_status"},
+		})
+
+		out, err := c.postOK("/ops/eval/run", map[string]any{})
+		if err != nil {
+			cc.t.Fatalf("回放跑批失败: %v", err)
+		}
+		rep := asMap(out["report"])
+		if len(rep) == 0 {
+			cc.t.Fatalf("跑批没有返回报告: %+v", out)
+		}
+		checked := map[string]bool{}
+		for _, item := range asSlice(rep["results"]) {
+			m := asMap(item)
+			key := asStr(m["case_key"])
+			if key != "seed-diagnose-readonly" && key != "seed-diagnose-no-write-tool" {
+				continue
+			}
+			if st := asStr(m["status"]); st != "failed" {
+				cc.t.Fatalf("样本 %s 应判失败（回放了含写工具的会话 %s），实际 %s", key, writeSID, st)
+			}
+			writeSeen, writePassed, okPassed := false, true, false
+			writeDetail := ""
+			for _, ps := range asSlice(m["per_session"]) {
+				pm := asMap(ps)
+				switch asStr(pm["session_id"]) {
+				case writeSID:
+					writeSeen = true
+					writePassed = asBool(pm["passed"])
+					for _, ck := range asSlice(pm["checks"]) {
+						cm := asMap(ck)
+						if !asBool(cm["passed"]) {
+							writeDetail += asStr(cm["name"]) + ":" + asStr(cm["detail"]) + ";"
+						}
+					}
+				case okSID:
+					okPassed = asBool(pm["passed"])
+				}
+			}
+			if !writeSeen {
+				cc.t.Fatalf("样本 %s 的回放对象里没有夹具会话 %s（判红原因不可信）", key, writeSID)
+			}
+			if writePassed {
+				cc.t.Fatalf("样本 %s 放行了一条含 job_retry 写动作的轨迹：安全断言形同虚设", key)
+			}
+			if !okPassed {
+				cc.t.Fatalf("样本 %s 误报了只读夹具会话 %s（同一断言必须能区分两者）", key, okSID)
+			}
+			if !strings.Contains(writeDetail, "job_retry") {
+				cc.t.Fatalf("样本 %s 的失败明细没有点出写工具 job_retry，实际 %q", key, writeDetail)
+			}
+			checked[key] = true
+		}
+		if len(checked) < 2 {
+			cc.t.Fatalf("应有 2 条诊断类样本参与判定（风险级别 + 点名工具两条防线），实际 %d：%v",
+				len(checked), checked)
+		}
+		cc.note("夹具 %s（含 job_retry）被 2 条诊断类样本判红并点名 job_retry；只读夹具 %s 通过（同断言区分两者）",
+			writeSID, okSID)
+	})
 }

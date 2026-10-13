@@ -5,7 +5,7 @@ import (
 	"os"
 )
 
-//use export ENVIRONMENT=testing set global environment
+// use export ENVIRONMENT=testing set global environment
 const (
 	EnvTesting    = Environment("testing")
 	EnvProduction = Environment("production")

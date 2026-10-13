@@ -5,7 +5,7 @@ import (
 	"net"
 )
 
-//Get the local ip address
+// Get the local ip address
 func LocalIP() (net.IP, error) {
 	tables, err := net.Interfaces()
 	if err != nil {

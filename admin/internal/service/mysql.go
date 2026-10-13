@@ -9,6 +9,7 @@ import (
 	"github.com/tmnhs/crony/common/models"
 	"github.com/tmnhs/crony/common/pkg/config"
 	"github.com/tmnhs/crony/common/pkg/crypt"
+	"github.com/tmnhs/crony/common/pkg/eval"
 	"github.com/tmnhs/crony/common/pkg/logger"
 	"gorm.io/gorm"
 )
@@ -65,6 +66,11 @@ func RegisterTables(db *gorm.DB) error {
 		// 阶段 5 补全（SLO 违约处置）：一次违约处置一行事实记录。
 		// policy_id 索引（冷却退避按它查最近一行）= 跨进程去重的锚点。
 		models.SloBreach{},
+		// 阶段 5 评测：种子评测集（eval_case）与跑批结果（eval_run）。
+		// case_key 是唯一键而不是自增 id——同一条断言在多次同步之间必须保持同一身份，
+		// 否则历史跑批结果会挂不到同一条断言上。
+		models.EvalCase{},
+		models.EvalRun{},
 	)
 	if err != nil {
 		return errors.Wrap(err, "register table failed")
@@ -74,6 +80,29 @@ func RegisterTables(db *gorm.DB) error {
 	if err := bootstrapAdmin(db); err != nil {
 		return err
 	}
+	if err := bootstrapEvalSeed(db); err != nil {
+		return err
+	}
+	return nil
+}
+
+// bootstrapEvalSeed 首次启动时把内置种子评测集写进 eval_case。
+//
+// 只在**表为空**时同步：表里已有样本说明同步过（可能还手工改过断言、停用过样本），
+// 每次启动都全量覆盖会把运维的调整冲掉。要强制刷新走 POST /ops/eval/seed/sync。
+func bootstrapEvalSeed(db *gorm.DB) error {
+	var total int64
+	if err := db.Table(models.CronyEvalCaseTableName).Count(&total).Error; err != nil {
+		return errors.Wrap(err, "count eval cases failed")
+	}
+	if total > 0 {
+		return nil
+	}
+	added, _, _, err := DefaultEvalBenchService.SyncEvalCases()
+	if err != nil {
+		return errors.Wrap(err, "seed eval cases failed")
+	}
+	logger.GetLogger().Info(fmt.Sprintf("[bootstrap] 已写入内置种子评测集 %d 条（版本 %s）", added, eval.SeedVersion))
 	return nil
 }
 

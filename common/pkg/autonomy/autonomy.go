@@ -75,11 +75,11 @@ func DefaultConfig() Config {
 
 // Credit 一个（动作 × 环境）的信用状态。
 type Credit struct {
-	Level       Level  `json:"level"`
-	Streak      int    `json:"streak"`       // 当前连续成功次数
-	TotalUp     int    `json:"total_up"`     // 累计成功
-	TotalDown   int    `json:"total_down"`   // 累计不良后果
-	Frozen      bool   `json:"frozen"`       // 冻结：回落到人工
+	Level        Level  `json:"level"`
+	Streak       int    `json:"streak"`     // 当前连续成功次数
+	TotalUp      int    `json:"total_up"`   // 累计成功
+	TotalDown    int    `json:"total_down"` // 累计不良后果
+	Frozen       bool   `json:"frozen"`     // 冻结：回落到人工
 	FrozenReason string `json:"frozen_reason,omitempty"`
 }
 
