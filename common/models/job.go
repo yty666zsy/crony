@@ -84,7 +84,7 @@ type Job struct {
 	// 自愈是写动作（会重跑任务、可能改超时配置）。默认关着意味着"升级后行为不变"，
 	// 运维必须对具体任务显式点头——这和 allow_write 默认关是同一个原则：
 	// 能力先存在、边界先收紧。
-	SelfHeal int    `json:"self_heal" gorm:"size:1;column:self_heal;not null;default:0"`
+	SelfHeal int `json:"self_heal" gorm:"size:1;column:self_heal;not null;default:0"`
 	// NodeSelector 阶段 4-D：多目标调度的硬约束/亲和（JSON 文本）。
 	// 形态：{"require_labels":{"env":"prod"},"require_tools":["docker"],"prefer_node":"<uuid>"}
 	// 空串 = 无约束（老任务行为不变：仍按"任务数最少"分配）。
@@ -210,8 +210,26 @@ func (j *Job) TableName() string {
 	return CronyJobTableName
 }
 
+// Unmarshal 解析 JSON 列（notify_to / script_id）。
+//
+// 关键：这两列**允许为空**——"没配通知""没用脚本"是最常见情况，不是错误。
+// 旧实现对空 []byte 直接 json.Unmarshal，必然返回
+//
+//	unexpected end of JSON input
+//
+// 后果（20 节点舰队实测暴露）：自动分配任务时一遇错就 continue，于是所有
+// 未配置通知的任务**永远无法自动分配**；而且每次节点上下线都重试+告警一次，
+// 20 个节点放大成 20 倍噪音。空值跳过即可，真正非法的 JSON 仍然报错。
 func (j *Job) Unmarshal() (err error) {
-	err = json.Unmarshal(j.NotifyTo, &j.NotifyToArray)
-	err = json.Unmarshal(j.ScriptID, &j.ScriptIDArray)
-	return
+	if len(j.NotifyTo) > 0 {
+		if e := json.Unmarshal(j.NotifyTo, &j.NotifyToArray); e != nil {
+			return fmt.Errorf("notify_to 解析失败: %w", e)
+		}
+	}
+	if len(j.ScriptID) > 0 {
+		if e := json.Unmarshal(j.ScriptID, &j.ScriptIDArray); e != nil {
+			return fmt.Errorf("script_id 解析失败: %w", e)
+		}
+	}
+	return nil
 }

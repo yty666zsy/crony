@@ -141,7 +141,9 @@ func (j *JobService) AutoAllocateNode() string {
 		}
 		if node.Status == models.NodeConnFail {
 			//The node has failed
-			delete(DefaultNodeWatcher.nodeList, nodeUUID)
+			// 必须走加锁的 delNodeList：直接 delete(map) 与 watcher 的写入并发会触发
+			// Go 运行时的 "concurrent map writes" 致命错误（20 节点高频上下线时概率显著上升）。
+			DefaultNodeWatcher.delNodeList(nodeUUID)
 			continue
 		}
 		count, err := DefaultNodeWatcher.GetJobCount(nodeUUID)

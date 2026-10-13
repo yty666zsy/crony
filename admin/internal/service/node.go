@@ -23,6 +23,12 @@ type NodeWatcherService struct {
 	client   *etcdclient.Client
 	nodeList map[string]models.Node
 	lock     sync.Mutex
+	// assignCh 是"分配未分配任务"的请求通道（容量 1 → 天然合并重复请求）。
+	//
+	// 为什么要合并：旧实现把 Sleep(5s)+分配 直接写在每个节点事件的处理路径里，
+	// 20 个节点上线就是 20×5s 的串行阻塞（admin 启动时 extractNodes 同样中招）。
+	// 现在事件只登记+投递请求，真正的等待与分配交给后台 worker 合并执行一次。
+	assignCh chan struct{}
 }
 
 var DefaultNodeWatcher *NodeWatcherService
@@ -31,6 +37,7 @@ func NewNodeWatcherService() *NodeWatcherService {
 	return &NodeWatcherService{
 		client:   etcdclient.GetEtcdClient(),
 		nodeList: make(map[string]models.Node),
+		assignCh: make(chan struct{}, 1),
 	}
 }
 
@@ -56,6 +63,7 @@ func (n *NodeWatcherService) Watch() error {
 	_ = n.extractNodes(resp)
 
 	go n.watcher()
+	go n.runAssignWorker()
 	return nil
 }
 
@@ -76,14 +84,18 @@ func (n *NodeWatcherService) watcher() {
 				node := &models.Node{UUID: uuid}
 				err := node.FindByUUID()
 				if err != nil {
+					// 不能 return：这里在 watcher 的事件循环内，return 会**永久结束节点监控**
+					// （此后再也不处理上下线/FailOver）。库里查不到该节点只说明它没有落库行
+					// （例如从未 Insert、或已被清理），跳过这一条事件即可。
 					logger.GetLogger().Error(fmt.Sprintf("crony node[%s] find by uuid  error:%s", uuid, err.Error()))
-					return
+					continue
 				}
 
 				success, fail, err := n.FailOver(uuid)
 				if err != nil {
+					// 同上：单次 FailOver 失败不应拖垮整个 watch 循环。
 					logger.GetLogger().Error(fmt.Sprintf("crony node[%s] fail over error:%s", uuid, err.Error()))
-					return
+					continue
 				}
 				// if the failover is all successful, delete the node in the database
 				if fail.Count() == 0 {
@@ -122,6 +134,14 @@ func (n *NodeWatcherService) extractNodes(resp *clientv3.GetResponse) []string {
 	return nodes
 }
 
+// nodeReadyDelay 新节点出现在 etcd 后，等它把 watch 建起来再推任务的时间。
+//
+// 为什么必须等：节点启动顺序是 Register(etcd PUT，admin 立刻可见) → Run()
+// （先 loadJobs 做一次 Get，再 go watchJobs）。而节点侧的 WatchJobs 是**裸 watch**
+// （无初始 Get、无 WithRev），admin 若在节点 watch 建立前推进任务，节点永远收不到。
+// 这个 5s 就是给"节点把 watch 建起来"留的余量——它不能删，只能不阻塞别人。
+const nodeReadyDelay = 5 * time.Second
+
 func (n *NodeWatcherService) setNodeList(key, val string) {
 	var node models.Node
 	err := json.Unmarshal([]byte(val), &node)
@@ -133,42 +153,78 @@ func (n *NodeWatcherService) setNodeList(key, val string) {
 	n.nodeList[key] = node
 	n.lock.Unlock()
 	logger.GetLogger().Debug(fmt.Sprintf("discover node node[%s] with pid[%s]", key, val))
-	//Wait for the node to be fully started and assign the node
-	time.Sleep(5 * time.Second)
-	//find unassigned job
+	// 立刻让节点对调度器可见（List2Array 立即可用），但**不在事件路径里 sleep**：
+	// 只投递一次分配请求，由后台 worker 合并处理（F1）。
+	n.requestAssign()
+}
+
+// requestAssign 非阻塞地请求一次"把未分配任务分出去"；多次请求合并成一次。
+func (n *NodeWatcherService) requestAssign() {
+	if n.assignCh == nil {
+		return
+	}
+	select {
+	case n.assignCh <- struct{}{}:
+	default: // 已有待处理请求，无需再投
+	}
+}
+
+// runAssignWorker 消费分配请求：等 nodeReadyDelay 后做一次全局分配。
+//
+// 旧实现是"每个节点事件各等 5s 各分配一遍"，20 节点即 20 次串行；合并成一次后
+// 语义不变（仍然等节点就绪再加任务），但不再把 watcher 和 admin 启动路径拖住。
+func (n *NodeWatcherService) runAssignWorker() {
+	for range n.assignCh {
+		time.Sleep(nodeReadyDelay)
+		n.assignPendingJobs()
+	}
+}
+
+// assignPendingJobs 把所有"未分配"且可解析的任务分配出去。
+//
+// 分配策略保持旧行为（AutoAllocateNode：存活节点里任务数最少者），
+// 只把"逐节点事件各跑一遍"改为"合并后跑一遍"。
+func (n *NodeWatcherService) assignPendingJobs() {
 	jobs, err := DefaultJobService.GetNotAssignedJob()
 	if err != nil {
-		logger.GetLogger().Warn(fmt.Sprintf("discover node[%s],pid[%s] and get not assigned job err:%s", key, val, err.Error()))
+		logger.GetLogger().Warn(fmt.Sprintf("get not assigned job err:%s", err.Error()))
 		return
 	}
 	for _, job := range jobs {
-		/*if job.Type == models.JobTypeCmd && !config.GetConfigModels().System.CmdAutoAllocation {
-			logger.GetLogger().Warn(fmt.Sprintf("assign unassigned job[%d]  don't support cmd type", job.ID))
-			continue
-		}*/
-		err = job.Unmarshal()
-		if err != nil {
-			logger.GetLogger().Warn(fmt.Sprintf("assign unassigned job[%d] json unmarshal error:%s", job.ID, err.Error()))
+		if err = job.Unmarshal(); err != nil {
+			logger.GetLogger().Warn(fmt.Sprintf("assign unassigned job[%d] 解析失败:%s", job.ID, err.Error()))
 			continue
 		}
 		oldUUID := job.RunOn
 		nodeUUID := DefaultJobService.AutoAllocateNode()
 		if nodeUUID == "" {
-			//If automatic allocation fails, it will be directly assigned to the new node.
-			nodeUUID = key
+			// 自动分配选不出（例如 List2Array 为空）时，退化为"随便挑一个已在册节点"，
+			// 与旧实现"直接分给触发事件的那个节点"是同一意图。
+			nodeUUID = n.anyNodeUUID()
 		}
-		err = n.assignJob(nodeUUID, &job)
-		if err != nil {
+		if nodeUUID == "" {
+			return // 没有任何可用节点，等下一次节点事件
+		}
+		if err = n.assignJob(nodeUUID, &job); err != nil {
 			logger.GetLogger().Warn(fmt.Sprintf("assign unassigned job[%d]  error:%s", job.ID, err.Error()))
 			continue
 		}
-		//Delete the key value if the transfer is successful
-		_, err = etcdclient.Delete(fmt.Sprintf(etcdclient.KeyEtcdJob, oldUUID, job.ID))
-		if err != nil {
+		// 迁移成功后删掉旧节点的 etcd key
+		if _, err = etcdclient.Delete(fmt.Sprintf(etcdclient.KeyEtcdJob, oldUUID, job.ID)); err != nil {
 			logger.GetLogger().Error(fmt.Sprintf("node[%s] job[%d] fail over etcd delete job error:%s", nodeUUID, job.ID, err.Error()))
 			continue
 		}
 	}
+}
+
+// anyNodeUUID 返回已在册节点中的任意一个（用于分配兜底）。
+func (n *NodeWatcherService) anyNodeUUID() string {
+	n.lock.Lock()
+	defer n.lock.Unlock()
+	for k := range n.nodeList {
+		return k
+	}
+	return ""
 }
 
 func (n *NodeWatcherService) delNodeList(key string) {
