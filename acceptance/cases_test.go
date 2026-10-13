@@ -2981,8 +2981,8 @@ func TestAcceptanceSuite(t *testing.T) {
 		if got := int64(asNum(asMap(again["run"])["id"])); got != runID {
 			cc.t.Fatalf("按 run_id=%d 回查拿到的是 %d，报告不可回溯", runID, got)
 		}
-		cc.note("对 %d 个已完成会话回放 %d 条样本：passed=%d failed=%d skipped=%d score=%.3f run_id=%d（库内已完成会话 %d）",
-			int(asNum(rep["sessions"])), cases, passed, failed, skipped, asNum(rep["score"]), runID, completed)
+		cc.note("回放 %d 条样本、共 %d 次「样本×会话」判定：passed=%d failed=%d skipped=%d score=%.3f run_id=%d（库内已完成会话 %d 个，样本各回放至多 20 个会话）",
+			cases, int(asNum(rep["sessions"])), passed, failed, skipped, asNum(rep["score"]), runID, completed)
 	})
 
 	// AC-54：轨迹词汇回归 + 断言有效性负向对照。
