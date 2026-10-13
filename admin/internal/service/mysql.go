@@ -71,6 +71,9 @@ func RegisterTables(db *gorm.DB) error {
 		// 否则历史跑批结果会挂不到同一条断言上。
 		models.EvalCase{},
 		models.EvalRun{},
+		// 阶段 5 补全：放量档位（证据驱动的平台级上限，自动降级回 L0 的落点）。
+		// env 唯一：放量按环境计，重启不丢——"重启就把 L0 忘掉"等于自动降级只活到下次部署。
+		models.RolloutState{},
 	)
 	if err != nil {
 		return errors.Wrap(err, "register table failed")

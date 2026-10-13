@@ -92,7 +92,13 @@
     "shell-read-paths": ["/var/log/", "/var/log/crony/"],
     "sql-max-rows": 100,
     "deny": [],
-    "allow": []
+    "allow": [],
+    "#autonomy-credit": "阶段 5 自治信用：开启后写动作实际生效级别 = min(autonomy 上限, 该动作信用级别)。信用只能收紧不能越权；没有历史的动作沿用 autonomy。默认 false = 与阶段 4 行为完全一致（零回归）。",
+    "autonomy-credit": false,
+    "#autonomy-env": "自治信用与放量的环境段：信用 scope 形如 <工具>@<env>，放量档位按 env 记。『重跑在测试环境很安全』不等于『在生产很安全』。",
+    "autonomy-env": "default",
+    "#rollout-gate": "阶段 5 放量档位：开启后写动作生效级别 = min(autonomy, 信用, 放量档位)。放量只能靠新鲜且干净的证据（最近一次评测跑批 + 最近一轮 SLO 评估）加宽，坏信号自动收回 L0；没有放量记录时不表态（沿用配置），所以开启本开关本身不改行为。默认 false。",
+    "rollout-gate": false
   },
   "self-heal": {
     "#policy": "阶段 4-C 自愈调度。默认整段是『关着』的：enabled=false 时扫描只做分类与留痕，绝不动手；即使 enabled=true，还要求任务级 job.self_heal=1 与 tools.allow-write=true 才可能执行动作。三道闸门缺一不可。",

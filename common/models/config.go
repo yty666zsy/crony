@@ -244,6 +244,12 @@ type (
 		// AutonomyEnv 自治信用 scope 的环境段（默认 "default"），scope 形如 `job_retry@<env>`。
 		// 为什么要有环境维度："重跑在测试环境很安全"不等于"在生产很安全"。
 		AutonomyEnv string `mapstructure:"autonomy-env" json:"autonomyEnv" yaml:"autonomy-env" ini:"autonomy-env"`
+		// RolloutGate 阶段 5 补全：是否把「放量档位」也接进写动作的放行判定（默认 false）。
+		//
+		// 开启后：实际生效级别 = min(Autonomy 上限, 信用级别, 放量档位)。
+		// 放量档位只能靠**新鲜且干净的证据**（评测 + SLO）加宽，坏信号自动收回 L0；
+		// 没有放量记录时不表态（沿用配置），所以开启本开关本身不改变行为（零回归）。
+		RolloutGate bool `mapstructure:"rollout-gate" json:"rolloutGate" yaml:"rollout-gate" ini:"rollout-gate"`
 	}
 )
 

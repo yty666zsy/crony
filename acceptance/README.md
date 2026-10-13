@@ -11,11 +11,16 @@
 
 ```powershell
 # 被测系统（另一个终端）：
+#   前置服务: etcd（127.0.0.1:2379）——**必须先起 etcd 再起 admin**：etcd 客户端只在启动时初始化一次，
+#             晚了就进入降级运行，create_job 会报 "etcd is not initialized"（AC-48/AC-50 会失败）。
 #   admin:    cd <repo>\.livetest\run ; .\admin\admin.exe -e testing     （配置见 conf/testing/main.json）
 #   临时库:   MySQL 13306（见方案文档，**不要**动宿主 3306）
-#   节点侧:   probeagent.exe（PROBE_AGENT_UUID=node-it-01）
+#   节点侧:   20 节点舰队（.livetest/run/nodefleet/start.ps1 -N 20；AC-47/48/49/50/51 需要）
+#             + probeagent.exe（PROBE_AGENT_UUID=node-it-01）
 #             + 水位发布器（AC-14 必需，否则节点水位恒为「未上报」→ AC-14 显式 SKIP）
 #             载体见 .livetest/metricagent-harness/main.go（真 StartMetricPublisher，每 10s 一次）
+#             + worker.exe -e testing（AC-37 的中间态自愈留痕需要它跑自愈循环）
+#   放量闸门: AC-57 需要 admin 配置 tools.rollout-gate=true（否则该条 SKIP）
 
 $env:CRONY_ACC_BASE='http://127.0.0.1:8089'
 $env:CRONY_ACC_USER='admin'
@@ -106,6 +111,7 @@ AC-06/AC-07/AC-08/AC-09/AC-15 都需要**一条已结束的执行记录**。两�
 | AC-54 | 评测内核：真实轨迹的工具步可被识别（词汇回归）+ 错误序列判失败 | 登录 + DSN + 库内有带工具轨迹的会话 |
 | AC-55 | 评测台：写动作轨迹判失败、只读轨迹通过（安全断言负向对照） | 登录 + 可写 DSN |
 | AC-56 | 评测台：历次跑批列表来自真实库、严格倒序、limit 生效且不带逐样本明细 | 登录 + DSN + 库内至少 1 次跑批 |
+| AC-57 | 放量安全栈：没证据不放行、坏信号自动收回 L0，且档位**真的**夹住了生效级别 | 登录 + DSN + `tools.rollout-gate=true`（否则 SKIP） |
 
 ### 3.1 AC-16 为什么要"主动触发"工具调用
 
@@ -163,6 +169,12 @@ AC-06/AC-07/AC-08/AC-09/AC-15 都需要**一条已结束的执行记录**。两�
 - AC-56 依赖库里**至少有一次跑批**（`eval_run` 有行），否则 SKIP；未配 DSN 时同样 SKIP——
   它要跟库内**逐 id 对账**，没库就只能测"接口返回没炸"，那是没有咬合力的断言。
   上限部分自己插 55 条夹具（见 §3.4），与库内既有多少条无关。
+- AC-57 需要被测 admin **把放量档位接进放行判定**（`tools.rollout-gate=true`）：
+  开关关着时接口仍在，但"档位夹住生效级别"这件事无从观测，用例 SKIP 并写明原因。
+  它还要 DSN（自造评测夹具 + 核对 `rollout_state` 落库与清理）。
+  **加宽的"成功"分支依赖库内 SLO 无违约**：若此刻真有违约，用例会断言"被拒且理由点名 SLO"
+  （这也是闸门的正确行为），并把这一点写进证据；"证据干净 → 加宽成功"由内核单测穷举覆盖。
+  用例的探测工具刻意用一个**没有信用历史**的假名，避免被别的用例留下的信用行带偏。
 - 报告必须**是合法 UTF-8**：`truncate` 按字节切会切断多字节字符（真实发生过：
   报告第 1831 字节悬挂 `E6`，编辑器打不开整个文件），现在改为不切多字节字符 + 落盘 `ToValidUTF8` 兜底，
   并有 2 条回归单测（含"任意长度截断后都必须是合法 UTF-8"）。

@@ -3239,4 +3239,228 @@ func TestAcceptanceSuite(t *testing.T) {
 		cc.note("库内原有 %d 次跑批；limit=3 取回 %v 且与 eval_run 逐 id 一致；补 55 条夹具后 limit=100000 被夹到 %d 条（上限真被触发）；列表行不含 report_json",
 			total, got, len(bigList))
 	})
+
+	run("AC-57", "放量档位：没证据不放行、坏信号自动收回 L0，且真的接进了放行判定", func(cc *caseCtx) {
+		if db == nil {
+			cc.skip("未配置 CRONY_TEST_MYSQL_DSN：无法自造评测证据，也无法核对 rollout_state 的落库与清理")
+		}
+		tag := strings.TrimSpace(os.Getenv("CRONY_ACC_RUN_TAG"))
+		if tag == "" {
+			tag = "acc-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+		}
+		rollEnv := strings.TrimSpace(os.Getenv("CRONY_ACC_AUTONOMY_ENV"))
+		if rollEnv == "" {
+			rollEnv = "default"
+		}
+		// probe 刻意用一个**没有信用历史**的工具名：这样"实际生效级别"只可能被配置上限或
+		// 放量档位夹住，断言不会被前面用例留下的信用行带偏（放量与信用是两层上限，
+		// 必须能分开观测，否则这条用例证明不了是放量在起作用）。
+		probe := "acc57-probe"
+		marker := "acc57-" + tag
+		wipe := func() {
+			_, _ = db.Exec("delete from eval_run where set_name = ?", marker)
+			_, _ = db.Exec("delete from rollout_state where env = ?", rollEnv)
+		}
+		cc.t.Cleanup(wipe)
+		// 起始先清一次：上一轮异常中断会留下残行，残行会让"起始不表态"的断言变成碰运气。
+		wipe()
+
+		insertRun := func(cases, passed, failed int) int64 {
+			nowUni := time.Now().Unix()
+			score := 0.0
+			if cases > 0 {
+				score = float64(passed) / float64(cases)
+			}
+			res, ierr := db.Exec(
+				"insert into eval_run (set_name, set_version, mode, `trigger`, cases, passed, failed, "+
+					"skipped, sessions, score, started_at, finished_at, duration_ms, created) "+
+					"values (?, 'acc-fixture', 'replay', 'acceptance', ?, ?, ?, 0, 0, ?, ?, ?, 1, ?)",
+				marker, cases, passed, failed, score, nowUni, nowUni, nowUni)
+			if ierr != nil {
+				cc.t.Fatalf("插入 AC-57 跑批夹具失败: %v", ierr)
+			}
+			id, _ := res.LastInsertId()
+			return id
+		}
+
+		// 1) 没有放量记录 = 不表态（沿用配置）。这正是"开开关本身零回归"的依据。
+		state0, err := c.postOK("/ops/rollout/state", map[string]any{"env": rollEnv})
+		if err != nil {
+			cc.t.Fatalf("读放量状态失败: %v", err)
+		}
+		if asStr(state0["env"]) != rollEnv {
+			cc.t.Fatalf("状态里的环境段应为 %q，实际 %q", rollEnv, asStr(state0["env"]))
+		}
+		if !asBool(state0["enabled"]) {
+			cc.skip("本进程未把放量档位接进放行判定（tools.rollout-gate=false）：放量接口仍在，但闸门效果无从观测")
+		}
+		if asStr(state0["max_stage"]) != "L2" {
+			cc.t.Fatalf("放量允许的最高档应为 L2（L3 要改配置，不靠放量），实际 %q", asStr(state0["max_stage"]))
+		}
+		if state0["state"] != nil {
+			cc.t.Fatalf("起始不该有放量记录（本用例已清库），实际 %+v", state0["state"])
+		}
+		eff0, err := c.postOK("/ops/autonomy/effective", map[string]any{"tool": probe, "env": rollEnv})
+		if err != nil {
+			cc.t.Fatalf("读生效级别失败: %v", err)
+		}
+		if asStr(eff0["effective"]) != asStr(eff0["configured_ceiling"]) {
+			cc.t.Fatalf("没有放量记录时应沿用配置上限 %q，实际生效 %q",
+				asStr(eff0["configured_ceiling"]), asStr(eff0["effective"]))
+		}
+
+		// 2) 造一个"评测判红"的事实，调自动降级：这件事**不需要任何人批准**。
+		bad := insertRun(4, 0, 4)
+		eval, err := c.postOK("/ops/rollout/evaluate", map[string]any{"env": rollEnv})
+		if err != nil {
+			cc.t.Fatalf("自动降级评估失败: %v", err)
+		}
+		if !asBool(eval["tightened"]) {
+			cc.t.Fatalf("最近一次评测 4 条全部不通过，却没有触发自动降级: %+v", eval)
+		}
+		blockers := asSlice(eval["blockers"])
+		if len(blockers) == 0 {
+			cc.t.Fatal("自动降级必须写明坏信号（没有解释的 L0 无法复盘）")
+		}
+		joined := ""
+		for _, b := range blockers {
+			joined += asStr(b) + "；"
+		}
+		if !strings.Contains(joined, "不通过") {
+			cc.t.Fatalf("坏信号必须点名评测判红，实际 %q", joined)
+		}
+		st := asMap(eval["state"])
+		if asStr(st["stage"]) != "L0" || !asBool(st["frozen"]) {
+			cc.t.Fatalf("自动降级结果应为 stage=L0/frozen=true，实际 %+v", st)
+		}
+		if !strings.Contains(asStr(st["reason"]), "run_id="+strconv.FormatInt(bad, 10)) {
+			cc.t.Fatalf("变档原因必须能追到那一次跑批（期望含 run_id=%d），实际 %q", bad, truncate(asStr(st["reason"]), 200))
+		}
+
+		// 3) 闸门效果：放量 L0 必须**真的**夹住生效级别，否则"接进放行判定"只是句口号。
+		eff1, err := c.postOK("/ops/autonomy/effective", map[string]any{"tool": probe, "env": rollEnv})
+		if err != nil {
+			cc.t.Fatalf("读生效级别失败: %v", err)
+		}
+		if !asBool(eff1["credit_enabled"]) {
+			cc.t.Fatalf("本进程应已接入自治信用（tools.autonomy-credit=true），当前 %+v；本用例的闸门断言前提不成立", eff1)
+		}
+		if asStr(eff1["effective"]) != "L0" {
+			cc.t.Fatalf("放量档位已收到 L0，生效级别却是 %q —— 放量没有接进放行判定", asStr(eff1["effective"]))
+		}
+
+		// 4) 坏信号还在时加宽必须被拒，且逐条说明为什么（不是一句笼统的"失败"）。
+		status, bad1, err := c.do(http.MethodPost, "/ops/rollout/widen",
+			map[string]any{"env": rollEnv, "stage": "L2"}, true)
+		if err != nil {
+			cc.t.Fatalf("加宽请求失败: %v", err)
+		}
+		if status != http.StatusOK || bad1.Code != 1026 {
+			cc.t.Fatalf("有坏信号时加宽应被拒（HTTP 200/code 1026），实际 HTTP %d/code %d msg=%q",
+				status, bad1.Code, truncate(bad1.Msg, 200))
+		}
+		if !strings.Contains(bad1.Msg, "拒绝放量") || !strings.Contains(bad1.Msg, "不通过") {
+			cc.t.Fatalf("拒绝理由必须点名证据（期望含『拒绝放量』与『不通过』），实际 %q", truncate(bad1.Msg, 240))
+		}
+
+		// 5) 换成一份"干净且更新"的评测事实：加宽只应该卡在**真实存在**的问题上。
+		insertRun(4, 4, 0)
+		state1, err := c.postOK("/ops/rollout/state", map[string]any{"env": rollEnv})
+		if err != nil {
+			cc.t.Fatalf("读放量状态失败: %v", err)
+		}
+		evd := asMap(state1["evidence"])
+		if int(asNum(evd["eval_failed"])) != 0 {
+			cc.t.Fatalf("最近一次跑批已换成全绿，证据却仍报失败: %+v", evd)
+		}
+		if int64(asNum(evd["eval_run_id"])) <= bad {
+			cc.t.Fatalf("放行依据必须取**最近一次**跑批（应大于 %d），实际 run_id=%v", bad, evd["eval_run_id"])
+		}
+		widenReasons := asSlice(state1["widen_reasons"])
+		for _, r := range widenReasons {
+			if strings.Contains(asStr(r), "评测") {
+				cc.t.Fatalf("评测已全绿，却仍以评测为由拒绝加宽：%q", asStr(r))
+			}
+		}
+		sloBreaches := int(asNum(evd["slo_breaches"]))
+		widen, werr := c.postOK("/ops/rollout/widen", map[string]any{"env": rollEnv, "stage": "L2"})
+		if sloBreaches == 0 {
+			if werr != nil {
+				cc.t.Fatalf("证据齐全且干净（评测全绿、SLO 无违约）时加宽应成功，实际被拒: %v", werr)
+			}
+			wst := asMap(widen["state"])
+			if asStr(wst["stage"]) != "L2" {
+				cc.t.Fatalf("加宽后档位应为 L2，实际 %q", asStr(wst["stage"]))
+			}
+			if asNum(wst["widened_at"]) <= 0 {
+				cc.t.Fatalf("加宽后必须记录 widened_at（否则不知道这档是什么时候放的）: %+v", wst)
+			}
+			if !strings.Contains(asStr(wst["reason"]), "证据放行") || asBool(wst["frozen"]) {
+				cc.t.Fatalf("加宽成功应记为『证据放行』且解除冻结，实际 %+v", wst)
+			}
+		} else {
+			// 库里此刻真的存在 SLO 违约：那"拒绝放量并点名 SLO"本身就是闸门的正确行为，
+			// 评测部分的加宽判定由内核单测穷举覆盖（common/pkg/rollout）。
+			if werr == nil {
+				cc.t.Fatalf("SLO 违约 %d 条时加宽却成功了 —— 放量闸门没把 SLO 证据当回事", sloBreaches)
+			}
+			hasSlo := false
+			for _, r := range widenReasons {
+				if strings.Contains(asStr(r), "SLO 违约") {
+					hasSlo = true
+				}
+			}
+			if !hasSlo {
+				cc.t.Fatalf("加宽被拒却没给出 SLO 违约的理由（实际理由 %v）", widenReasons)
+			}
+		}
+
+		// 6) 人工收紧：收紧不需要证据、永不拒绝；收紧后连"建议"都要收回。
+		tight, err := c.postOK("/ops/rollout/tighten", map[string]any{"env": rollEnv, "reason": "AC-57 收尾"})
+		if err != nil {
+			cc.t.Fatalf("人工收紧失败（收紧不该被拒）: %v", err)
+		}
+		tst := asMap(tight["state"])
+		if asStr(tst["stage"]) != "L0" || !asBool(tst["frozen"]) {
+			cc.t.Fatalf("人工收紧结果应为 stage=L0/frozen=true，实际 %+v", tst)
+		}
+		eff2, err := c.postOK("/ops/autonomy/effective", map[string]any{"tool": probe, "env": rollEnv})
+		if err != nil {
+			cc.t.Fatalf("读生效级别失败: %v", err)
+		}
+		if asStr(eff2["effective"]) != "L0" {
+			cc.t.Fatalf("收紧到 L0 后生效级别应为 L0，实际 %q", asStr(eff2["effective"]))
+		}
+
+		// 7) 收拾干净必须回到"不表态"：可复跑才算验完（残行会把下一轮变成碰运气）。
+		wipe()
+		state2, err := c.postOK("/ops/rollout/state", map[string]any{"env": rollEnv})
+		if err != nil {
+			cc.t.Fatalf("清理后读状态失败: %v", err)
+		}
+		if state2["state"] != nil {
+			cc.t.Fatalf("清理后仍有放量记录: %+v", state2["state"])
+		}
+		eff3, err := c.postOK("/ops/autonomy/effective", map[string]any{"tool": probe, "env": rollEnv})
+		if err != nil {
+			cc.t.Fatalf("读生效级别失败: %v", err)
+		}
+		if asStr(eff3["effective"]) != asStr(eff3["configured_ceiling"]) {
+			cc.t.Fatalf("清掉放量记录后生效级别应回到配置上限 %q，实际 %q",
+				asStr(eff3["configured_ceiling"]), asStr(eff3["effective"]))
+		}
+		var resid, evalResid int
+		_ = db.QueryRow("select count(*) from rollout_state where env = ?", rollEnv).Scan(&resid)
+		_ = db.QueryRow("select count(*) from eval_run where set_name = ?", marker).Scan(&evalResid)
+		if resid != 0 || evalResid != 0 {
+			cc.t.Fatalf("夹具未清干净：rollout_state 残留 %d 行、eval_run 残留 %d 行", resid, evalResid)
+		}
+
+		widenOutcome := "加宽到 L2 成功（评测全绿且 SLO 无违约）"
+		if sloBreaches > 0 {
+			widenOutcome = fmt.Sprintf("加宽仍被拒 —— 库内此刻 SLO 违约 %d 条（闸门把 SLO 证据算进去了）", sloBreaches)
+		}
+		cc.note("无记录→沿用上限 %s；评测 4 条不通过(run_id=%d)→自动收回 L0 且生效级别实测 L0；坏信号下加宽被拒 code=1026；全绿后 %s；人工收紧→L0；清理后 rollout_state/eval_run 残留 0 行",
+			asStr(eff0["configured_ceiling"]), bad, widenOutcome)
+	})
 }

@@ -92,6 +92,14 @@ const (
 	ErrorHealDenied = 1024
 	// ErrorHealInvalid 自愈请求非法（例如指定的执行记录不存在、没有可处置的失败）。
 	ErrorHealInvalid = 1025
+
+	// 阶段 5 补全（放量档位）业务码。
+	//
+	// 为什么"放量被拒"要单独一个码而不是复用 1005/1000：它**不是权限问题**，
+	// 也不是服务端故障，而是"证据不成立"——前端据此把逐条原因渲染成检查清单
+	// （缺评测 / 评测判红 / SLO 违约 / 证据过期），而不是弹一句"操作失败"。
+	// ErrorRolloutDenied 放量被拒（消息里带逐条原因）。
+	ErrorRolloutDenied = 1026
 )
 
 func Result(code int, data interface{}, msg string, c *gin.Context) {

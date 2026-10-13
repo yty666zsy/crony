@@ -116,34 +116,36 @@ func InitAgentRuntime() (*agentruntime.Runtime, error) {
 		writeNames = nil
 	}
 
-	// 阶段 5：把「自治信用」接进放行判定（可选，默认关闭）。
+	// 阶段 5：把「自治信用」与「放量档位」接进放行判定（两个开关都默认关闭）。
 	//
-	// 开启后：写动作的实际生效级别 = min(配置自治级别, 该动作信用级别)。
-	// 信用只能**收紧**（出了不良后果就冻结回 L1），不能越权升过配置上限；
-	// 没有历史的动作沿用配置。默认关闭 = 与阶段 4 行为完全一致（零回归）。
-	if cfg.Tools.AutonomyCredit {
-		resolver := AutonomyResolverFor(cfg.Tools.AutonomyEnv)
-		rt.SetAutonomyResolver(resolver)
-		// 阶段 5 补全：把**结果回写**也接上，让信用自己会动（而不是等人喂数据）。
-		//
-		// 只在真正执行过的写动作后回写：成功累积、失败降级冻结（判定在信用内核里）。
-		// 与解析器共用同一个环境段（ConfiguredAutonomyEnv），避免"放行按 acc、回写按 prod"两套口径。
-		rt.SetAutonomyOutcomeRecorder(func(tool string, success bool) {
-			scope := AutonomyScope(tool, ConfiguredAutonomyEnv())
-			row, err := DefaultAutonomyService.ObserveAutonomy(scope, success)
-			if err != nil {
-				logger.GetLogger().Warn(fmt.Sprintf("[agent] 自治信用回写失败 scope=%s success=%v: %v", scope, success, err))
-				return
-			}
-			logger.GetLogger().Info(fmt.Sprintf(
-				"[agent] 自治信用回写 scope=%s success=%v -> 等级=%s 连成=%d 冻结=%v",
-				scope, success, autonomy.Level(row.Level).Name(), row.Streak, row.Frozen))
-		})
+	// 开启后：写动作的实际生效级别 = min(配置自治级别, 信用级别, 放量档位)。
+	// 信用与实际都只能**收紧**，不能越权升过配置上限；两者都不表态时沿用配置。
+	// 默认关闭 = 与阶段 4 行为完全一致（零回归）。
+	creditOn, rolloutOn := cfg.Tools.AutonomyCredit, cfg.Tools.RolloutGate
+	if creditOn || rolloutOn {
+		rt.SetAutonomyResolver(RollingGateResolver(cfg.Tools.AutonomyEnv, creditOn, rolloutOn))
+		if creditOn {
+			// 阶段 5 补全：把**结果回写**也接上，让信用自己会动（而不是等人喂数据）。
+			//
+			// 只在真正执行过的写动作后回写：成功累积、失败降级冻结（判定在信用内核里）。
+			// 与解析器共用同一个环境段（ConfiguredAutonomyEnv），避免"放行按 acc、回写按 prod"两套口径。
+			rt.SetAutonomyOutcomeRecorder(func(tool string, success bool) {
+				scope := AutonomyScope(tool, ConfiguredAutonomyEnv())
+				row, err := DefaultAutonomyService.ObserveAutonomy(scope, success)
+				if err != nil {
+					logger.GetLogger().Warn(fmt.Sprintf("[agent] 自治信用回写失败 scope=%s success=%v: %v", scope, success, err))
+					return
+				}
+				logger.GetLogger().Info(fmt.Sprintf(
+					"[agent] 自治信用回写 scope=%s success=%v -> 等级=%s 连成=%d 冻结=%v",
+					scope, success, autonomy.Level(row.Level).Name(), row.Streak, row.Frozen))
+			})
+		}
 		logger.GetLogger().Info(fmt.Sprintf(
-			"[agent] 自治信用已接入放行判定：环境段=%q（scope 形如 <工具>@%s）；配置上限=%s 只可收紧不可越权；无历史沿用配置",
-			strings.TrimSpace(cfg.Tools.AutonomyEnv), ConfiguredAutonomyEnv(), toolsPolicy.Autonomy))
+			"[agent] 放行判定已接入：环境段=%q；配置上限=%s；自治信用=%v；放量档位=%v（三者取最严，均不可越权升过配置；无表态则沿用配置）",
+			ConfiguredAutonomyEnv(), toolsPolicy.Autonomy, creditOn, rolloutOn))
 	} else {
-		logger.GetLogger().Info("[agent] 自治信用未接入（tools.autonomy-credit=false）：放行判定完全按配置的自治级别")
+		logger.GetLogger().Info("[agent] 放行判定按配置的自治级别（tools.autonomy-credit=false 且 tools.rollout-gate=false）")
 	}
 	logger.GetLogger().Info(fmt.Sprintf(
 		"[agent] Agent 运行时已就绪：provider=%s offline=%v model=%s 工具=%s（诊断证据来源：数据库 + 节点水位 + 节点本机只读探测）",

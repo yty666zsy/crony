@@ -447,3 +447,99 @@ func (o *OpsRouter) AutonomyEffective(c *gin.Context) {
 	}
 	resp.OkWithDetailed(service.DefaultAutonomyService.EffectiveForTool(req.Tool, req.Env), "ok", c)
 }
+
+// ---------- 放量档位（阶段 5 补全） ----------
+//
+// 四个接口的分工刻意不对称，因为**收紧与加宽的风险不对称**：
+//   - state   只读：现在什么档、凭什么、再放一档卡在哪；
+//   - evaluate 自动降级：采集证据，命中坏信号就收回 L0（不需要任何人批准）；
+//   - tighten 人工收紧：永远放行（收紧只会让系统更保守）；
+//   - widen   加宽：必须带新鲜且干净的证据，缺什么就拒绝并说明缺什么。
+
+// RolloutState POST /ops/rollout/state 读某环境的放量状态与"再放一档"的判定依据。
+func (o *OpsRouter) RolloutState(c *gin.Context) {
+	tag := "[ops/rollout/state]"
+	var req struct {
+		Env string `json:"env"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil && !isEOF(err) {
+		resp.FailWithMessage(resp.ErrorRequestParameter, tag+" 请求参数错误: "+err.Error(), c)
+		return
+	}
+	resp.OkWithDetailed(service.DefaultRolloutService.RolloutViewOf(req.Env), "ok", c)
+}
+
+// RolloutEvaluate POST /ops/rollout/evaluate 自动降级：有坏信号就收回 L0。
+//
+// 幂等：没有坏信号时什么都不改（tightened=false），可以放心被定时器反复调用。
+func (o *OpsRouter) RolloutEvaluate(c *gin.Context) {
+	tag := "[ops/rollout/evaluate]"
+	var req struct {
+		Env string `json:"env"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil && !isEOF(err) {
+		resp.FailWithMessage(resp.ErrorRequestParameter, tag+" 请求参数错误: "+err.Error(), c)
+		return
+	}
+	row, ev, blockers, tightened, err := service.DefaultRolloutService.RolloutEvaluate(req.Env)
+	if err != nil {
+		resp.FailWithMessage(resp.ERROR, tag+" 评估失败: "+err.Error(), c)
+		return
+	}
+	note := "没有坏信号，放量档位未改动"
+	if tightened {
+		note = "命中坏信号，已自动收回 L0"
+	}
+	resp.OkWithDetailed(gin.H{
+		"state": row, "evidence": ev, "blockers": blockers, "tightened": tightened, "note": note,
+	}, "ok", c)
+}
+
+// RolloutTighten POST /ops/rollout/tighten 人工收紧（默认 L0）。收紧永不拒绝。
+func (o *OpsRouter) RolloutTighten(c *gin.Context) {
+	tag := "[ops/rollout/tighten]"
+	var req struct {
+		Env    string `json:"env"`
+		Stage  string `json:"stage"`
+		Reason string `json:"reason"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil && !isEOF(err) {
+		resp.FailWithMessage(resp.ErrorRequestParameter, tag+" 请求参数错误: "+err.Error(), c)
+		return
+	}
+	row, err := service.DefaultRolloutService.RolloutTighten(req.Env, req.Stage, req.Reason)
+	if err != nil {
+		resp.FailWithMessage(resp.ErrorRequestParameter, tag+" 收紧失败: "+err.Error(), c)
+		return
+	}
+	resp.OkWithDetailed(gin.H{"state": row, "note": "已收紧（收紧不需要证据）"}, "ok", c)
+}
+
+// RolloutWiden POST /ops/rollout/widen 加宽到目标档位（必须带证据）。
+//
+// 拒绝时返回专门的业务码 + **逐条原因**：运维要能一眼看出"是评测没过还是 SLO 在违约"，
+// 而不是收到一句笼统的"放量失败"。
+func (o *OpsRouter) RolloutWiden(c *gin.Context) {
+	tag := "[ops/rollout/widen]"
+	var req struct {
+		Env   string `json:"env"`
+		Stage string `json:"stage"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.Stage) == "" {
+		resp.FailWithMessage(resp.ErrorRequestParameter, tag+" 需要 stage（L1/L2）", c)
+		return
+	}
+	row, reasons, ev, err := service.DefaultRolloutService.RolloutWiden(req.Env, req.Stage)
+	if err != nil {
+		resp.FailWithMessage(resp.ERROR, tag+" 加宽失败: "+err.Error(), c)
+		return
+	}
+	if len(reasons) > 0 {
+		resp.FailWithMessage(resp.ErrorRolloutDenied, tag+" 拒绝放量（证据不成立）: "+strings.Join(reasons, "；"), c)
+		return
+	}
+	resp.OkWithDetailed(gin.H{
+		"state": row, "evidence": ev,
+		"note": "已加宽：证据来自最近一次评测跑批与最近一轮 SLO 评估，坏信号出现时会自动收回 L0",
+	}, "ok", c)
+}
