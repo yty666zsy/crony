@@ -276,6 +276,74 @@ func TestDraftJobHTTP(t *testing.T) {
 	}
 }
 
+// TestNLJobSchemaToleratesPartialHTTPBlock 可选 http 块的各种残缺形态都不能把整份草案判死。
+//
+// 真机实测（DeepSeek V4.1 Flash）：对 **cmd** 任务，模型也会随手带一个残缺的 http 块，
+// 形态至少有 null / {"method":"GET","url":""} / {"url":"..."}（缺 method）三种，
+// 且同一提示词下不可复现地摇摆。它们都是"无意义但无害"的噪音——真正的语义强制
+// （http 任务必须有合法 url、method 归一）在 fillDraft/ValidateDraft 的代码里。
+// 若在 Schema 层硬卡，一份完全可用的 cmd 草案会被整份判死（AC-10 真机验收就因此 FAIL）。
+func TestNLJobSchemaToleratesPartialHTTPBlock(t *testing.T) {
+	schema := NLJobSchema()
+	if err := schema.Valid(); err != nil {
+		t.Fatalf("Schema 自身必须合法: %v", err)
+	}
+
+	// 1) 完全没有 http 字段（http 是可选块）
+	absent := validDraft()
+	delete(absent, "http")
+	if err := schema.Validate(absent); err != nil {
+		t.Fatalf("缺少 http 块不该失败: %v", err)
+	}
+
+	// 2) 各种残缺形态
+	cases := map[string]interface{}{
+		"null":      nil,
+		"缺 method":  map[string]interface{}{"url": "https://example.com/health"},
+		"url 为空":    map[string]interface{}{"method": "GET", "url": ""},
+		"空对象":       map[string]interface{}{},
+		"整块是字符串":    "",
+		"method 小写": map[string]interface{}{"method": "get", "url": "https://example.com/health"},
+	}
+	for name, httpValue := range cases {
+		obj := validDraft()
+		obj["http"] = httpValue
+		if err := schema.Validate(obj); err != nil {
+			t.Fatalf("残缺 http 块（%s）不该让整份草案失败: %v", name, err)
+		}
+	}
+}
+
+// TestDraftJobIgnoresStrayHTTPBlockForCmd cmd 任务不该把模型随手带的 http 块带进草案。
+func TestDraftJobIgnoresStrayHTTPBlockForCmd(t *testing.T) {
+	loc := shanghai(t)
+	payload := validDraft()
+	payload["http"] = map[string]interface{}{"method": "GET", "url": ""} // 真机出现过的噪音形态
+	gateway, fp := newGateway()
+	fp.WithResponder(func(llm.Request) (llm.Completion, error) { return llm.FakeJSON(payload), nil })
+
+	a := New(gateway, nil, DefaultConfig())
+	req := draftRequest(loc)
+	draft, err := DraftJob(context.Background(), a, req)
+	if err != nil {
+		t.Fatalf("残缺 http 块不该让 cmd 草案失败: %v", err)
+	}
+	if draft.HTTP != nil {
+		t.Fatalf("cmd 任务不应保留 http 块（与 ValidateDraft 一致）: %+v", draft.HTTP)
+	}
+	if len(draft.Command) != 5 {
+		t.Fatalf("命令应正常解析: %+v", draft.Command)
+	}
+	// 确认阶段复验后也必须仍然没有 http 块
+	out, err := ValidateDraft(draft, req.Now, loc.String())
+	if err != nil {
+		t.Fatalf("确认阶段复验应通过: %v", err)
+	}
+	if out.HTTP != nil {
+		t.Fatalf("确认阶段也应归一为无 http: %+v", out.HTTP)
+	}
+}
+
 func TestDraftJobRejectsEmptyText(t *testing.T) {
 	gateway, _ := newGateway()
 	a := New(gateway, nil, DefaultConfig())

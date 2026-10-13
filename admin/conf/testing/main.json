@@ -70,6 +70,15 @@
     "stacktrace-key": "stacktrace",
     "log-in-console": false
   },
+  "llm": {
+    "#policy": "阶段 2 引入的模型接入。默认 enabled=false = 全离线（不拨任何模型），保证新部署零回归、零外联。打开前请先确认端点与连通性。",
+    "#endpoint": "下面这一组 = opencode 当前使用的同一个模型：provider 111 (workbuddy) 的 cn:deepseek-v4.1-flash，OpenAI 兼容 + function calling。阶段 5 的真机验收（AC-07/AC-10/AC-16/AC-26）就是用它跑通的。",
+    "#api-key": "**api-key 永远不写进配置文件**：只能由环境变量 CRONY_LLM_API_KEY 注入（对应配置键 llm.api-key）。配置文件里写密钥等于把密钥提交进仓库。",
+    "enabled": false,
+    "provider": "openai",
+    "base-url": "http://122.159.210.211:17864/v1",
+    "model": "cn:deepseek-v4.1-flash"
+  },
   "tools": {
     "#policy": "阶段 4 工具网关策略。默认一律是『关着』的那一档：不注册写工具、写动作一律需要人工审批。放开某一项都必须是有意识的决定，而不是忘配置的结果。",
     "#autonomy": "L0=只建议(连写工具都不注册) / L1=写动作一律人工审批(默认) / L2=白名单内自动 / L3=非破坏性全自动",

@@ -71,6 +71,15 @@
     "stacktrace-key": "stacktrace",
     "log-in-console": false
   },
+  "llm": {
+    "#policy": "阶段 2 引入的模型接入。默认 enabled=false = 全离线（不拨任何模型）。生产中打开前请先复核 base-url 端点的合规性与 TLS。",
+    "#endpoint": "示例值取自 opencode 当前使用的模型（provider 111 / cn:deepseek-v4.1-flash，OpenAI 兼容 + function calling）。生产环境应替换成你自己的合规端点。",
+    "#api-key": "**api-key 永远不写进配置文件**：只能由环境变量 CRONY_LLM_API_KEY 注入（对应配置键 llm.api-key）。配置文件里写密钥等于把密钥提交进仓库。",
+    "enabled": false,
+    "provider": "openai",
+    "base-url": "http://122.159.210.211:17864/v1",
+    "model": "cn:deepseek-v4.1-flash"
+  },
   "tools": {
     "#policy": "阶段 4 工具网关策略（生产默认最保守：只读 + 写动作一律人工审批）。",
     "#autonomy": "L0=只建议 / L1=写动作一律人工审批(默认) / L2=白名单内自动 / L3=非破坏性全自动",

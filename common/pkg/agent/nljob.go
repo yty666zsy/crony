@@ -121,10 +121,26 @@ func (d JobDraft) Explain() string {
 
 // NLJobSchema 起草输出的 JSON Schema。
 func NLJobSchema() *jsonschema.Schema {
-	httpObj := jsonschema.Object(map[string]*jsonschema.Schema{
-		"method": jsonschema.String("HTTP 方法").WithEnum("GET", "POST"),
-		"url":    jsonschema.String("请求地址").WithLength(1, 1024),
-	}, "method", "url")
+	// http 块是**可选**的，且只在 job_type=http 时才有语义。
+	//
+	// 这里刻意不做硬约束（不把 method/url 设为必填、也不限定外层类型）：
+	// 真机实测（DeepSeek V4.1 Flash），模型对 **cmd** 任务也会随手带一个残缺的 http 块，
+	// 形态至少有 `null`、`{"method":"GET","url":""}`、`{"url":"..."}`（缺 method）三种。
+	// 它们都是"无意义但无害"的噪音，若在 Schema 层硬卡，一份完全可用的 cmd 草案会被
+	// **整份判死**（AC-10 真机验收就是这样 FAIL 的），而模型对此毫无办法——
+	// 因为 error 只能回给修复轮，模型下一轮照样可能再漏。
+	//
+	// "http 任务必须有合法 url、method 归一为 GET/POST" 由 fillDraft / ValidateDraft
+	// 用**代码**强制，并给出可修复的提示，比 Schema 更准也更友好。
+	// 另外：本 Schema 只做本地校验、**不会发给模型**（wire 只发 response_format=json_object，
+	// 见 common/pkg/llm/openai.go），所以放宽它不会削弱对模型的引导，只去掉误杀。
+	httpObj := &jsonschema.Schema{
+		Description: "仅 job_type=http 时使用（method 缺省 GET）；cmd 任务可省略或置 null",
+		Properties: map[string]*jsonschema.Schema{
+			"method": jsonschema.String("HTTP 方法（GET/POST，缺省 GET）").WithLength(0, 16),
+			"url":    jsonschema.String("请求地址（仅 job_type=http 时必填）").WithLength(0, 1024),
+		},
+	}
 
 	return jsonschema.Object(map[string]*jsonschema.Schema{
 		"name":            jsonschema.String("任务名").WithLength(1, 120),
@@ -406,14 +422,17 @@ func fillDraft(draft *JobDraft, obj map[string]interface{}, loc *time.Location, 
 		return cerr
 	}
 	draft.Command = cmd
-	if raw, ok := obj["http"].(map[string]interface{}); ok {
-		draft.HTTP = &HTTPDraft{
-			Method: strings.ToUpper(strings.TrimSpace(llm.StringOr(raw, "method", ""))),
-			URL:    strings.TrimSpace(llm.StringOr(raw, "url", "")),
-		}
-	}
 	switch draft.JobType {
 	case "http":
+		// 只在 http 任务里解析 http 块：cmd 任务即使带了残缺的 http 块也直接忽略，
+		// 与 ValidateDraft（确认阶段把 cmd 的 HTTP 归一为 nil）保持一致，
+		// 避免草案里带出 `http:{method:"GET",url:""}` 这种会误导控制台的噪音。
+		if raw, ok := obj["http"].(map[string]interface{}); ok {
+			draft.HTTP = &HTTPDraft{
+				Method: strings.ToUpper(strings.TrimSpace(llm.StringOr(raw, "method", ""))),
+				URL:    strings.TrimSpace(llm.StringOr(raw, "url", "")),
+			}
+		}
 		if draft.HTTP == nil || draft.HTTP.URL == "" {
 			return fmt.Errorf("%w: job_type 为 http 但缺少 http.url", ErrDraftInvalid)
 		}
