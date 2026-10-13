@@ -3799,4 +3799,222 @@ func TestAcceptanceSuite(t *testing.T) {
 		}
 		cc.note("repairs=%v（Go 类型 %T）—— 修正轮数，不是问题清单", raw, raw)
 	})
+
+	// -----------------------------------------------------------------------
+	// 阶段 5 收尾（PHASE17）：放量安全栈收口 —— 自动降级挂进常驻循环。
+	//
+	// PHASE13 把「坏信号自动收回 L0」的**判定**做成了全自动，但在此之前只能靠人调
+	// POST /ops/rollout/evaluate 驱动 —— 循环缺失，"自动"名不副实。这一组把
+	// 「定时真的会收回」「没记录不新造」「冷却真的拦得住」三件事钉死；
+	// 判定内核本身另由 admin/internal/service 的 AutoEvalSkip 单测穷举。
+	// -----------------------------------------------------------------------
+
+	// 共享夹具：插一条"判红"的评测跑批（自动降级的坏信号来源）。
+	insertBadEval := func(setName string) int64 {
+		nowUni := time.Now().Unix()
+		res, ierr := db.Exec(
+			"insert into eval_run (set_name, set_version, mode, `trigger`, cases, passed, failed, "+
+				"skipped, sessions, score, started_at, finished_at, duration_ms, created) "+
+				"values (?, 'acc-fixture', 'replay', 'acceptance', 4, 0, 4, 0, 0, 0, ?, ?, 1, ?)",
+			setName, nowUni, nowUni, nowUni)
+		if ierr != nil {
+			t.Fatalf("插入放量验收跑批夹具失败: %v", ierr)
+		}
+		id, _ := res.LastInsertId()
+		return id
+	}
+	// 共享夹具：直接落一条"已放量"的状态（模拟运维此前凭证据加宽过）。
+	seedRolloutState := func(env, stage string, tightenedAt int64) {
+		nowUni := time.Now().Unix()
+		if _, err := db.Exec(
+			"insert into rollout_state (env, stage, frozen, reason, evidence_json, widened_at, tightened_at, created, updated) "+
+				"values (?, ?, 0, '验收夹具：模拟一次已凭证据加宽', '', ?, ?, ?, ?)",
+			env, stage, nowUni, tightenedAt, nowUni, nowUni); err != nil {
+			t.Fatalf("写入 rollout_state 夹具失败: %v", err)
+		}
+	}
+
+	run("AC-68", "放量状态契约：必须给出自动降级循环的开关/节拍/冷却，并说明下轮会不会被守卫跳过", func(cc *caseCtx) {
+		st, err := c.postOK("/ops/rollout/state", map[string]any{})
+		if err != nil {
+			cc.t.Fatalf("读放量状态失败: %v", err)
+		}
+		for _, k := range []string{"auto_eval_enabled", "auto_eval_interval_seconds", "auto_eval_cooldown_seconds"} {
+			if _, ok := st[k]; !ok {
+				cc.t.Fatalf("放量状态缺自动降级字段 %q（控制台面板靠它解释『循环开着却没动作』），实际键=%v", k, st)
+			}
+		}
+		if iv := int(asNum(st["auto_eval_interval_seconds"])); iv <= 0 {
+			cc.t.Fatalf("自动降级节拍必须是正整数秒，实际 %v", st["auto_eval_interval_seconds"])
+		}
+		if cd := int64(asNum(st["auto_eval_cooldown_seconds"])); cd < 0 {
+			cc.t.Fatalf("自动降级冷却不得为负，实际 %v", st["auto_eval_cooldown_seconds"])
+		}
+		if st["state"] == nil && asStr(st["auto_eval_skip_reason"]) == "" {
+			cc.t.Fatal("没有放量记录时，状态必须说明『下轮为什么不会评估』（否则运维只看到循环开着却毫无动作）")
+		}
+		cc.note("auto_eval_enabled=%v 节拍=%ds 冷却=%ds；无记录时的跳过原因=%q",
+			asBool(st["auto_eval_enabled"]), int(asNum(st["auto_eval_interval_seconds"])),
+			int64(asNum(st["auto_eval_cooldown_seconds"])), asStr(st["auto_eval_skip_reason"]))
+	})
+
+	run("AC-69", "自动降级『只收回、不新造』：没有放量记录的环境，循环不得凭空写一条 L0（否则打开开关就是行为突变）", func(cc *caseCtx) {
+		if db == nil {
+			cc.skip("未配置 CRONY_TEST_MYSQL_DSN：无法核对 rollout_state 是否被凭空写入")
+		}
+		marker := "acc69-" + accRunTag()
+		base, err := c.postOK("/ops/rollout/state", map[string]any{})
+		if err != nil {
+			cc.t.Fatalf("读放量状态失败: %v", err)
+		}
+		rollEnv := asStr(base["env"])
+		wipe := func() {
+			_, _ = db.Exec("delete from eval_run where set_name = ?", marker)
+			_, _ = db.Exec("delete from rollout_state where env = ?", rollEnv)
+		}
+		cc.t.Cleanup(wipe)
+		wipe() // 上一轮异常中断会留残行，残行会让"不新造"的断言变成碰运气
+
+		before, err := c.postOK("/ops/rollout/state", map[string]any{"env": rollEnv})
+		if err != nil {
+			cc.t.Fatalf("读放量状态失败: %v", err)
+		}
+		if before["state"] != nil {
+			cc.t.Fatalf("起始不该有放量记录（本用例已清库），实际 %+v", before["state"])
+		}
+		if !asBool(before["auto_eval_enabled"]) {
+			cc.skip("本进程未开启放量自动降级（tools.rollout-auto-eval=false）：循环不会动作，无从观测『不新造』")
+		}
+		skipReason := asStr(before["auto_eval_skip_reason"])
+		if !strings.Contains(skipReason, "还没有放量记录") {
+			cc.t.Fatalf("无记录时守卫原因应点名『还没有放量记录』（只收回、不新造），实际 %q", skipReason)
+		}
+		// 灌注一个坏信号：确保循环不是因为"没坏信号"才不动手。
+		insertBadEval(marker)
+		interval := int(asNum(before["auto_eval_interval_seconds"]))
+		if interval <= 0 {
+			interval = 5
+		}
+		wait := time.Duration(interval*2+2) * time.Second
+		time.Sleep(wait)
+		var n int
+		if err := db.QueryRow("select count(*) from rollout_state where env = ?", rollEnv).Scan(&n); err != nil {
+			cc.t.Fatalf("核对 rollout_state 失败: %v", err)
+		}
+		if n != 0 {
+			cc.t.Fatalf("有坏信号时循环给无记录环境写入了 %d 条 L0 —— 『打开开关零回归』这条不变式被破坏", n)
+		}
+		cc.note("坏信号（评测判红）存在时，无记录环境等待 %s 后 rollout_state 仍为 0 行（循环只收回、不新造）", wait)
+	})
+
+	run("AC-70", "定时自动降级端到端：已放量环境遇到坏信号，循环会在几个节拍内自动收回 L0（无需任何人批准）", func(cc *caseCtx) {
+		if db == nil {
+			cc.skip("未配置 CRONY_TEST_MYSQL_DSN：无法预置『已放量』状态，也无法核对是否真的收回")
+		}
+		marker := "acc70-" + accRunTag()
+		base, err := c.postOK("/ops/rollout/state", map[string]any{})
+		if err != nil {
+			cc.t.Fatalf("读放量状态失败: %v", err)
+		}
+		rollEnv := asStr(base["env"])
+		wipe := func() {
+			_, _ = db.Exec("delete from eval_run where set_name = ?", marker)
+			_, _ = db.Exec("delete from rollout_state where env = ?", rollEnv)
+		}
+		cc.t.Cleanup(wipe)
+		wipe()
+		if !asBool(base["auto_eval_enabled"]) {
+			cc.skip("本进程未开启放量自动降级（tools.rollout-auto-eval=false）：常驻循环不动作，端到端无从观测")
+		}
+		interval := int(asNum(base["auto_eval_interval_seconds"]))
+		if interval <= 0 {
+			interval = 5
+		}
+		// 前置：这个环境"已放量到 L2"且从未收紧（冷却不拦）；再灌注坏信号。
+		seedRolloutState(rollEnv, "L2", 0)
+		runID := insertBadEval(marker)
+
+		deadline := time.Now().Add(time.Duration(interval*3+10) * time.Second)
+		var last map[string]any
+		for time.Now().Before(deadline) {
+			st, rerr := c.postOK("/ops/rollout/state", map[string]any{"env": rollEnv})
+			if rerr != nil {
+				cc.t.Fatalf("轮询放量状态失败: %v", rerr)
+			}
+			last = asMap(st["state"])
+			if asStr(last["stage"]) == "L0" && asBool(last["frozen"]) {
+				break
+			}
+			time.Sleep(2 * time.Second)
+		}
+		if asStr(last["stage"]) != "L0" || !asBool(last["frozen"]) {
+			cc.t.Fatalf("坏信号已存在 %s，常驻循环仍未收回（state=%+v）—— 自动降级没接进定时循环",
+				time.Duration(interval*3+10)*time.Second, last)
+		}
+		if !strings.Contains(asStr(last["reason"]), "自动降级") {
+			cc.t.Fatalf("变档原因应自述来自『自动降级』（复盘要能区分自动与人工），实际 %q", truncate(asStr(last["reason"]), 200))
+		}
+		if int64(asNum(last["tightened_at"])) <= 0 {
+			cc.t.Fatalf("自动收回必须记 tightened_at（否则不知道这档是什么时候收的）: %+v", last)
+		}
+		// 已收回后循环不该重复收回：下轮守卫理由应变成"已是 L0"。
+		after, err := c.postOK("/ops/rollout/state", map[string]any{"env": rollEnv})
+		if err != nil {
+			cc.t.Fatalf("读放量状态失败: %v", err)
+		}
+		if !strings.Contains(asStr(after["auto_eval_skip_reason"]), "已是 L0") {
+			cc.t.Fatalf("收回后循环应跳过（已是 L0），实际跳过原因 %q", asStr(after["auto_eval_skip_reason"]))
+		}
+		cc.note("预置 L2 + 坏信号(run_id=%d) → 常驻循环（节拍 %ds）自动收回 L0/frozen、reason 自述『自动降级』、tightened_at>0；再查守卫变为『已是 L0』",
+			runID, interval)
+	})
+
+	run("AC-71", "自动降级的冷却守卫：距上次收紧未到冷却时，循环当轮不得收回（跨进程退避靠库）", func(cc *caseCtx) {
+		if db == nil {
+			cc.skip("未配置 CRONY_TEST_MYSQL_DSN：无法预置收紧时间，也无法核对冷却是否生效")
+		}
+		marker := "acc71-" + accRunTag()
+		base, err := c.postOK("/ops/rollout/state", map[string]any{})
+		if err != nil {
+			cc.t.Fatalf("读放量状态失败: %v", err)
+		}
+		rollEnv := asStr(base["env"])
+		wipe := func() {
+			_, _ = db.Exec("delete from eval_run where set_name = ?", marker)
+			_, _ = db.Exec("delete from rollout_state where env = ?", rollEnv)
+		}
+		cc.t.Cleanup(wipe)
+		wipe()
+		if !asBool(base["auto_eval_enabled"]) {
+			cc.skip("本进程未开启放量自动降级（tools.rollout-auto-eval=false）：观测不到冷却守卫")
+		}
+		cooldown := int64(asNum(base["auto_eval_cooldown_seconds"]))
+		if cooldown <= 0 {
+			cc.skip("本进程把自动降级冷却配成了 0（不做退避）：冷却守卫无从观测")
+		}
+		interval := int(asNum(base["auto_eval_interval_seconds"]))
+		if interval <= 0 {
+			interval = 5
+		}
+		// 前置：档位在 L2，但"刚刚收紧过"（收紧时间 = 现在），应触发冷却。
+		seedRolloutState(rollEnv, "L2", time.Now().Unix())
+		insertBadEval(marker)
+
+		time.Sleep(time.Duration(interval*2+2) * time.Second)
+		st, err := c.postOK("/ops/rollout/state", map[string]any{"env": rollEnv})
+		if err != nil {
+			cc.t.Fatalf("读放量状态失败: %v", err)
+		}
+		cur := asMap(st["state"])
+		if asStr(cur["stage"]) != "L2" {
+			cc.t.Fatalf("冷却期内档位不该被改动（应仍为 L2），实际 %q（原因 %q）",
+				asStr(cur["stage"]), truncate(asStr(cur["reason"]), 160))
+		}
+		reason := asStr(st["auto_eval_skip_reason"])
+		if !strings.Contains(reason, "冷却") {
+			cc.t.Fatalf("冷却期内守卫原因应点名『冷却』，实际 %q", reason)
+		}
+		cc.note("档位 L2 + 收紧时间=现在 + 坏信号 → 等待 %ds 后档位仍为 L2，守卫原因=%q（冷却 %ds）",
+			interval*2+2, reason, cooldown)
+	})
 }

@@ -21,6 +21,10 @@
  *   POST /ops/chaos/catalog       混沌故障目录
  *   POST /ops/chaos/grade         混沌考核打分（驾照分）
  *   POST /ops/shadow/reconcile    影子执行对账（只读计算）
+ *   POST /ops/rollout/state       放量档位状态（只读：档位 + 证据 + 拒绝原因 + 自动降级配置）
+ *   POST /ops/rollout/evaluate    放量自动降级（命中坏信号收回 L0，幂等）
+ *   POST /ops/rollout/tighten     人工收紧（永不拒绝）
+ *   POST /ops/rollout/widen       加宽（证据不成立时 1026 + 逐条原因）
  */
 import { request, USE_MOCK, mockResponse } from './client'
 import * as mock from './mock'
@@ -114,6 +118,35 @@ export function unfreezeAutonomy(scope) {
 export function effectiveAutonomy(tool, env = '') {
   if (USE_MOCK) return mockResponse(mock.autonomyEffective({ tool, env }))
   return request.post('/ops/autonomy/effective', { tool, env })
+}
+
+/* ---------------------- 放量档位（阶段 5 补全） ---------------------- */
+//
+// 四个接口风险不对称：state 只读、evaluate 自动降级、tighten 人工收紧（永不拒绝）、
+// widen 加宽（必须带新鲜且干净的证据，否则返回 1026 + 逐条原因）。
+
+// 读放量状态：当前档位 + 依据 + "再放一档"的拒绝原因 + 自动降级循环配置（只读）。
+export function fetchRolloutState(env = '') {
+  if (USE_MOCK) return mockResponse(mock.rolloutState({ env }))
+  return request.post('/ops/rollout/state', { env })
+}
+
+// 自动降级：采集证据，命中坏信号就收回 L0。幂等，没有坏信号时 tightened=false。
+export function evaluateRollout(env = '') {
+  if (USE_MOCK) return mockResponse(mock.rolloutEvaluate({ env }))
+  return request.post('/ops/rollout/evaluate', { env })
+}
+
+// 人工收紧（默认 L0）。收紧永不拒绝。
+export function tightenRollout(env = '', stage = 'L0', reason = '') {
+  if (USE_MOCK) return mockResponse(mock.rolloutTighten({ env, stage, reason }))
+  return request.post('/ops/rollout/tighten', { env, stage, reason })
+}
+
+// 加宽到目标档位。证据不成立时后端返回 code=1026 + 逐条原因。
+export function widenRollout(env = '', stage = 'L1') {
+  if (USE_MOCK) return mockResponse(mock.rolloutWiden({ env, stage }))
+  return request.post('/ops/rollout/widen', { env, stage })
 }
 
 export function fetchChaosCatalog() {

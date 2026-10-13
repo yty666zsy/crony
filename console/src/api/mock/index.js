@@ -1717,6 +1717,108 @@ export function autonomyEffective({ tool, env } = {}) {
   return { code: 200, data: out, msg: 'ok' }
 }
 
+/* ---------------------- 放量档位（阶段 5 补全） ---------------------- */
+
+// opsRollout 是 Mock 里的放量状态（形状与后端 /ops/rollout/* 逐字段对齐）。
+// 默认给一个"已放量到 L1、证据干净"的初始态，这样面板一打开就有东西看；
+// 加宽/收紧/自动降级都会改这个对象，Mock 下也能走完整条路径。
+const opsRollout = {
+  env: 'default',
+  enabled: true,
+  stage: 'L1',
+  frozen: false,
+  reason: '证据放行：评测 run_id=12（8 通过 / 0 失败 / 0 跳过，得分 1.000）+ SLO 23 个契约无违约',
+  evidence_json: '{"eval_run_id":12,"eval_passed":8,"eval_failed":0,"eval_skipped":0,"eval_score":1,"slo_total":23,"slo_breaches":0}',
+  widened_at: 0,
+  tightened_at: 0,
+}
+const opsRolloutEvidence = {
+  eval_run_id: 12, eval_passed: 8, eval_failed: 0, eval_skipped: 0, eval_score: 1, eval_at: 0,
+  slo_total: 23, slo_breaches: 0, slo_at: 0,
+}
+
+function rolloutView() {
+  const now = Math.floor(Date.now() / 1000)
+  if (opsRollout.widened_at === 0) opsRollout.widened_at = now
+  if (opsRolloutEvidence.eval_at === 0) opsRolloutEvidence.eval_at = now
+  if (opsRolloutEvidence.slo_at === 0) opsRolloutEvidence.slo_at = now
+  const nextStage = { L0: 'L1', L1: 'L2', L2: 'L3', L3: 'L3' }[opsRollout.stage] || 'L1'
+  const reasons = []
+  if (opsRolloutEvidence.eval_failed > 0) reasons.push(`最近一次评测有 ${opsRolloutEvidence.eval_failed} 条样本不通过（run_id=${opsRolloutEvidence.eval_run_id}）`)
+  if (opsRolloutEvidence.slo_breaches > 0) reasons.push(`SLO 违约 ${opsRolloutEvidence.slo_breaches}/${opsRolloutEvidence.slo_total} 条`)
+  if (opsRolloutEvidence.eval_run_id <= 0) reasons.push('缺少评测证据：还没有可回放的跑批记录（先跑一次评测台回放）')
+  let skip = ''
+  if (!opsRollout.enabled) skip = '自动降级未开启（tools.rollout-auto-eval=false）'
+  else if (opsRollout.stage === 'L0') skip = '当前已是 L0：没有可收回的放量'
+  return {
+    env: opsRollout.env,
+    enabled: opsRollout.enabled,
+    state: { ...opsRollout, id: 1, created: opsRollout.widened_at, updated: now },
+    evidence: { ...opsRolloutEvidence },
+    next_stage: nextStage,
+    widen_reasons: nextStage === 'L0' ? ['L0 是收紧的结果、不是放量的目标：请改用 tighten'] : reasons,
+    max_stage: 'L2',
+    auto_eval_enabled: opsRollout.enabled,
+    auto_eval_interval_seconds: 300,
+    auto_eval_cooldown_seconds: 1800,
+    auto_eval_skip_reason: skip,
+    note: opsRollout.frozen ? `放量已冻结：${opsRollout.reason}` : `当前档位 ${opsRollout.stage}：${opsRollout.reason}`,
+  }
+}
+
+export function rolloutState({ env } = {}) {
+  if (env) opsRollout.env = env
+  return { code: 200, data: rolloutView(), msg: 'ok' }
+}
+
+export function rolloutEvaluate({ env } = {}) {
+  if (env) opsRollout.env = env
+  const bad = opsRolloutEvidence.eval_failed > 0 || opsRolloutEvidence.slo_breaches > 0
+  let tightened = false
+  if (bad && opsRollout.stage !== 'L0') {
+    opsRollout.stage = 'L0'
+    opsRollout.frozen = true
+    opsRollout.reason = '自动降级：' + [
+      opsRolloutEvidence.eval_failed > 0 ? `最近一次评测有 ${opsRolloutEvidence.eval_failed} 条样本不通过（run_id=${opsRolloutEvidence.eval_run_id}）` : '',
+      opsRolloutEvidence.slo_breaches > 0 ? `SLO 违约 ${opsRolloutEvidence.slo_breaches}/${opsRolloutEvidence.slo_total} 条` : '',
+    ].filter(Boolean).join('；')
+    opsRollout.tightened_at = Math.floor(Date.now() / 1000)
+    tightened = true
+  }
+  return {
+    code: 200,
+    data: {
+      state: tightened ? { ...opsRollout } : rolloutView().state,
+      evidence: { ...opsRolloutEvidence },
+      blockers: tightened ? ['命中坏信号'] : [],
+      tightened,
+      note: tightened ? '命中坏信号，已自动收回 L0' : '没有坏信号，放量档位未改动',
+    },
+    msg: 'ok',
+  }
+}
+
+export function rolloutTighten({ env, stage, reason } = {}) {
+  if (env) opsRollout.env = env
+  opsRollout.stage = LVL_NAME.includes(stage) ? stage : 'L0'
+  opsRollout.frozen = true
+  opsRollout.reason = reason || '人工收紧'
+  opsRollout.tightened_at = Math.floor(Date.now() / 1000)
+  return { code: 200, data: { state: { ...opsRollout }, note: '已收紧（收紧不需要证据）' }, msg: 'ok' }
+}
+
+export function rolloutWiden({ env, stage } = {}) {
+  if (env) opsRollout.env = env
+  if (!LVL_NAME.includes(stage) || stage === 'L0') return bizErr(1001, '需要 stage（L1/L2）')
+  const reasons = rolloutView().widen_reasons
+  if (reasons.length > 0) return bizErr(1026, '拒绝放量（证据不成立）: ' + reasons.join('；'))
+  opsRollout.stage = stage
+  opsRollout.frozen = false
+  opsRollout.reason = `证据放行：评测 run_id=${opsRolloutEvidence.eval_run_id}（${opsRolloutEvidence.eval_passed} 通过 / ${opsRolloutEvidence.eval_failed} 失败 / ${opsRolloutEvidence.eval_skipped} 跳过，得分 ${opsRolloutEvidence.eval_score.toFixed(3)}）+ SLO ${opsRolloutEvidence.slo_total} 个契约无违约`
+  opsRollout.widened_at = Math.floor(Date.now() / 1000)
+  return { code: 200, data: { state: { ...opsRollout }, evidence: { ...opsRolloutEvidence }, note: '已加宽：证据来自最近一次评测跑批与最近一轮 SLO 评估，坏信号出现时会自动收回 L0' }, msg: 'ok' }
+}
+
 const OPS_CHAOS = [
   { kind: 'latency', target: 'db', severity: 1, params: { ms: '3000' } },
   { kind: 'disk_full', target: 'node', severity: 2, params: { fill: '95%' } },

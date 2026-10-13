@@ -72,6 +72,11 @@ func main() {
 	// SLO 评估循环：评估所有启用契约；违约时按配置决定是否执行 breach_action。
 	sloClose := runSloLoop(time.Duration(cfg.SelfHeal.IntervalSeconds) * time.Second)
 
+	// 阶段 5 补全（放量自动降级）：与自愈 / SLO 循环同进程常驻。
+	// 默认关闭（tools.rollout-auto-eval=false）；开启后也只收回已放量的环境。
+	var rolloutClose chan struct{}
+	service.InitRolloutAutoEval(&rolloutClose)
+
 	logger.GetLogger().Info(fmt.Sprintf("[cronyworker] 已启动：env=%s mysql=%s:%s/%s",
 		*env, cfg.Mysql.Path, cfg.Mysql.Port, cfg.Mysql.Dbname))
 
@@ -83,6 +88,9 @@ func main() {
 	}
 	if sloClose != nil {
 		close(sloClose)
+	}
+	if rolloutClose != nil {
+		close(rolloutClose)
 	}
 	logger.GetLogger().Info("[cronyworker] 已停止")
 }

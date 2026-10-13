@@ -7,8 +7,9 @@
             <div class="title">运维智能化</div>
             <div class="sub">
               调度智能化（多目标加权打分）、SLO 契约、指标看板、自治信用（灰度与自动降级）、
-              混沌考核、影子对账。这里以<strong>只读/计算</strong>为主：唯一能动的按钮是"记录一次动作结果"，
-              它推进的是<strong>信任分</strong>，不是生产动作。
+              放量档位（证据驱动的平台级上限）、混沌考核、影子对账。这里以<strong>只读/计算</strong>为主：
+              能动的按钮只有"记录一次动作结果"（推进<strong>信任分</strong>）与"收紧/加宽放量档位"
+              （改的是<strong>能不能自动动手的上限</strong>）——两者都不直接触发生产动作。
             </div>
           </div>
           <el-button :loading="loading" @click="loadAll">刷新</el-button>
@@ -23,6 +24,9 @@
           </div>
         </el-col>
       </el-row>
+      <div v-if="loadIssues.length" class="dim">
+        ⚠ 本次刷新有区块未拿到数据：{{ loadIssues.join('、') }}（其余区块已正常显示；原因见右下角提示）
+      </div>
     </el-card>
 
     <el-card shadow="never">
@@ -136,6 +140,52 @@
     </el-card>
 
     <el-card shadow="never">
+      <template #header><div class="title">放量档位（证据驱动的平台级上限：加宽要证据，坏信号自动收回 L0）</div></template>
+      <div class="row">
+        <el-input v-model="rolloutEnv" placeholder="环境（默认 default）" style="width: 200px" />
+        <el-button size="small" @click="loadRollout">读取状态</el-button>
+        <el-button size="small" @click="doRolloutEvaluate">自动降级评估一次</el-button>
+        <el-button size="small" type="warning" @click="doRolloutTighten">人工收紧到 L0</el-button>
+        <el-button size="small" type="primary" :disabled="!rollout.next_stage" @click="doRolloutWiden(rollout.next_stage)">
+          加宽到 {{ rollout.next_stage || '—' }}
+        </el-button>
+      </div>
+      <template v-if="rollout.state !== undefined">
+        <div class="dim">
+          环境 {{ rollout.env }} ·
+          {{ rollout.enabled ? '放量已接入放行判定（min(配置, 信用, 放量)）' : '放量未接入（不表态，沿用配置）' }} ·
+          当前档位
+          <strong>{{ rollout.state ? rollout.state.stage + (rollout.state.frozen ? '（已冻结）' : '') : '无记录' }}</strong> ·
+          上限 {{ rollout.max_stage }}
+        </div>
+        <div class="dim">{{ rollout.note }}</div>
+        <div class="row">
+          <span class="chip">评测 run_id {{ rollout.evidence.eval_run_id }}</span>
+          <span class="chip">通过 {{ rollout.evidence.eval_passed }}</span>
+          <span class="chip">失败 {{ rollout.evidence.eval_failed }}</span>
+          <span class="chip">跳过 {{ rollout.evidence.eval_skipped }}（跳过不等于通过）</span>
+          <span class="chip">得分 {{ rollout.evidence.eval_score }}</span>
+          <span class="chip">SLO 契约 {{ rollout.evidence.slo_total }}</span>
+          <span class="chip">SLO 违约 {{ rollout.evidence.slo_breaches }}</span>
+        </div>
+        <div v-if="rollout.evidence_error" class="dim">证据采集失败：{{ rollout.evidence_error }}</div>
+        <div class="row">
+          <template v-if="rollout.widen_reasons && rollout.widen_reasons.length">
+            <span class="dim">现在不能加宽到 {{ rollout.next_stage }}：</span>
+            <el-tag v-for="r in rollout.widen_reasons" :key="r" size="small" type="danger">{{ r }}</el-tag>
+          </template>
+          <span v-else class="dim">证据齐全且干净：可以加宽到 {{ rollout.next_stage }}</span>
+        </div>
+        <div class="dim">
+          自动降级循环：{{ rollout.auto_eval_enabled ? '开' : '关' }}
+          （每 {{ rollout.auto_eval_interval_seconds }}s，冷却 {{ rollout.auto_eval_cooldown_seconds }}s）——
+          {{ rollout.auto_eval_skip_reason ? '下轮会跳过：' + rollout.auto_eval_skip_reason : '下轮到点会真的评估一次' }}
+        </div>
+        <div class="dim" v-if="rollout.state">档位依据：{{ rollout.state.reason }}</div>
+      </template>
+    </el-card>
+
+    <el-card shadow="never">
       <template #header><div class="title">混沌考核（驾照分）/ 影子对账</div></template>
       <div class="row">
         <el-button @click="doChaosDemo">示例考核打分</el-button>
@@ -158,8 +208,9 @@
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
-  effectiveAutonomy, explainAllocation, evaluateSlo, fetchMetricsOverview, gradeChaos, listAutonomy,
-  observeAutonomy, reconcileShadow, searchSlo, unfreezeAutonomy,
+  effectiveAutonomy, evaluateRollout, explainAllocation, evaluateSlo, fetchMetricsOverview,
+  fetchRolloutState, gradeChaos, listAutonomy, observeAutonomy, reconcileShadow, searchSlo,
+  tightenRollout, unfreezeAutonomy, widenRollout,
 } from '@/api/ops'
 
 const loading = ref(false)
@@ -175,6 +226,9 @@ const effEnv = ref('prod')
 const effResult = ref(null)
 const chaosScore = ref(null)
 const shadowResult = ref(null)
+const rolloutEnv = ref('')
+const rollout = ref({})
+const loadIssues = ref([])
 
 const pct = (r) => (r == null || r < 0 ? '无样本' : (r * 100).toFixed(1) + '%')
 
@@ -188,15 +242,61 @@ const cards = computed(() => {
   ]
 })
 
+// loadAll 各区块**互相独立**：任何一个接口失败，其余区块照常显示，失败项写在页面上。
+//
+// 为什么不用顺序 await（也不要 Promise.all）：2026-10-13 实测到一次
+// `POST /ops/metrics/overview` 瞬时 502，顺序 await 会让整页 KPI / SLO / 信用 / 放量
+// **全部空白**——页面却"不报错"，只是空。这正是 F1–F10 那一类"静默失败"缺陷，
+// 所以这里逐项兜底，并把"哪些区块这次没拿到"摊在页面上，而不是留给运气。
 async function loadAll() {
   loading.value = true
   try {
-    metrics.value = await fetchMetricsOverview()
-    sloList.value = (await searchSlo(0)).list || []
-    autonomy.value = (await listAutonomy()).list || []
+    const [m, s, a, r] = await Promise.allSettled([
+      fetchMetricsOverview(),
+      searchSlo(0),
+      listAutonomy(),
+      loadRollout(),
+    ])
+    if (m.status === 'fulfilled') metrics.value = m.value
+    if (s.status === 'fulfilled') sloList.value = (s.value && s.value.list) || []
+    if (a.status === 'fulfilled') autonomy.value = (a.value && a.value.list) || []
+    loadIssues.value = [
+      ['指标看板', m], ['SLO 契约', s], ['自治信用', a], ['放量档位', r],
+    ].filter(([, p]) => p.status === 'rejected').map(([n]) => n)
   } finally {
     loading.value = false
   }
+}
+
+// loadRollout 读放量档位状态：档位 + 依据 + "再放一档"卡在哪 + 自动降级循环配置。
+async function loadRollout() {
+  const res = await fetchRolloutState(rolloutEnv.value)
+  rollout.value = res || {}
+}
+
+// doRolloutEvaluate 手动敲一次"自动降级"（与常驻循环走的是同一条判定路径）。
+async function doRolloutEvaluate() {
+  const res = await evaluateRollout(rolloutEnv.value)
+  ElMessage.success(res && res.tightened ? '命中坏信号，已自动收回 L0' : '没有坏信号，档位未改动')
+  await loadRollout()
+}
+
+async function doRolloutTighten() {
+  await tightenRollout(rolloutEnv.value, 'L0', '控制台人工收紧')
+  ElMessage.success('已收紧到 L0（收紧不需要证据）')
+  await loadRollout()
+}
+
+// doRolloutWiden 加宽：证据不成立时后端返回 1026 + 逐条原因。
+// 拒绝原因由 client 统一弹出、并在面板的"现在不能加宽"里常驻显示，这里不再重复弹一次。
+async function doRolloutWiden(stage) {
+  try {
+    await widenRollout(rolloutEnv.value, stage)
+    ElMessage.success(`已加宽到 ${stage}`)
+  } catch (e) {
+    /* 已拒绝：原因见下方"现在不能加宽到 Lx"清单 */
+  }
+  await loadRollout()
 }
 
 async function doAllocate() {

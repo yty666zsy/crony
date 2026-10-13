@@ -59,6 +59,10 @@ func main() {
 	// 阶段 5 补全（SLO 违约处置）：装配服务（周期评估在 worker；admin 侧提供
 	// `/ops/slo/act` 人工触发）。默认关闭动作 = 与接线前一致，零回归。
 	service.InitSloBreach()
+	// 阶段 5 补全（放量自动降级）：把"坏信号自动收回 L0"挂进常驻循环。
+	// 默认关闭（tools.rollout-auto-eval=false）；即使开启也只收回已放量的环境，不新造记录。
+	var rolloutClose chan struct{}
+	service.InitRolloutAutoEval(&rolloutClose)
 	err = srv.ListenAndServe()
 	if err != nil {
 		logger.GetLogger().Error(fmt.Sprintf("startup api server error:%v", err.Error()))
@@ -67,6 +71,9 @@ func main() {
 		}
 		if selfHealClose != nil {
 			close(selfHealClose)
+		}
+		if rolloutClose != nil {
+			close(rolloutClose)
 		}
 		os.Exit(1)
 	}

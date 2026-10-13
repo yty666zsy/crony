@@ -972,6 +972,41 @@ await server.close()
   }
 }
 
+// ---------------------------------------------------------------------------
+// 100) 阶段 5 收口（PHASE17）：放量安全栈 —— 状态契约 + 自动降级循环配置。
+//
+// 控制台 /ops 页新增的「放量档位」面板只读这些字段；字段名对不上，面板会静默空白
+// （与 F1–F8 同一类错法，Mock 与单测都发现不了）。这里只做**只读**断言：
+// 刻意不调 /ops/rollout/evaluate —— 它会按设计给"没有记录"的环境写一条 L0
+// （AC-57 的夹具就是靠它观察自动降级），那属于**改状态**，不该由联调脚本顺手做。
+// ---------------------------------------------------------------------------
+{
+  const opsApi = mods.ops
+  const st = await step('POST /ops/rollout/state（放量档位面板数据源）', () => opsApi.fetchRolloutState(''))
+  if (st.ok) {
+    const v = st.value || {}
+    check(
+      'P1 放量状态提供档位/上限/证据/拒绝原因（控制台不再只能 curl 或看库表）',
+      'env' in v && 'enabled' in v && 'max_stage' in v && Array.isArray(v.widen_reasons) && !!v.evidence,
+      `env=${v.env} stage=${v.state?.stage ?? 'null'} max=${v.max_stage} reasons=${v.widen_reasons?.length}`,
+    )
+    check(
+      'P2 放量状态提供自动降级配置（开关/节拍/冷却）',
+      typeof v.auto_eval_enabled === 'boolean' &&
+        Number.isInteger(v.auto_eval_interval_seconds) &&
+        v.auto_eval_interval_seconds > 0 &&
+        Number.isInteger(v.auto_eval_cooldown_seconds) &&
+        v.auto_eval_cooldown_seconds >= 0,
+      `enabled=${v.auto_eval_enabled} interval=${v.auto_eval_interval_seconds}s cooldown=${v.auto_eval_cooldown_seconds}s`,
+    )
+    check(
+      'P3 无放量记录时必须说明「下轮为什么不会评估」（循环开着却不动作，要能自查）',
+      v.state !== null || (typeof v.auto_eval_skip_reason === 'string' && v.auto_eval_skip_reason.length > 0),
+      `state=${v.state === null ? 'null' : 'row'} skip=${summary(v.auto_eval_skip_reason, 40)}`,
+    )
+  }
+}
+
 console.log('\n===== 真实联调结果 =====')
 console.log(`通过 ${results.length - failed}/${results.length}，失败 ${failed}`)
 for (const r of results.filter((x) => !x.ok)) console.log(`  FAIL ${r.name} — ${r.detail}`)

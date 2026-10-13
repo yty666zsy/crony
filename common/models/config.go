@@ -250,6 +250,21 @@ type (
 		// 放量档位只能靠**新鲜且干净的证据**（评测 + SLO）加宽，坏信号自动收回 L0；
 		// 没有放量记录时不表态（沿用配置），所以开启本开关本身不改变行为（零回归）。
 		RolloutGate bool `mapstructure:"rollout-gate" json:"rolloutGate" yaml:"rollout-gate" ini:"rollout-gate"`
+		// RolloutAutoEval 阶段 5 补全：是否让进程内的定时循环**自动**调用一次放量评估（默认 false）。
+		//
+		// 在此之前，"坏信号自动收回 L0"的判定虽是全自动的，却只能靠人/脚本调
+		// `POST /ops/rollout/evaluate` 驱动；本开关把它挂进与自愈/SLO 同一套常驻循环。
+		//
+		// 一条刻意的不变式：循环**只收回、不新造**。没有 rollout_state 记录的环境，
+		// 循环不会凭空写一条 L0 —— 否则"打开开关"就不再是零回归，而是一次全平台行为突变
+		// （本机库内长期有 SLO 违约，一开就会把每个环境都压到 L0）。
+		RolloutAutoEval bool `mapstructure:"rollout-auto-eval" json:"rolloutAutoEval" yaml:"rollout-auto-eval" ini:"rollout-auto-eval"`
+		// RolloutAutoEvalSeconds 自动降级循环的节拍（秒，默认 300；<=0 用默认值）。
+		RolloutAutoEvalSeconds int `mapstructure:"rollout-auto-eval-seconds" json:"rolloutAutoEvalSeconds" yaml:"rollout-auto-eval-seconds" ini:"rollout-auto-eval-seconds"`
+		// RolloutAutoEvalCooldownSeconds 同一环境两次自动评估之间的最小间隔（秒，默认 1800）。
+		// 它同时充当**跨进程退避**：admin 与 worker 都跑时，靠 rollout_state.tightened_at
+		// 去重，而不是各自内存里的时间戳（重启即丢）。
+		RolloutAutoEvalCooldownSeconds int64 `mapstructure:"rollout-auto-eval-cooldown-seconds" json:"rolloutAutoEvalCooldownSeconds" yaml:"rollout-auto-eval-cooldown-seconds" ini:"rollout-auto-eval-cooldown-seconds"`
 	}
 )
 

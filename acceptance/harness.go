@@ -307,6 +307,16 @@ func asBool(v any) bool {
 	return b
 }
 
+// ---------- 阶段 5 放量：验收夹具的公共口径 ----------
+
+// accRunTag 本轮验收的标记：可用 CRONY_ACC_RUN_TAG 固定，便于复跑同一套夹具。
+func accRunTag() string {
+	if tag := strings.TrimSpace(os.Getenv("CRONY_ACC_RUN_TAG")); tag != "" {
+		return tag
+	}
+	return "acc-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+}
+
 // truncate 按字节截断，但**不切断多字节字符**。
 //
 // 为什么较真：验收报告是给人看的交付物，一个被切半的汉字会让整个文件变成

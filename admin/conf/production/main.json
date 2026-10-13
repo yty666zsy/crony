@@ -110,6 +110,12 @@
     "#autonomy-env": "自治信用与放量的环境段：信用 scope 形如 <工具>@<env>，放量档位按 env 记。『重跑在测试环境很安全』不等于『在生产很安全』。",
     "autonomy-env": "default",
     "#rollout-gate": "阶段 5 放量档位：开启后写动作生效级别 = min(autonomy, 信用, 放量档位)。放量只能靠新鲜且干净的证据（最近一次评测跑批 + 最近一轮 SLO 评估）加宽，坏信号自动收回 L0；没有放量记录时不表态（沿用配置），所以开启本开关本身不改行为。默认 false。",
-    "rollout-gate": false
+    "rollout-gate": false,
+    "#rollout-auto-eval": "阶段 5 放量自动降级：把『坏信号自动收回 L0』挂进进程内的常驻循环（与自愈/SLO 同节拍）。默认 false。一条刻意的不变式：循环只收回、不新造 —— 没有放量记录的环境不会被凭空写一条 L0，所以开启本开关本身仍不改行为。",
+    "rollout-auto-eval": false,
+    "#rollout-auto-eval-seconds": "自动降级循环的节拍（秒），默认 300。每轮都重读配置，改这里不需要重启。",
+    "rollout-auto-eval-seconds": 300,
+    "#rollout-auto-eval-cooldown-seconds": "同一环境两次自动评估之间的最小间隔（秒），默认 1800。它同时是跨进程退避：admin 与 worker 都跑时靠 rollout_state.tightened_at 去重。",
+    "rollout-auto-eval-cooldown-seconds": 1800
   }
 }

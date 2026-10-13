@@ -554,10 +554,43 @@ check('阶段 4-D/5 Mock：ops api 层只读/计算，无"直接改生产"的入
   assert.ok(exported.includes('explainAllocation') && exported.includes('reconcileShadow'))
   assert.ok(exported.includes('effectiveAutonomy'), '应导出自治级别解释接口')
   assert.ok(
+    exported.includes('fetchRolloutState') && exported.includes('evaluateRollout') &&
+      exported.includes('tightenRollout') && exported.includes('widenRollout'),
+    '应导出放量档位接口（状态 / 自动降级 / 收紧 / 加宽）',
+  )
+  assert.ok(
     exported.includes('listEvalCases') && exported.includes('runEvalBench') &&
       exported.includes('getEvalReport') && exported.includes('listEvalRuns'),
     '应导出回放评测台接口（样本 / 跑批 / 报告 / 历次跑批）',
   )
+})
+
+check('阶段 5 放量档位 Mock：收紧永不拒绝、加宽要证据、已是 L0 不再重复收回', () => {
+  const s0 = mock.rolloutState({}).data
+  assert.equal(s0.state.stage, 'L1')
+  assert.equal(s0.max_stage, 'L2', '放量上限固定 L2：L3 必须改配置')
+  assert.equal(s0.next_stage, 'L2')
+  assert.deepEqual(s0.widen_reasons, [], '证据干净且新鲜时不应有拒绝原因')
+  assert.equal(s0.auto_eval_enabled, true)
+  assert.equal(s0.auto_eval_interval_seconds, 300)
+  assert.equal(s0.auto_eval_cooldown_seconds, 1800)
+
+  const ev = mock.rolloutEvaluate({}).data
+  assert.equal(ev.tightened, false, '没有坏信号时自动降级不得改动档位')
+
+  const tight = mock.rolloutTighten({ stage: 'L0', reason: 'smoke' }).data
+  assert.equal(tight.state.stage, 'L0')
+  assert.equal(tight.state.frozen, true, '收紧后应冻结：加宽必须重走证据')
+
+  const s1 = mock.rolloutState({}).data
+  assert.ok(/已是 L0/.test(s1.auto_eval_skip_reason), '已是 L0 时自动降级应跳过（不重复收回）')
+
+  const w = mock.rolloutWiden({ stage: 'L1' }).data
+  assert.equal(w.state.stage, 'L1')
+  assert.equal(w.state.frozen, false, '加宽成功即解除冻结')
+
+  const bad = mock.rolloutWiden({ stage: 'L0' })
+  assert.equal(bad.code, 1001, 'L0 不是放量目标（应改用 tighten）')
 })
 
 /* ===================== 工具函数：时间口径（秒 / 毫秒 / ISO 三者都要对） ===================== */

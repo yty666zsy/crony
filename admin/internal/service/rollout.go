@@ -12,7 +12,6 @@ import (
 	"github.com/tmnhs/crony/common/pkg/logger"
 	"github.com/tmnhs/crony/common/pkg/rollout"
 	"github.com/tmnhs/crony/common/pkg/tools"
-	"gorm.io/gorm"
 )
 
 // 阶段 5 补全：放量档位（rollout gate）。
@@ -53,6 +52,63 @@ func RolloutEnabled() bool {
 	return false
 }
 
+// RolloutAutoEvalDefaults 自动降级循环的默认节拍与冷却（配置留空/非法时的兜底）。
+const (
+	DefaultRolloutAutoEvalInterval = 300 * time.Second
+	DefaultRolloutAutoEvalCooldown = 1800 * time.Second
+)
+
+// RolloutAutoEvalEnabled 进程是否把自动降级挂进了常驻循环（`tools.rollout-auto-eval`，默认 false）。
+func RolloutAutoEvalEnabled() bool {
+	if cfg := config.GetConfigModels(); cfg != nil {
+		return cfg.Tools.RolloutAutoEval
+	}
+	return false
+}
+
+// RolloutAutoEvalInterval 自动降级循环的节拍（配置 <=0 时回落到默认 300s）。
+func RolloutAutoEvalInterval() time.Duration {
+	if cfg := config.GetConfigModels(); cfg != nil && cfg.Tools.RolloutAutoEvalSeconds > 0 {
+		return time.Duration(cfg.Tools.RolloutAutoEvalSeconds) * time.Second
+	}
+	return DefaultRolloutAutoEvalInterval
+}
+
+// RolloutAutoEvalCooldown 同一环境两次自动评估的最小间隔（配置 <=0 时回落到默认 1800s）。
+func RolloutAutoEvalCooldown() time.Duration {
+	if cfg := config.GetConfigModels(); cfg != nil && cfg.Tools.RolloutAutoEvalCooldownSeconds > 0 {
+		return time.Duration(cfg.Tools.RolloutAutoEvalCooldownSeconds) * time.Second
+	}
+	return DefaultRolloutAutoEvalCooldown
+}
+
+// AutoEvalSkip 纯函数：判断本轮自动降级是否应当跳过，并给出人话原因（可穷举测试）。
+//
+// 四条守卫缺一不可：
+//  1. 开关关闭 → 跳过。默认 false = 与接线前完全一致（零回归）。
+//  2. **没有放量记录 → 跳过**（"只收回、不新造"）。若这里放行，一次开启就会给所有环境
+//     写一条 L0，把"零回归"变成"全平台行为突变"（库里已有的历史坏信号会立刻生效）。
+//  3. 当前已是 L0 → 跳过。已经收回过了，重复写只会把同样的原因刷进日志。
+//  4. 冷却未到 → 跳过。用**库里**的 tightened_at 而不是内存时间戳，
+//     这样 admin 与 worker 同时跑也能互相退避（重启不丢）。
+func AutoEvalSkip(enabled bool, st *models.RolloutState, now time.Time, cooldown time.Duration) (bool, string) {
+	if !enabled {
+		return true, "自动降级未开启（tools.rollout-auto-eval=false）"
+	}
+	if st == nil {
+		return true, "该环境还没有放量记录：自动降级只收回、不新造（不表态）"
+	}
+	if st.Stage == tools.AutonomyL0.String() {
+		return true, "当前已是 L0：没有可收回的放量"
+	}
+	if cooldown > 0 && st.TightenedAt > 0 {
+		if age := now.Sub(time.Unix(st.TightenedAt, 0)); age >= 0 && age < cooldown {
+			return true, fmt.Sprintf("距上次收紧 %s，未到冷却 %s", age.Truncate(time.Second), cooldown)
+		}
+	}
+	return false, ""
+}
+
 // GetRolloutState 读某环境的放量状态；不存在返回 (nil, nil)——"没有记录"不是错误。
 //
 // 为什么不存在要返回 nil 而不是造一个 L0 行：**没有记录 = 不表态**。
@@ -63,15 +119,17 @@ func (s *RolloutService) GetRolloutState(env string) (*models.RolloutState, erro
 	if db == nil {
 		return nil, nil
 	}
-	row := models.RolloutState{}
-	err := db.Table(models.CronyRolloutStateTableName).Where("env = ?", RolloutEnv(env)).First(&row).Error
-	if err == gorm.ErrRecordNotFound {
-		return nil, nil
-	}
-	if err != nil {
+	row := make([]models.RolloutState, 0, 1)
+	// 用 Find(slice) 而不是 First()：没有记录是**预期**情形（"不表态"），
+	// 用 First() 会让 GORM 每次都打一条 "record not found" 错误日志 ——
+	// 自动降级循环每 5s 查一次，那会变成持续的日志噪声，把真正的错误淹掉。
+	if err := db.Table(models.CronyRolloutStateTableName).Where("env = ?", RolloutEnv(env)).Limit(1).Find(&row).Error; err != nil {
 		return nil, err
 	}
-	return &row, nil
+	if len(row) == 0 {
+		return nil, nil
+	}
+	return &row[0], nil
 }
 
 // RolloutCapFor 取某环境的放量上限，供闸门使用。
@@ -302,6 +360,15 @@ type RolloutView struct {
 	WidenReasons []string `json:"widen_reasons"`
 	// MaxStage 放量允许的最高档（内核默认 L2；L3 要改配置）。
 	MaxStage string `json:"max_stage"`
+	// AutoEvalEnabled 进程是否把自动降级挂进了常驻循环（`tools.rollout-auto-eval`）。
+	AutoEvalEnabled bool `json:"auto_eval_enabled"`
+	// AutoEvalIntervalSeconds 自动降级循环的节拍（秒）。
+	AutoEvalIntervalSeconds int `json:"auto_eval_interval_seconds"`
+	// AutoEvalCooldownSeconds 同一环境两次自动评估的最小间隔（秒）。
+	AutoEvalCooldownSeconds int64 `json:"auto_eval_cooldown_seconds"`
+	// AutoEvalSkipReason 下一轮节拍会不会被守卫跳过（空 = 到点会真的评估一次）。
+	// 把守卫的判断摊开展示，免得运维只看到"循环开着却什么都没发生"。
+	AutoEvalSkipReason string `json:"auto_eval_skip_reason,omitempty"`
 	// Note 人话说明。
 	Note string `json:"note"`
 }
@@ -310,6 +377,9 @@ type RolloutView struct {
 func (s *RolloutService) RolloutViewOf(env string) RolloutView {
 	env = RolloutEnv(env)
 	view := RolloutView{Env: env, Enabled: RolloutEnabled(), MaxStage: rollout.DefaultConfig().MaxStage.String()}
+	view.AutoEvalEnabled = RolloutAutoEvalEnabled()
+	view.AutoEvalIntervalSeconds = int(RolloutAutoEvalInterval() / time.Second)
+	view.AutoEvalCooldownSeconds = int64(RolloutAutoEvalCooldown() / time.Second)
 	cur := tools.AutonomyL0
 	row, err := s.GetRolloutState(env)
 	if err != nil {
@@ -317,6 +387,8 @@ func (s *RolloutService) RolloutViewOf(env string) RolloutView {
 		return view
 	}
 	view.State = row
+	// 顺带回答"下一轮节拍会不会真的评估"：守卫与循环共用同一个纯函数，不存在"解释一套、生效一套"。
+	_, view.AutoEvalSkipReason = AutoEvalSkip(view.AutoEvalEnabled, row, time.Now(), RolloutAutoEvalCooldown())
 	if row != nil {
 		if parsed, perr := tools.ParseAutonomyLevel(row.Stage); perr == nil {
 			cur = parsed

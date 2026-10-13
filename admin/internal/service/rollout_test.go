@@ -1,8 +1,11 @@
 package service
 
 import (
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/tmnhs/crony/common/models"
 	"github.com/tmnhs/crony/common/pkg/tools"
 )
 
@@ -69,6 +72,46 @@ func TestNextStage(t *testing.T) {
 	for cur, want := range cases {
 		if got := nextStage(cur); got != want {
 			t.Fatalf("nextStage(%s) = %s，期望 %s", cur, got, want)
+		}
+	}
+}
+
+// AutoEvalSkip 是自动降级循环的守卫内核：它决定"这一轮要不要真的去收回放量"。
+// 这里把它当安全边界来钉 —— 尤其是"没有记录不新造"与"已是 L0 不重复收回"两条，
+// 一旦放宽，"打开开关"就会从零回归变成全平台行为突变。
+func TestAutoEvalSkip(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	st := func(stage string, tightenedAt int64) *models.RolloutState {
+		return &models.RolloutState{Env: "default", Stage: stage, TightenedAt: tightenedAt}
+	}
+	cases := []struct {
+		name       string
+		enabled    bool
+		state      *models.RolloutState
+		cooldown   time.Duration
+		wantSkip   bool
+		wantReason string // 非空时要求原因包含该子串
+	}{
+		{name: "开关关闭：跳过（零回归）", enabled: false, state: st("L2", 0), cooldown: time.Hour, wantSkip: true, wantReason: "未开启"},
+		{name: "没有记录：跳过（只收回、不新造）", enabled: true, state: nil, cooldown: time.Hour, wantSkip: true, wantReason: "还没有放量记录"},
+		{name: "已是 L0：跳过（不重复收回）", enabled: true, state: st("L0", 0), cooldown: time.Hour, wantSkip: true, wantReason: "已是 L0"},
+		{name: "有放量且从未收紧：放行", enabled: true, state: st("L2", 0), cooldown: time.Hour, wantSkip: false},
+		{name: "距上次收紧在冷却内：跳过", enabled: true, state: st("L2", now.Unix()-10), cooldown: time.Hour, wantSkip: true, wantReason: "未到冷却"},
+		{name: "距上次收紧已过冷却（边界外）：放行", enabled: true, state: st("L2", now.Unix()-7200), cooldown: time.Hour, wantSkip: false},
+		{name: "冷却边界（恰好等于）：放行", enabled: true, state: st("L2", now.Unix()-3600), cooldown: time.Hour, wantSkip: false},
+		{name: "冷却为 0：不做退避", enabled: true, state: st("L2", now.Unix()), cooldown: 0, wantSkip: false},
+		{name: "收紧时间在未来（时钟漂移）：不放行过度拦截", enabled: true, state: st("L2", now.Unix()+600), cooldown: time.Hour, wantSkip: false},
+	}
+	for _, tc := range cases {
+		skip, reason := AutoEvalSkip(tc.enabled, tc.state, now, tc.cooldown)
+		if skip != tc.wantSkip {
+			t.Fatalf("%s: skip = %v，期望 %v（reason=%q）", tc.name, skip, tc.wantSkip, reason)
+		}
+		if tc.wantSkip && tc.wantReason != "" && !strings.Contains(reason, tc.wantReason) {
+			t.Fatalf("%s: 跳过原因 %q 应包含 %q", tc.name, reason, tc.wantReason)
+		}
+		if !tc.wantSkip && reason != "" {
+			t.Fatalf("%s: 放行时不应给出跳过原因，得到 %q", tc.name, reason)
 		}
 	}
 }
