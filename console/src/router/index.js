@@ -194,6 +194,37 @@ const router = createRouter({
   scrollBehavior: () => ({ top: 0 }),
 })
 
+/**
+ * 动态 import 失败 = 这个标签页握着**旧构建的 chunk 名**。
+ *
+ * 构建产物带哈希（`MemoryView-Duo60mDh.js`），重新部署后旧文件就没了；
+ * 而已经打开的标签页手里还是旧名字，点菜单时浏览器去拉一个 404 的 chunk，
+ * vue-router 只会**换掉顶栏标题、内容不动**——用户看到的就是"点了没反应/报错"。
+ * （2026-10-13 实测：部署新构建后旧标签页点「经验库」，
+ *   `Failed to fetch dynamically imported module: .../MemoryView-ZdVA_gYx.js` 404。）
+ *
+ * 唯一正确的处置是**重新加载拿新构建**；用 sessionStorage 防抖，
+ * 避免真·缺失（或离线）时反复刷新变成死循环。
+ */
+router.onError((error) => {
+  const msg = String((error && error.message) || '')
+  if (!/dynamically imported module|Importing a module script failed/i.test(msg)) return
+  let last = 0
+  try {
+    last = Number(sessionStorage.getItem('crony:chunk-reload') || 0)
+  } catch {
+    /* 隐私模式：拿不到就当作没刷过 */
+  }
+  if (Date.now() - last < 15000) return
+  try {
+    sessionStorage.setItem('crony:chunk-reload', String(Date.now()))
+  } catch {
+    /* 同上 */
+  }
+  console.warn('[router] 前端已更新（旧 chunk 已不存在），正在重新加载：', msg)
+  window.location.reload()
+})
+
 router.afterEach((to) => {
   const title = to.meta?.title
   document.title = title ? `${title} · crony 控制台` : 'crony 控制台'

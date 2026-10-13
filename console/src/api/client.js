@@ -110,6 +110,45 @@ export function unwrap(body, { real = false, silent = false } = {}) {
   return body
 }
 
+/**
+ * 只读请求的「请求链路抖动」一次性重放（2026-10-13 用户实测：点「经验库」弹红条）。
+ *
+ * 现象与定位：
+ *   - 同一次页面挂载里，`POST /agent/memory/stats` 偶发 **502**（空响应体、约 10ms 返回），
+ *     紧接着重放就是 200；同一接口连续实测 8 次出现 1 次；
+ *   - 换 curl（不经浏览器）连续打 60 次：200 × 60、502 × 0。
+ *   - 结论：故障不在 crony 后端，而在**请求链路上的一层代理**。
+ *
+ * 处理：只读请求拿到 502/503/504、或 5s 内快速断连（没有响应）时，原样重放一次。
+ * 只读判定用后端既有的命名约定（见 READ_ONLY_PATH）：写动作（approve/execute/del/once/
+ * disable/confirm/tighten/widen…）一律不匹配，避免"重放一次"变成"动作做两次"。
+ *
+ * 为什么不重放超时：Agent 接口要真跑模型（60s 都可能），重放会把"慢"变成"更慢"；
+ * 慢失败更可能是真的网络问题，不属于这层抖动。
+ */
+const READ_ONLY_PATH =
+  /(\/(search|find|stats|overview|list|report|runs|cases|steps|by_run|policy|ping|settings|effective|state|recall|log|catalog)\/?$)|\/statis\//
+
+const RETRY_STATUS = new Set([502, 503, 504])
+const RETRY_FAST_FAIL_MS = 5000
+
+/** 该 URL 是否是"只读查询"（可以安全重放）。导出是为了让冒烟测试钉住这条判定。 */
+export function isReadOnlyEndpoint(url = '') {
+  const path = String(url).split('?')[0]
+  return READ_ONLY_PATH.test(path)
+}
+
+/** 是否应该重放一次：只读 + （网关 5xx 或快速断连）+ 还没重放过。导出供冒烟测试钉住判定。 */
+export function shouldReplayOnce(error) {
+  const cfg = error?.config || {}
+  if (cfg.__replayed) return false
+  if (!isReadOnlyEndpoint(cfg.url || '')) return false
+  const status = error?.response?.status
+  if (status) return RETRY_STATUS.has(status)
+  const started = cfg.__startedAt
+  return typeof started === 'number' && Date.now() - started < RETRY_FAST_FAIL_MS
+}
+
 const request = axios.create({
   baseURL: API_BASE,
   // 60s：Agent 接口（诊断 / 自然语言建任务）要真跑一次模型。
@@ -125,6 +164,8 @@ request.interceptors.request.use(
   (config) => {
     const token = getToken()
     if (token) config.headers.Authorization = `Bearer ${token}`
+    // 记起始时间：断连只在这层抖动（快速失败）时才重放，见 shouldReplayOnce。
+    config.__startedAt = Date.now()
     return config
   },
   (error) => Promise.reject(error),
@@ -132,7 +173,18 @@ request.interceptors.request.use(
 
 request.interceptors.response.use(
   (response) => unwrap(response.data, { real: true, silent: Boolean(response?.config?.silent) }),
-  (error) => {
+  async (error) => {
+    // 只读请求撞上请求链路抖动：原样重放一次。第一次失败**不提示**
+    // （重放成功就不该报警；重放也失败时，第二次会照常走下面的提示）。
+    if (shouldReplayOnce(error)) {
+      error.config.__replayed = true
+      try {
+        return await request.request(error.config)
+      } catch (again) {
+        error = again
+      }
+    }
+
     const status = error?.response?.status
 
     // 规划中接口：后端没有注册这条路由（404）。这不是故障，页面会渲染「规划中」占位，
@@ -149,11 +201,16 @@ request.interceptors.response.use(
       error?.message ||
       '未知错误'
     const text = status ? `请求失败（HTTP ${status}）：${detail}` : `无法连接到后端：${detail}`
+    // 502/503/504 是**请求链路上的网关/代理**给的（crony 后端的业务错误一律 HTTP 200 + body.code），
+    // 别再用"请确认后端已启动"把用户引到错误的方向——后端可能正跑得好好的。
+    const hint = USE_MOCK
+      ? ''
+      : RETRY_STATUS.has(status)
+        ? `（HTTP ${status} 由请求链路上的网关/代理返回，后端未必故障；只读查询已自动重放一次）`
+        : `（当前 VITE_USE_MOCK=false，请确认 ${API_BASE} 已启动）`
     if (!error.__notified && !error?.config?.silent) {
       error.__notified = true
-      ElMessage.error(
-        USE_MOCK ? text : `${text}（当前 VITE_USE_MOCK=false，请确认 ${API_BASE} 已启动）`,
-      )
+      ElMessage.error(`${text}${hint}`)
     }
     return Promise.reject(error)
   },

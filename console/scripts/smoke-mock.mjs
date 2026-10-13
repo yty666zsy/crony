@@ -16,6 +16,7 @@
  */
 import { register } from 'node:module'
 import { join } from 'node:path'
+import { readdirSync, readFileSync } from 'node:fs'
 import assert from 'node:assert/strict'
 import './child-process-sandbox-shim.mjs'
 
@@ -684,6 +685,159 @@ check('修改口令 Mock：与真后端同契约（{password,new_password}、alp
   assert.equal(mock.changePassword({ password: 'Abcd1234', new_password: 'abc' }).code, 1001)
   // 空口令。
   assert.equal(mock.changePassword({ password: '', new_password: 'Efgh5678' }).code, 1001)
+})
+
+/* ===================== 只读请求的「请求链路抖动」一次性重放 ===================== */
+
+// 2026-10-13 用户实测：点「经验库」弹红条。定位见 client.js 里 READ_ONLY_PATH 的注释：
+// 502 来自请求链路上的代理（浏览器通道 8 次中 1 次，curl 60 次 0 次），不是后端故障。
+const client = await server.ssrLoadModule('/src/api/client.js')
+
+check('只读判定：读接口可重放，写动作一律不重放', () => {
+  const reads = [
+    '/agent/memory/search', '/agent/memory/stats', '/agent/memory/recall', '/agent/memory/find',
+    '/agent/session/search', '/agent/tool/list', '/agent/heal/by_run', '/agent/heal/policy',
+    '/job/search', '/job/run/overview', '/job/run/steps', '/job/log', '/job/dag/find',
+    '/statis/today', '/statis/health', '/settings', '/ping', '/user/find',
+    '/ops/metrics/overview', '/ops/eval/runs', '/ops/eval/report', '/ops/rollout/state',
+    '/ops/chaos/catalog', '/ops/autonomy/list',
+  ]
+  const writes = [
+    '/login', '/register', '/user/change_pw', '/job/add', '/job/del', '/job/once', '/job/kill',
+    '/job/dag/validate', '/node/del', '/agent/approval/approve', '/agent/approval/reject',
+    '/agent/approval/cancel', '/agent/memory/disable', '/agent/memory/enable', '/agent/heal/scan',
+    '/agent/diagnosis/run', '/agent/nljob/draft', '/agent/nljob/confirm', '/ops/slo/save',
+    '/ops/slo/evaluate', '/ops/eval/run', '/ops/eval/score', '/ops/eval/seed/sync',
+    '/ops/autonomy/observe', '/ops/autonomy/unfreeze', '/ops/rollout/evaluate',
+    '/ops/rollout/tighten', '/ops/rollout/widen', '/ops/chaos/grade',
+  ]
+  for (const u of reads) assert.equal(client.isReadOnlyEndpoint(u), true, `${u} 应判为只读（可重放）`)
+  for (const u of writes) assert.equal(client.isReadOnlyEndpoint(u), false, `${u} 是写动作，不得重放`)
+})
+
+/** 把 axios 适配器换成"前 N 次按指定方式失败"，用来复现抖动。 */
+async function withAdapter(behaviour, fn) {
+  const { request } = client
+  const orig = request.defaults.adapter
+  let calls = 0
+  request.defaults.adapter = async (config) => {
+    calls++
+    const r = behaviour(calls, config)
+    if (r) throw r
+    return {
+      data: { code: 200, data: { ok: true }, msg: 'operation success' },
+      status: 200,
+      statusText: 'OK',
+      headers: {},
+      config,
+    }
+  }
+  try {
+    return await fn(() => calls)
+  } finally {
+    request.defaults.adapter = orig
+  }
+}
+
+function gateway502(config) {
+  const err = new Error('Request failed with status code 502')
+  err.config = config
+  err.response = { status: 502, data: '', headers: {}, config }
+  return err
+}
+
+check('只读接口遇 502：重放一次后成功（调用方拿到 data，不是错误）', async () => {
+  await withAdapter(
+    (n, config) => (n === 1 ? gateway502(config) : null),
+    async (calls) => {
+      // silent:true 避免在 Node 里真的去渲染 Element Plus 的消息组件
+      const d = await client.request.post('/agent/memory/stats', {}, { silent: true })
+      assert.deepEqual(d, { ok: true }, '重放成功后应把 data 交给调用方')
+      assert.equal(calls(), 2, '应恰好重放一次')
+    },
+  )
+})
+
+check('只读接口连续 502：只重放一次，随后照常抛错（不会无限重试）', async () => {
+  await withAdapter(
+    (n, config) => gateway502(config),
+    async (calls) => {
+      await assert.rejects(
+        () => client.request.post('/agent/memory/search', {}, { silent: true }),
+        (err) => err.response?.status === 502,
+      )
+      assert.equal(calls(), 2, '最多重放一次')
+    },
+  )
+})
+
+check('写动作遇 502：不重放（"重放一次"不能变成"动作做两次"）', async () => {
+  await withAdapter(
+    (n, config) => gateway502(config),
+    async (calls) => {
+      await assert.rejects(
+        () => client.request.post('/agent/approval/approve', { approval_id: 1 }, { silent: true }),
+        (err) => err.response?.status === 502,
+      )
+      assert.equal(calls(), 1, '写动作不得重放')
+    },
+  )
+})
+
+check('只读接口遇断连（没有响应）：5s 内快速失败才重放；慢失败不重放（别把"慢"拖成"更慢"）', async () => {
+  const boom = (n, config) => {
+    const err = new Error('Network Error')
+    err.config = config
+    return err
+  }
+  await withAdapter(boom, async (calls) => {
+    await assert.rejects(
+      () => client.request.post('/agent/memory/stats', {}, { silent: true }),
+      (err) => err.response === undefined && err.message === 'Network Error',
+    )
+    assert.equal(calls(), 2, '快速断连应重放一次')
+  })
+
+  const now = Date.now()
+  const readonly = (startedAgoMs) => ({
+    config: { url: '/agent/memory/stats', __startedAt: now - startedAgoMs },
+  })
+  assert.equal(client.shouldReplayOnce(readonly(10)), true, '10ms 前的断连应重放')
+  assert.equal(client.shouldReplayOnce(readonly(6000)), false, '6s 前的断连不重放（更像真的网络问题）')
+  assert.equal(
+    client.shouldReplayOnce({ config: { url: '/agent/memory/stats', __replayed: true, __startedAt: now } }),
+    false,
+    '已经重放过就不再重放',
+  )
+  assert.equal(
+    client.shouldReplayOnce({ config: { url: '/job/once', __startedAt: now } }),
+    false,
+    '写动作即便快速断连也不重放',
+  )
+})
+
+check('只读判定不会把真实 api 层的写动作当成可重放（扫描全部 URL）', () => {
+  // 判定靠命名约定，所以要用**真实代码里的 URL** 反过来查一遍：
+  // 末尾是写动词（add/del/save/once/kill/approve/…）的都不能被判成只读。
+  const WRITE_VERBS = new Set([
+    'add', 'del', 'save', 'once', 'kill', 'approve', 'reject', 'cancel', 'disable', 'enable',
+    'change_pw', 'run', 'draft', 'confirm', 'evaluate', 'tighten', 'widen', 'observe', 'unfreeze',
+    'execute', 'sync', 'scan', 'grade', 'reconcile', 'score', 'login', 'register',
+  ])
+  const dir = join(process.cwd(), 'src', 'api')
+  const bad = []
+  const seen = []
+  for (const f of readdirSync(dir).filter((n) => n.endsWith('.js') && n !== 'client.js')) {
+    const src = readFileSync(join(dir, f), 'utf8')
+    for (const m of src.matchAll(/request\.(?:post|get)\(\s*'([^']+)'/g)) {
+      const url = m[1]
+      seen.push(url)
+      const last = url.split('?')[0].split('/').pop()
+      if (WRITE_VERBS.has(last) && client.isReadOnlyEndpoint(url)) bad.push(`${f}: ${url}`)
+    }
+  }
+  assert.ok(seen.length > 40, `扫描到的接口太少（${seen.length}），判定规则的覆盖面没被真正验证`)
+  assert.deepEqual(bad, [], `这些 URL 看着像写动作却被判成可重放：${bad.join(' / ')}`)
 })
 
 let failed = 0

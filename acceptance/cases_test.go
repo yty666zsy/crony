@@ -3068,13 +3068,24 @@ func TestAcceptanceSuite(t *testing.T) {
 			SessionID: okSID, DurationMs: 2000, Tools: []string{"log_search", "node_status"},
 		})
 
-		out, err := c.postOK("/ops/eval/run", map[string]any{})
+		// persist=false：**负向对照是探针，不是基线**。
+		//
+		// 落库会让"最近一次跑批"变成一条判红的记录，而放量判定（以及 PHASE17 的自动降级循环）
+		// 看的**正是**"最近一次跑批" —— 于是每跑一次验收，平台都会因为一条**造出来的**轨迹
+		// 自动收回 L0（2026-10-13 实测：`[rollout] 自动降级 env=acc -> L0
+		// （最近一次评测有 4 条样本不通过，run_id=1220）`，run_id=1220 就是本条用例的跑批）。
+		// 探针跑批回答的是"断言会不会响"，不是"这次改动有没有让历史场景变差"，所以不落库。
+		out, err := c.postOK("/ops/eval/run", map[string]any{"persist": false})
 		if err != nil {
 			cc.t.Fatalf("回放跑批失败: %v", err)
 		}
 		rep := asMap(out["report"])
 		if len(rep) == 0 {
 			cc.t.Fatalf("跑批没有返回报告: %+v", out)
+		}
+		if rid := int64(asNum(rep["run_id"])); rid != 0 {
+			cc.t.Fatalf("persist=false 的探针跑批不得落库（run_id 应为 0），实际 run_id=%d"+
+				"：它会被放量判定当成本次改动的基线证据", rid)
 		}
 		checked := map[string]bool{}
 		for _, item := range asSlice(rep["results"]) {
