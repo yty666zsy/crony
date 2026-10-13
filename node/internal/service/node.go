@@ -45,6 +45,14 @@ func NewNodeServer() (*NodeServer, error) {
 		hostname = uuid
 		err = nil
 	}
+	// F6：node-ttl 直接决定 etcd 租约，也就直接决定"多久判失联→FailOver"。
+	// 这里统一解析（未配置/非法回退到保守默认，过激进时告警），保证漏配不会
+	// 退化成 etcd 的最小租约（约 1s）而让集群自己打自己。
+	nodeTtl, ttlWarning := config.ResolveNodeTtl(config.GetConfigModels().System.NodeTtl)
+	if ttlWarning != "" {
+		logger.GetLogger().Warn("[node] " + ttlWarning)
+	}
+
 	return &NodeServer{
 		Node: &models.Node{
 			UUID:     uuid,
@@ -57,7 +65,7 @@ func NewNodeServer() (*NodeServer, error) {
 		},
 		Cron:      cron.New(),
 		jobs:      make(handler.Jobs, 8),
-		ServerReg: etcdclient.NewServerReg(config.GetConfigModels().System.NodeTtl),
+		ServerReg: etcdclient.NewServerReg(nodeTtl),
 	}, nil
 
 }

@@ -18,6 +18,8 @@ import (
 
 	"github.com/tmnhs/crony/common/models"
 	"github.com/tmnhs/crony/common/pkg/etcdclient"
+
+	"github.com/coreos/etcd/clientv3"
 )
 
 // caseCtx 给每个用例一个"可写证据"的地方：跳过时也必须留下原因（SKIP ≠ 通过）。
@@ -2697,5 +2699,154 @@ func TestAcceptanceSuite(t *testing.T) {
 			cc.t.Fatalf("调度解释必须回显硬约束（否则无法复盘为什么没选出来）: %+v", req)
 		}
 		cc.note("硬约束 require_labels=%v 下 chosen 为空（集群里没有满足条件的节点），硬约束没有被忽略", labels)
+	})
+
+	// AC-50：创建任务时的自动分配必须与"节点接入/失联迁移"同一口径，且**硬约束真的挡人**。
+	//
+	// 背景（F3，20 节点舰队实测）：`POST /job/add` 的自动分配此前走裸 AutoAllocateNode
+	// （任务数最少），完全不看 node_selector —— 一个声明了"只有带某标签的机器能跑"的任务，
+	// 在创建时就会被随手派到一台装不了它的机器上。创建是最常见的分配入口，
+	// 这里不生效，硬约束就形同虚设。
+	//
+	// 用例用**创建路径**（不依赖 etcd）：同一份请求，只差 node_selector 是否有人满足——
+	//   - 无选择器 → 必须创建成功并拿到节点（正向对照，排除"请求本身就错"的可能）；
+	//   - 有无人满足的硬约束 → 必须被拒绝，且理由要指向硬约束（可行动），
+	//     而不是静默地派给一台装不了它的机器。
+	run("AC-50", "创建任务的自动分配不越过硬约束：无人满足时拒绝并说明原因（F3）", func(cc *caseCtx) {
+		tag := strings.TrimSpace(os.Getenv("CRONY_ACC_RUN_TAG"))
+		if tag == "" {
+			tag = "acc-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+		}
+		// 用 http 类型避开"cmd 默认不允许自动分配"这条独立配置（与本用例要验的无关）。
+		// `allocation` 带 binding:"required"，不能传 0（会被绑定校验挡成 1001）：
+		// 自动分配的取值是 models.AutoAllocation = 2。
+		base := map[string]any{
+			"name": "ACC-SELECTOR-CREATE-" + tag, "command": "http://127.0.0.1:8089/ping",
+			"job_type": 2, "spec": "0 0 8 * * *", "timeout": 30, "notify_type": 1,
+			"allocation": 2,
+		}
+
+		// 正向对照：同样的请求、不带硬约束，必须能建成功并落到某个节点上。
+		okReq := map[string]any{}
+		for k, v := range base {
+			okReq[k] = v
+		}
+		okReq["name"] = "ACC-SELECTOR-CREATE-OK-" + tag
+		created, err := c.postOK("/job/add", okReq)
+		if err != nil {
+			cc.t.Fatalf("不带硬约束的自动分配任务应当创建成功: %v", err)
+		}
+		okID := int(asNum(created["id"]))
+		if okID <= 0 {
+			cc.t.Fatalf("创建成功但未返回 id: %+v", created)
+		}
+		cc.t.Cleanup(func() { _, _ = c.postOK("/job/del", map[string]any{"ids": []int{okID}}) })
+
+		// 负向：硬约束在当前集群里无人满足 → 必须拒绝，且理由指向硬约束。
+		badReq := map[string]any{}
+		for k, v := range base {
+			badReq[k] = v
+		}
+		badReq["name"] = "ACC-SELECTOR-CREATE-NO-" + tag
+		badReq["node_selector"] = fmt.Sprintf(`{"require_labels":{"acc-f3-nonexistent":"%s"}}`, tag)
+		_, env, err := c.do(http.MethodPost, "/job/add", badReq, true)
+		if err != nil {
+			cc.t.Fatalf("请求本身失败（无法判断是不是拒绝了硬约束）: %v", err)
+		}
+		if env == nil {
+			cc.t.Fatalf("服务器未返回可解析的响应体")
+		}
+		if env.Code == 200 {
+			if id := int(asNum(env.dataMap()["id"])); id > 0 && db != nil {
+				var runOn string
+				_ = db.QueryRow("select coalesce(run_on, '') from job where id = ?", id).Scan(&runOn)
+				cc.t.Cleanup(func() { _, _ = c.postOK("/job/del", map[string]any{"ids": []int{id}}) })
+				cc.t.Fatalf("硬约束无人满足时不得创建成功（会落到一台装不了它的机器上）：job=%d run_on=%q", id, runOn)
+			}
+			cc.t.Fatalf("硬约束无人满足时不得创建成功")
+		}
+		if !strings.Contains(env.Msg, "硬约束") && !strings.Contains(env.Msg, "node_selector") {
+			cc.t.Fatalf("拒绝理由必须指向硬约束（可行动），实际 msg=%q", env.Msg)
+		}
+		cc.note("不带硬约束的自动分配成功（job %d 落到节点上）；硬约束无人满足时被拒绝（code=%d），msg=%q",
+			okID, env.Code, env.Msg)
+	})
+
+	// AC-51：**节点接入**触发的自动分配同样不得越过硬约束。
+	//
+	// 这条专测"新节点接入"那条路径（assignPendingJobs），它是 F3 的原始形态：
+	// 此前它与 FailOver 用的不是一个策略。用例不碰真实节点——用 etcd 探针写一个
+	// 合成节点的注册键（带租约，自动过期，不写库内行）造一次接入事件，
+	// 然后要求：库里那个"自动分配 + 硬约束无人满足"的任务**保持未分配**。
+	//
+	// 若兜底绕过了硬约束，任务会被派给任意一台机器 → 直接判失败。
+	run("AC-51", "节点接入的自动分配不越过硬约束：无人满足时保持未分配（F3）", func(cc *caseCtx) {
+		if db == nil {
+			cc.skip("未配置 CRONY_TEST_MYSQL_DSN：无法核对任务归属")
+		}
+		cli := newEtcdClient(cc.t, os.Getenv("CRONY_ACC_ETCD_ENDPOINTS"))
+		if cli == nil {
+			cc.skip("未配置 CRONY_ACC_ETCD_ENDPOINTS：接入分配只由 etcd 节点事件触发，无探针则触发不了（不是系统缺陷）")
+		}
+		tag := strings.TrimSpace(os.Getenv("CRONY_ACC_RUN_TAG"))
+		if tag == "" {
+			tag = "acc-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+		}
+		// 1) 造一个"未分配"的夹具任务：直接写库（status=0），带无人满足的硬约束。
+		//    走库内夹具而不是 /job/add，是为了避开"创建时的分配"（AC-50 已单测），
+		//    把这条用例的观测点**只**留在"节点接入事件"上。
+		selector := fmt.Sprintf(`{"require_labels":{"acc-f3-nonexistent":"%s"}}`, tag)
+		res, err := db.Exec(`insert into job
+			(name, command, type, spec, status, timeout, notify_type, notify_to, script_id,
+			 node_selector, run_on, updated, created)
+			values (?, 'cmd /c echo f3', 1, '0 0 9 * * *', ?, 30, 1, null, null, ?, '', ?, ?)`,
+			"ACC-F3-ACCESS-"+tag, models.JobStatusNotAssigned, selector, time.Now().Unix(), time.Now().Unix())
+		if err != nil {
+			cc.t.Fatalf("造夹具任务失败（验收库需要 INSERT 权限）: %v", err)
+		}
+		id64, err := res.LastInsertId()
+		if err != nil {
+			cc.t.Fatalf("取夹具任务 id 失败: %v", err)
+		}
+		jobID := int(id64)
+		cc.t.Cleanup(func() { _, _ = c.postOK("/job/del", map[string]any{"ids": []int{jobID}}) })
+
+		// 2) 造一次"新节点接入"事件：只写 etcd 注册键（带 25s 租约，自己会过期），
+		//    不写库内行 → 不污染节点表，也不会成为调度候选。
+		bystander := "acc-f3-trigger-" + tag
+		nodeKey := fmt.Sprintf(etcdclient.KeyEtcdNode, bystander)
+		val, _ := json.Marshal(models.Node{
+			UUID: bystander, Hostname: "acc-f3-trigger", IP: "127.0.0.1", PID: "1",
+			Version: "acceptance", Status: models.NodeConnSuccess,
+		})
+		lease, err := cli.Grant(context.Background(), 25)
+		if err != nil {
+			cc.t.Fatalf("申请 etcd 租约失败: %v", err)
+		}
+		cc.t.Cleanup(func() {
+			_, _ = cli.Delete(context.Background(), nodeKey)
+			_, _ = cli.Revoke(context.Background(), lease.ID)
+		})
+		if _, err := cli.Put(context.Background(), nodeKey, string(val), clientv3.WithLease(lease.ID)); err != nil {
+			cc.t.Fatalf("写合成节点注册键失败: %v", err)
+		}
+
+		// 3) 观察窗口覆盖"admin 侧为节点就绪留的 5s 余量 + 分配耗时"。
+		//    这期间任务必须一直保持未分配。
+		deadline := time.Now().Add(18 * time.Second)
+		nodes := 0
+		for time.Now().Before(deadline) {
+			var runOn string
+			if err := db.QueryRow("select coalesce(run_on, '') from job where id = ?", jobID).Scan(&runOn); err != nil {
+				cc.t.Fatalf("读回任务归属失败: %v", err)
+			}
+			if runOn != "" {
+				cc.t.Fatalf("节点接入触发的自动分配绕过了硬约束：任务 %d 被派给了 %s（它装不了这个任务）", jobID, runOn)
+			}
+			_ = db.QueryRow("select count(*) from node").Scan(&nodes)
+			time.Sleep(time.Second)
+		}
+		cc.note("合成节点接入事件后，带无人满足硬约束的任务 %d 仍保持未分配（未分配节点=%d 个，兜底没有越过硬约束）",
+			jobID, nodes)
 	})
 }

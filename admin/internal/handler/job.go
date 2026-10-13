@@ -50,9 +50,23 @@ func (j *JobRouter) CreateOrUpdate(c *gin.Context) {
 			resp.FailWithMessage(resp.ERROR, "[create_job] The shell command is not supported to automatically assign nodes by default.", c)
 			return
 		}
-		// Automatic allocation
-		nodeUUID := service.DefaultJobService.AutoAllocateNode()
+		// 与"节点接入分配 / 失联迁移"统一走 4-D 调度器
+		// （打分优先、旧策略兜底、兜底不越过硬约束）。
+		//
+		// 此前这里是裸 AutoAllocateNode（任务数最少）：带 node_selector 硬约束的任务
+		// 在**创建**时就完全不受约束，会被随手派到一台装不了它的机器上（F3）。
+		// 创建是最常见的分配入口，这里不统一，F3 就只是被修了一半。
+		nodeUUID := service.DefaultJobService.AutoAllocateNodeFor(req.Job)
 		if nodeUUID == "" {
+			if service.DefaultSchedulerService.HasHardRequirement(req.Job) {
+				// 明确区分"集群里没有可用节点"和"没有满足硬约束的节点"：
+				// 后者是可行动的（上线带相应标签/能力的节点，或改手动指定），
+				// 含糊的 auto allocate node error 会让人去查集群，其实是任务声明的问题。
+				logger.GetLogger().Warn(fmt.Sprintf("[create_job] no node satisfies hard requirement (node_selector=%s)", req.NodeSelector))
+				resp.FailWithMessage(resp.ERROR,
+					"[create_job] 没有满足该任务硬约束(node_selector)的节点，无法自动分配：请先上线具备相应标签/能力的节点，或改为手动指定节点", c)
+				return
+			}
 			logger.GetLogger().Error(fmt.Sprintf("[create_job] auto allocate node error"))
 			resp.FailWithMessage(resp.ERROR, "[create_job] auto allocate node error", c)
 			return

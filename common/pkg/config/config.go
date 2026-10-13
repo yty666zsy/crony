@@ -24,6 +24,41 @@ const (
 	EnvPrefix = "CRONY"
 )
 
+const (
+	// DefaultNodeTtl 节点注册租约的**保守默认值**（秒）。
+	//
+	// 为什么不是 5s（20 节点舰队实测，F6）：node-ttl 直接进 etcd 的 LeaseGrant，
+	// 而**租约过期就是 FailOver 的唯一触发器**。5s 在"多节点同机部署"下偏激进——
+	// 一次 GC 停顿/CPU 争抢/网络抖动就够让租约过期，把**健康节点**误判成失联、
+	// 白搬一次任务（还会连带删掉它的库内行）。15s 让"抖动"和"真死"能被区分开。
+	DefaultNodeTtl int64 = 15
+	// MinNodeTtl 低于该值视为"过激进"：照用，但必须告警（不静默改写用户显式配置）。
+	MinNodeTtl int64 = 5
+)
+
+// ResolveNodeTtl 计算节点注册租约的**有效 TTL**（秒），返回 (ttl, warning)。
+//
+// 口径：
+//   - configured <= 0（没配 / 配错 / 解析失败得到零值）→ 用 DefaultNodeTtl。
+//     **这是一条硬保护**：etcd 对 ttl<=0 会退回**最小租约（约 1s）**，
+//     于是节点被反复判死、反复 FailOver——一个会让集群自己打自己的配置错误，
+//     绝不能因为"配置文件漏写了一行"就发生。
+//   - 0 < configured < MinNodeTtl → 照用（用户显式配的），但返回告警。
+//   - 其余 → 照用，无告警。
+func ResolveNodeTtl(configured int64) (ttl int64, warning string) {
+	if configured <= 0 {
+		return DefaultNodeTtl, fmt.Sprintf(
+			"node-ttl 未配置或非法（%d）：已回退到保守默认 %ds（etcd 对 ttl<=0 会退回最小租约，节点会被反复误判失联）",
+			configured, DefaultNodeTtl)
+	}
+	if configured < MinNodeTtl {
+		return configured, fmt.Sprintf(
+			"node-ttl=%ds 偏激进（建议 >= %ds）：多节点同机部署时一次抖动就可能让租约过期，把健康节点误判为失联并触发无谓 FailOver",
+			configured, MinNodeTtl)
+	}
+	return configured, ""
+}
+
 var (
 	//Automatic loading sequence of local Config
 	autoLoadLocalConfigs = []string{
@@ -135,6 +170,13 @@ func registerDefaults(v *viper.Viper) {
 	//  2) 让 CRONY_SLO_BREACH_ACTION_ENABLED / CRONY_SLO_COOLDOWN_SECONDS 可注入。
 	v.SetDefault("slo.breach-action-enabled", false)
 	v.SetDefault("slo.cooldown-seconds", 1800)
+
+	// 节点注册租约 TTL（秒）。注册它的作用：
+	//  1) 配置文件里没有 system 段时，租约不会退化成 etcd 的最小租约（约 1s）——
+	//     那会让节点被反复判死并触发 FailOver（20 节点舰队实测，F6）；
+	//  2) 让 CRONY_SYSTEM_NODE_TTL 可注入；
+	//  3) 与 ResolveNodeTtl 的兜底口径一致（<=0 时回退到 DefaultNodeTtl）。
+	v.SetDefault("system.node-ttl", DefaultNodeTtl)
 }
 
 // printConfigSummary 打印一份脱敏后的配置摘要。

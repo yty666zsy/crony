@@ -193,8 +193,15 @@ func (n *NodeWatcherService) runAssignWorker() {
 
 // assignPendingJobs 把所有"未分配"且可解析的任务分配出去。
 //
-// 分配策略保持旧行为（AutoAllocateNode：存活节点里任务数最少者），
-// 只把"逐节点事件各跑一遍"改为"合并后跑一遍"。
+// 分配策略与 FailOver 统一：都走 AutoAllocateNodeFor（4-D 多目标加权打分，
+// 打分选不出才回退旧策略"任务数最少"）。
+//
+// 为什么必须统一（20 节点舰队实测，F3）：此前这条路径用的是裸 AutoAllocateNode，
+// 于是**同一批任务**会因"是新节点接入分配"还是"某节点失联迁移"而落到不同策略上——
+// 带 node_selector/标签硬约束的任务在新节点接入时**根本不被过滤**，
+// 可能被派给一个装不了它的机器。统一口径后，两条路径的选点理由一致、可解释。
+//
+// 其它保持旧行为：只处理"未分配"的任务，逐个分配，失败只跳过该任务。
 func (n *NodeWatcherService) assignPendingJobs() {
 	jobs, err := DefaultJobService.GetNotAssignedJob()
 	if err != nil {
@@ -207,9 +214,17 @@ func (n *NodeWatcherService) assignPendingJobs() {
 			continue
 		}
 		oldUUID := job.RunOn
-		nodeUUID := DefaultJobService.AutoAllocateNode()
+		nodeUUID := DefaultJobService.AutoAllocateNodeFor(&job)
+		if nodeUUID == "" && DefaultSchedulerService.HasHardRequirement(&job) {
+			// 硬约束（标签/能力）当前一个节点都满足不了：**保持未分配**。
+			// 下面的 anyNodeUUID 兜底绝不能在这种情况下生效——那等于绕过硬约束，
+			// 把任务派到一台装不了它的机器上（F3 的同一类错误）。
+			logger.GetLogger().Warn(fmt.Sprintf(
+				"job[%d] 声明了硬约束但当前没有满足条件的节点，保持未分配（避免派给装不了它的机器）", job.ID))
+			continue
+		}
 		if nodeUUID == "" {
-			// 自动分配选不出（例如 List2Array 为空）时，退化为"随便挑一个已在册节点"，
+			// 自动分配选不出（例如所有在册节点都被判定失联）时，退化为"随便挑一个已在册节点"，
 			// 与旧实现"直接分给触发事件的那个节点"是同一意图。
 			nodeUUID = n.anyNodeUUID()
 		}

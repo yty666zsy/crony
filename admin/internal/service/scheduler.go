@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -54,17 +55,47 @@ func (s *SchedulerService) BuildRequirement(job *models.Job) scheduling.Requirem
 	return req
 }
 
+// HasHardRequirement 任务是否声明了**硬约束**（不满足就绝不能接的过滤条件）。
+//
+// 口径与 scheduling.Decide 的过滤维度一致：require_labels / require_tools。
+// 注意 prefer_node **不算**硬约束——它是亲和偏好，选不到时可以退让。
+//
+// 存在的意义：兜底路径必须能分辨"打分没选出偏好"和"硬约束没人满足"，
+// 前者可以让给旧策略，后者绝不能让（否则硬约束名存实亡）。
+func (s *SchedulerService) HasHardRequirement(job *models.Job) bool {
+	req := s.BuildRequirement(job)
+	return len(req.RequireLabels) > 0 || len(req.RequireTools) > 0
+}
+
 // ExplainAllocation 采观测值 → 打分 → 返回可解释决策。
+//
+// 候选口径（阶段 5 收尾修正，F3）：**只把"真的能接任务的节点"当候选**——
+// 即当前在 etcd 里注册着（DefaultNodeWatcher.nodeList）的节点。原因是实际的：
+// assignJob 必须从 nodeList 取节点信息才能往 etcd 写任务键，于是"库里有行、
+// etcd 里没注册"的节点（合成行、残留行）一旦被选中，分配**必然失败**，
+// 任务会反复分不出去。只用库内行会让调度器选出一个接不了任务的节点。
 func (s *SchedulerService) ExplainAllocation(job *models.Job) scheduling.Decision {
 	db := dbclient.GetMysqlDB()
 	nodes := make([]models.Node, 0)
 	if err := db.Table(models.CronyNodeTableName).Find(&nodes).Error; err != nil {
 		return scheduling.Decision{Notes: []string{"读取节点失败：" + err.Error()}}
 	}
+	live := map[string]struct{}{}
+	if DefaultNodeWatcher != nil {
+		for _, u := range DefaultNodeWatcher.List2Array() {
+			live[u] = struct{}{}
+		}
+	}
 	since := time.Now().Add(-healthWindow).Unix()
 	cands := make([]scheduling.NodeCandidate, 0, len(nodes))
+	unregistered := 0
 	for i := range nodes {
 		n := &nodes[i]
+		if _, ok := live[n.UUID]; !ok {
+			// 不是"可达性差"，而是"根本接不了任务"：不作候选。
+			unregistered++
+			continue
+		}
 		var load int64
 		_ = db.Table(models.CronyJobTableName).Where("run_on = ?", n.UUID).Count(&load).Error
 		c := scheduling.NodeCandidate{
@@ -78,7 +109,12 @@ func (s *SchedulerService) ExplainAllocation(job *models.Job) scheduling.Decisio
 		c.SuccessRate, c.Samples = nodeSuccessRate(db, n.UUID, since)
 		cands = append(cands, c)
 	}
-	return scheduling.Decide(s.BuildRequirement(job), cands, scheduling.Weights{})
+	dec := scheduling.Decide(s.BuildRequirement(job), cands, scheduling.Weights{})
+	if unregistered > 0 {
+		dec.Notes = append(dec.Notes, fmt.Sprintf(
+			"已排除 %d 个库内存在但未在 etcd 注册的节点（它们接不了任务）", unregistered))
+	}
+	return dec
 }
 
 // Allocate 选出一个节点；没有可用节点时返回 ""。

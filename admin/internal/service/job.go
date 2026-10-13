@@ -117,12 +117,21 @@ const MaxJobCount = 10000
 
 // AutoAllocateNodeFor 阶段 4-D：带任务的分配——多目标加权打分（scheduling 内核）。
 //
-// 与旧的 AutoAllocateNode 的关系：**打分优先，旧策略兜底**。
-// 只要调度器能在"满足任务硬约束"的候选里选出一个节点就用它；否则回退到旧策略
-// （任务数最少），从而对老任务（无 node_selector）保持零回归。
+// 与旧的 AutoAllocateNode 的关系：**打分优先，旧策略兜底，但兜底不越过硬约束**。
+//   - 调度器能在"满足任务硬约束"的候选里选出节点 → 用它；
+//   - 任务**没有**硬约束（未声明 require_labels/require_tools）→ 退化为旧策略
+//     （任务数最少），对老任务保持零回归；
+//   - 任务**有**硬约束但当前一个节点都不满足 → 返回 ""（宁可留空，也不乱派）。
+//
+// 为什么必须有第三条（20 节点舰队实测，F3）：兜底若不分青红皂白就会**绕过硬约束**——
+// 一个 require_labels 指向不存在标签的任务会被兜底随手派给任意节点，
+// 于是"硬约束"名存实亡，任务在一台装不了它的机器上失败。
 func (j *JobService) AutoAllocateNodeFor(job *models.Job) string {
 	if chosen := DefaultSchedulerService.Allocate(job); chosen != "" {
 		return chosen
+	}
+	if DefaultSchedulerService.HasHardRequirement(job) {
+		return ""
 	}
 	return j.AutoAllocateNode()
 }

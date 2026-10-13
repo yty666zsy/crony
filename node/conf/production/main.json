@@ -15,7 +15,7 @@
     "env": "production",
     "addr": 8089,
     "#node-timeout": "Node registration timeout, in seconds",
-    "node-ttl": 5,
+    "node-ttl": 15,
     "#job-proc-ttl": "The unit is second",
     "job-proc-ttl": 300,
     "#log-clean-period":"The unit is minute. By default, it is cleared twice a day",
