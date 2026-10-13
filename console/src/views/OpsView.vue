@@ -24,6 +24,21 @@
           </div>
         </el-col>
       </el-row>
+
+      <div class="dim" style="margin-top: 14px">
+        方案指标（近 {{ metrics?.metrics_window_days ?? 7 }} 天）——比率的"无样本"与"0%"是两回事：
+        没有观测到样本时一律显示<strong>无样本</strong>，不显示 0%。
+      </div>
+      <el-row :gutter="12" style="margin-top: 8px">
+        <el-col v-for="c in planCards" :key="c.label" :span="6">
+          <div class="kpi">
+            <div class="kpi-label">{{ c.label }}</div>
+            <div class="kpi-value">{{ c.value }}</div>
+            <div class="kpi-sub">{{ c.sub }}</div>
+          </div>
+        </el-col>
+      </el-row>
+
       <div v-if="loadIssues.length" class="dim">
         ⚠ 本次刷新有区块未拿到数据：{{ loadIssues.join('、') }}（其余区块已正常显示；原因见右下角提示）
       </div>
@@ -242,27 +257,81 @@ const cards = computed(() => {
   ]
 })
 
-// loadAll 各区块**互相独立**：任何一个接口失败，其余区块照常显示，失败项写在页面上。
+// 方案 §指标看板 要求的 7 项，除"今日成功率"（在上排）外都在这里。
 //
-// 为什么不用顺序 await（也不要 Promise.all）：2026-10-13 实测到一次
-// `POST /ops/metrics/overview` 瞬时 502，顺序 await 会让整页 KPI / SLO / 信用 / 放量
-// **全部空白**——页面却"不报错"，只是空。这正是 F1–F10 那一类"静默失败"缺陷，
-// 所以这里逐项兜底，并把"哪些区块这次没拿到"摊在页面上，而不是留给运气。
+// 每一项都把**分子/分母**一起摊出来当自证材料：只给一个比率时，人没法判断它是
+// "全坏"还是"没数据"；而分母写出来，"无样本"与"0%"就永远分得开。
+// 三个复现率的代理口径（尤其"误动作率")必须在界面上写明，不能让人按方案原意去解读。
+const planCards = computed(() => {
+  const m = metrics.value || {}
+  const decided = m.heal_decided ?? '—'
+  const dash = (v) => (v == null ? '—' : v)
+  return [
+    {
+      label: 'MTTR（自愈平均耗时）',
+      value: m.mttr_seconds == null || m.mttr_seconds < 0 ? '无样本' : `${Math.round(m.mttr_seconds)}s`,
+      sub: `已成功自愈 ${dash(m.heal_succeeded)} 单（从创建到终态）`,
+    },
+    {
+      label: '自动修复率',
+      value: pct(m.auto_repair_rate),
+      sub: `${dash(m.heal_succeeded)}/${decided} 已出结论的处置`,
+    },
+    {
+      label: '人工接管率',
+      value: pct(m.human_takeover_rate),
+      sub: `${dash(m.heal_escalated)}/${decided} 系统判定"没把握"转人`,
+    },
+    {
+      label: '误动作率',
+      value: pct(m.misaction_rate),
+      sub: `${dash(m.heal_failed)}/${decided} 动手后仍失败（可观测代理口径）`,
+    },
+    {
+      label: '单次会话 token 成本',
+      value:
+        m.session_avg_tokens == null || m.session_avg_tokens < 0
+          ? '无样本'
+          : `${Math.round(m.session_avg_tokens)} token`,
+      sub: `${dash(m.session_count)} 次会话 / 共 ${dash(m.session_tokens_total)} token（未记账不计入）`,
+    },
+    {
+      label: '审批通过率',
+      value: pct(m.approval_pass_rate),
+      sub: `${dash(m.approval_approved)}/${dash(m.approval_decided)} 有结论的单子（待审批/超时/撤回不计入）`,
+    },
+  ]
+})
+
+// loadAll 各区块**互相独立**（任一接口失败，其余区块照常显示、失败项写在页面上），
+// 但**顺序**发请求。两条都是从实测里来的，不是风格偏好：
+//
+//   1. 独立：2026-10-13 实测到一次 `POST /ops/metrics/overview` 502，而当时是顺序 await +
+//      单个 try/finally，结果是整页 KPI / SLO / 信用 / 放量**全部空白**、页面却"不报错"。
+//      这正是 F1–F10 那一类"静默失败"，所以逐项兜底。
+//   2. 顺序：本机浏览器/代理层在**并发**发起同源请求时会丢掉第一批的第一个
+//      （实测响应码：并发 2 条 [502,200]、3 条 [502,200,200]、4 条 [502,200,200,200]；
+//      而**串行**连跑两轮 8 次全是 200）。四个只读请求差不了几十毫秒，
+//      "并发换来一次随机丢包"不划算。
 async function loadAll() {
   loading.value = true
   try {
-    const [m, s, a, r] = await Promise.allSettled([
-      fetchMetricsOverview(),
-      searchSlo(0),
-      listAutonomy(),
-      loadRollout(),
-    ])
-    if (m.status === 'fulfilled') metrics.value = m.value
-    if (s.status === 'fulfilled') sloList.value = (s.value && s.value.list) || []
-    if (a.status === 'fulfilled') autonomy.value = (a.value && a.value.list) || []
-    loadIssues.value = [
-      ['指标看板', m], ['SLO 契约', s], ['自治信用', a], ['放量档位', r],
-    ].filter(([, p]) => p.status === 'rejected').map(([n]) => n)
+    const issues = []
+    const tasks = [
+      ['指标看板', async () => { metrics.value = await fetchMetricsOverview() }],
+      ['SLO 契约', async () => { sloList.value = (await searchSlo(0)).list || [] }],
+      ['自治信用', async () => { autonomy.value = (await listAutonomy()).list || [] }],
+      ['放量档位', loadRollout],
+    ]
+    for (const [name, fn] of tasks) {
+      try {
+        await fn()
+      } catch {
+        // 具体原因由 client.js 统一弹提示；这里只记"哪个区块这次没拿到"。
+        issues.push(name)
+      }
+    }
+    loadIssues.value = issues
   } finally {
     loading.value = false
   }
@@ -352,6 +421,7 @@ onMounted(loadAll)
 .kpi { background: #fafafa; border-radius: 6px; padding: 12px 14px; }
 .kpi-label { color: #909399; font-size: 12px; }
 .kpi-value { font-size: 22px; font-weight: 600; margin-top: 4px; }
+.kpi-sub { color: #a8abb2; font-size: 12px; margin-top: 4px; line-height: 1.4; }
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 10px 0; }
 .tbl { margin-top: 8px; }
 .dim { color: #909399; font-size: 12px; }

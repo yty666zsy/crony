@@ -142,11 +142,23 @@ type MetricsService struct{}
 
 var DefaultMetricsService = new(MetricsService)
 
+// metricsWindowDays 是"近 N 天"类指标的窗口。
+//
+// 为什么这些指标不用"今日"：自愈、会话、审批都是**稀疏事件**，看"今日"经常是无样本，
+// 而一张满屏"无样本"的看板等于没有看板。任务成功率保留"今日"是因为它每天都有数据。
+const metricsWindowDays = 7
+
 // Overview 汇总运维关心的核心指标（阶段 5 指标看板的后端）。
 //
 // 数据全部来自已有表，不引入新的埋点：任务数、今日执行、成功率、执行耗时、
-// 节点在线、审批待办、自愈分布、经验库规模。任何一项拿不到都以 0/空呈现，
-// 但会在 blocked 里说明（不静默吞掉）。
+// 节点在线、审批待办、自愈分布、经验库规模。
+//
+// 另有一组"方案 §指标看板要求的 7 项"（缺的 6 项在 PHASE18 补齐，见 metrics.go 的口径）：
+// MTTR、自动修复率、人工接管率、误动作率、单次会话 token 成本、审批通过率。它们按
+// metricsWindowDays 取窗口，比率一律"分母为 0 时 = NoSample(-1)"而不是 0。
+//
+// 任何一项拿不到都以 0/空/NoSample 呈现，但不静默吞掉（错误的 SQL 会以 0 呈现，
+// 因此每个值旁边都有分子分母作为自证材料：看板上"无样本"与"0%"永远分得开）。
 func (s *MetricsService) Overview() map[string]interface{} {
 	db := dbclient.GetMysqlDB()
 	out := map[string]interface{}{}
@@ -203,6 +215,73 @@ func (s *MetricsService) Overview() map[string]interface{} {
 	var memTotal int64
 	_ = db.Table(models.CronyAgentMemoryTableName).Where("enabled = 1").Count(&memTotal).Error
 	out["memory_enabled"] = memTotal
+
+	// ---- 方案 §指标看板：近 N 天的补全项 ----
+	since := time.Now().Add(-time.Duration(metricsWindowDays) * 24 * time.Hour).Unix()
+	out["metrics_window_days"] = metricsWindowDays
+
+	// 自愈三率 + MTTR。窗口按 created 取（未终结的行 finished_at=0，
+	// 按 finished_at 过滤会把"正在处置"的整批漏掉，指标会随处置进度跳动）。
+	healsWin := make([]struct {
+		Status string
+		N      int64
+	}, 0)
+	_ = db.Table(models.CronyJobHealTableName).
+		Select("status, count(*) as n").Where("created >= ?", since).
+		Group("status").Scan(&healsWin).Error
+	healWinMap := map[string]int64{}
+	for _, h := range healsWin {
+		healWinMap[h.Status] = h.N
+	}
+	hr := FoldHealRates(healWinMap)
+	out["heal_decided"] = hr.Decided
+	out["heal_succeeded"] = hr.Succeeded
+	out["heal_escalated"] = hr.Escalated
+	out["heal_failed"] = hr.Failed
+	out["auto_repair_rate"] = hr.AutoRepair
+	out["human_takeover_rate"] = hr.Takeover
+	out["misaction_rate"] = hr.Misaction
+
+	// MTTR = 已成功自愈的处置，从创建到进入终态的平均耗时。
+	// 分母就是 heal_succeeded —— 与"自动修复率"共用同一个分子，两个指标不会互相矛盾。
+	mttr := NoSample
+	if hr.Succeeded > 0 {
+		var avg float64
+		_ = db.Table(models.CronyJobHealTableName).
+			Select("coalesce(avg(finished_at - created),0)").
+			Where("status = ? and finished_at > 0 and created >= ?", string(models.HealStatusSucceeded), since).
+			Scan(&avg).Error
+		mttr = avg
+	}
+	out["mttr_seconds"] = mttr
+
+	// 审批通过率（pending / expired 不进分母，见 FoldApprovalRates）。
+	apprWin := make([]struct {
+		Status string
+		N      int64
+	}, 0)
+	_ = db.Table(models.CronyApprovalRequestTableName).
+		Select("status, count(*) as n").Where("created >= ?", since).
+		Group("status").Scan(&apprWin).Error
+	apprWinMap := map[string]int64{}
+	for _, a := range apprWin {
+		apprWinMap[a.Status] = a.N
+	}
+	ar := FoldApprovalRates(apprWinMap)
+	out["approval_approved"] = ar.Approved
+	out["approval_rejected"] = ar.Rejected
+	out["approval_decided"] = ar.Decided
+	out["approval_pass_rate"] = ar.PassRate
+
+	// 单次会话 token 成本（只算有记账的会话）。
+	tokens := make([]int64, 0, 64)
+	_ = db.Table(models.CronyAgentSessionTableName).
+		Where("created >= ? and total_tokens > 0", since).
+		Pluck("total_tokens", &tokens).Error
+	sc := FoldSessionTokenCost(tokens)
+	out["session_count"] = sc.Sessions
+	out["session_tokens_total"] = sc.Total
+	out["session_avg_tokens"] = sc.AvgTokens
 
 	out["generated_at"] = time.Now().Unix()
 	return out

@@ -4017,4 +4017,235 @@ func TestAcceptanceSuite(t *testing.T) {
 		cc.note("档位 L2 + 收紧时间=现在 + 坏信号 → 等待 %ds 后档位仍为 L2，守卫原因=%q（冷却 %ds）",
 			interval*2+2, reason, cooldown)
 	})
+
+	// AC-72：指标看板补全项（方案 §指标看板 的 7 项里，除"今日成功率"外的 6 项）。
+	//
+	// 这条用例盯的是**分母**：指标看板真正会错的地方不是算术，而是"哪些行算进分母"。
+	// 分母错了页面照样好看，只是数字从此没人能信。其中一种错法最危险：
+	// 把"没有样本"算成 0% —— 看板会显示"全坏"，而实际是"还没数据"。
+	// 所以这里断言的是口径恒等式（比率必须能由分子分母复算；分母 0 必须是 -1）。
+	run("AC-72", "指标看板：7 项方案指标齐备、比率口径可复算、无样本与 0% 分得开", func(cc *caseCtx) {
+		out, err := c.postOK("/ops/metrics/overview", map[string]any{})
+		if err != nil {
+			cc.t.Fatalf("读指标看板失败: %v", err)
+		}
+		if len(out) == 0 {
+			cc.t.Fatalf("指标看板返回空: %+v", out)
+		}
+
+		keys := []string{
+			"mttr_seconds", "metrics_window_days", "heal_decided", "heal_succeeded", "heal_escalated",
+			"heal_failed", "auto_repair_rate", "human_takeover_rate", "misaction_rate",
+			"approval_approved", "approval_rejected", "approval_decided", "approval_pass_rate",
+			"session_count", "session_tokens_total", "session_avg_tokens",
+		}
+		missing := make([]string, 0)
+		for _, k := range keys {
+			if _, ok := out[k]; !ok {
+				missing = append(missing, k)
+			}
+		}
+		if len(missing) > 0 {
+			cc.t.Fatalf("方案指标缺字段（控制台会静默显示 '—'）：%v", missing)
+		}
+
+		abs := func(v float64) float64 {
+			if v < 0 {
+				return -v
+			}
+			return v
+		}
+		// 比率口径：分母 0 ⇒ -1（无样本）；否则必须等于 分子/分母。
+		checkRate := func(name string, num, den int64, rate float64) {
+			if den == 0 {
+				if rate != -1 {
+					cc.t.Fatalf("%s 没有样本（分母为 0）时必须返回 -1（无样本），实际 %v —— "+
+						"算成 0 会让看板把『没有数据』显示成『全是坏的』", name, rate)
+				}
+				return
+			}
+			if want := float64(num) / float64(den); abs(rate-want) > 1e-9 {
+				cc.t.Fatalf("%s 口径应为 分子/分母 = %d/%d = %.6f，实际 %.6f", name, num, den, want, rate)
+			}
+		}
+
+		decided := int64(asNum(out["heal_decided"]))
+		succeeded := int64(asNum(out["heal_succeeded"]))
+		escalated := int64(asNum(out["heal_escalated"]))
+		failed := int64(asNum(out["heal_failed"]))
+		if decided != succeeded+escalated+failed {
+			cc.t.Fatalf("heal_decided=%d 必须等于 成功%d+转人%d+失败%d（denied/planned/executed 不进分母：策略拒绝是系统正确地没动手）",
+				decided, succeeded, escalated, failed)
+		}
+		checkRate("自动修复率", succeeded, decided, asNum(out["auto_repair_rate"]))
+		checkRate("人工接管率", escalated, decided, asNum(out["human_takeover_rate"]))
+		checkRate("误动作率", failed, decided, asNum(out["misaction_rate"]))
+		mttr := asNum(out["mttr_seconds"])
+		if succeeded == 0 && mttr != -1 {
+			cc.t.Fatalf("没有成功自愈的处置（分母 0）时 MTTR 应为 -1（无样本），实际 %v", mttr)
+		}
+		if succeeded > 0 && mttr < 0 {
+			cc.t.Fatalf("有 %d 单成功自愈，MTTR 却报无样本", succeeded)
+		}
+
+		apprApproved := int64(asNum(out["approval_approved"]))
+		apprRejected := int64(asNum(out["approval_rejected"]))
+		apprDecided := int64(asNum(out["approval_decided"]))
+		if apprDecided != apprApproved+apprRejected {
+			cc.t.Fatalf("approval_decided=%d 必须等于 通过%d+不通过%d（待审批/超时/撤回不进分母）",
+				apprDecided, apprApproved, apprRejected)
+		}
+		checkRate("审批通过率", apprApproved, apprDecided, asNum(out["approval_pass_rate"]))
+
+		sessCount := int64(asNum(out["session_count"]))
+		sessTotal := int64(asNum(out["session_tokens_total"]))
+		checkRate("单次会话 token 成本", sessTotal, sessCount, asNum(out["session_avg_tokens"]))
+
+		winDays := int64(asNum(out["metrics_window_days"]))
+		if winDays < 1 {
+			cc.t.Fatalf("指标窗口天数必须是正整数，实际 %d", winDays)
+		}
+
+		// 注意：MTTR 是**秒**、会话成本是**token 数**，只有三个修复率/接管率与审批通过率是
+		// 百分数。把它们一律当百分数渲染（哪怕只是写在证据里）就是在复现这条用例要拦的那类错。
+		cc.note("16 个方案指标字段齐备；decided=%d（成功%d/转人%d/失败%d）→ 三率可由分子分母复算；"+
+			"MTTR=%s；审批 decided=%d → 通过率 %s；窗口 %d 天；会话 %d 次 / %d token → 单次 %.0f token",
+			decided, succeeded, escalated, failed, fmtSeconds(mttr), apprDecided,
+			fmtRate(asNum(out["approval_pass_rate"])), winDays, sessCount, sessTotal,
+			asNum(out["session_avg_tokens"]))
+	})
+
+	// AC-73：指标窗口与状态过滤与**库内实际行**逐项对账。
+	//
+	// AC-72 证明的是"比率能由分子分母复算"，但那些分子分母**本身**可能是错的
+	// （忘了加窗口条件、把 denied 也算进分母、把 pending 当成"不通过"）。
+	// 这条用例取接口自己报出的窗口天数与生成时刻，在库上把同一份过滤重算一遍，
+	// 逐项对账——两边独立算，结果必须一致。
+	run("AC-73", "指标看板：近 N 天窗口与状态过滤与库内实际行逐项对账", func(cc *caseCtx) {
+		if db == nil {
+			cc.skip("未配置 CRONY_TEST_MYSQL_DSN，无法与库内实际行对账")
+		}
+		out, err := c.postOK("/ops/metrics/overview", map[string]any{})
+		if err != nil {
+			cc.t.Fatalf("读指标看板失败: %v", err)
+		}
+		days := int64(asNum(out["metrics_window_days"]))
+		gen := int64(asNum(out["generated_at"]))
+		if days < 1 || gen <= 0 {
+			cc.t.Fatalf("窗口天数/生成时刻非法：days=%d gen=%d", days, gen)
+		}
+		since := gen - days*86400
+
+		// ---- 自愈：created 落在窗口内，按状态分桶 ----
+		type bucket struct {
+			Status string
+			N      int64
+		}
+		healRows := make([]bucket, 0)
+		rows, err := db.Query("select status, count(*) from "+models.CronyJobHealTableName+
+			" where created >= ? group by status", since)
+		if err != nil {
+			cc.t.Fatalf("按窗口统计 job_heal 失败: %v", err)
+		}
+		for rows.Next() {
+			var b bucket
+			if err := rows.Scan(&b.Status, &b.N); err != nil {
+				rows.Close()
+				cc.t.Fatalf("扫描 job_heal 分桶失败: %v", err)
+			}
+			healRows = append(healRows, b)
+		}
+		rows.Close()
+		healBy := map[string]int64{}
+		for _, b := range healRows {
+			healBy[b.Status] = b.N
+		}
+		for _, want := range []struct {
+			key    string
+			status string
+		}{
+			{"heal_succeeded", string(models.HealStatusSucceeded)},
+			{"heal_escalated", string(models.HealStatusEscalated)},
+			{"heal_failed", string(models.HealStatusFailed)},
+		} {
+			if got := int64(asNum(out[want.key])); got != healBy[want.status] {
+				cc.t.Fatalf("%s 与库内窗口统计不一致：接口=%d，库=%d（窗口起点 %d，分桶 %v）",
+					want.key, got, healBy[want.status], since, healBy)
+			}
+		}
+		// denied 必须在分母之外：全时段的"已出结论"行数不会比窗口内的 decided 少，
+		// 而全时段 denied 有行时，若把 denied 算进分母，这里必然对不上。
+		var decidedAll int64
+		if err := db.QueryRow("select count(*) from "+models.CronyJobHealTableName+
+			" where status in (?,?,?)",
+			string(models.HealStatusSucceeded), string(models.HealStatusEscalated),
+			string(models.HealStatusFailed)).Scan(&decidedAll); err != nil {
+			cc.t.Fatalf("统计全时段已出结论的自愈行失败: %v", err)
+		}
+		if decided := int64(asNum(out["heal_decided"])); decided > decidedAll {
+			cc.t.Fatalf("heal_decided=%d 大于全时段『已出结论』行数 %d：denied/planned/executed 被算进了分母",
+				decided, decidedAll)
+		}
+
+		// ---- 审批：只数有"通过/不通过"结论的单子 ----
+		// 通过集合的四种状态是**契约**（批准后单子会继续流转，状态被覆盖），
+		// 这里刻意在用例里独立写一遍，不从后端常量 import —— 两边独立算才对得上。
+		approvedSQL := "select count(*) from " + models.CronyApprovalRequestTableName +
+			" where created >= ? and status in ('approved','executed','execution_failed','blocked')"
+		var approvedDB, rejectedDB int64
+		if err := db.QueryRow(approvedSQL, since).Scan(&approvedDB); err != nil {
+			cc.t.Fatalf("按窗口统计已批准审批单失败: %v", err)
+		}
+		if err := db.QueryRow("select count(*) from "+models.CronyApprovalRequestTableName+
+			" where created >= ? and status = 'rejected'", since).Scan(&rejectedDB); err != nil {
+			cc.t.Fatalf("按窗口统计已拒绝审批单失败: %v", err)
+		}
+		if got := int64(asNum(out["approval_approved"])); got != approvedDB {
+			cc.t.Fatalf("approval_approved=%d 与库内窗口统计不一致（库=%d）；"+
+				"只数 status=approved 会漏掉已流转成 executed/execution_failed/blocked 的单子", got, approvedDB)
+		}
+		if got := int64(asNum(out["approval_rejected"])); got != rejectedDB {
+			cc.t.Fatalf("approval_rejected=%d 与库内窗口统计不一致（库=%d）", got, rejectedDB)
+		}
+
+		// ---- 会话 token 成本：只算有记账的会话 ----
+		var sessCountDB, sessTotalDB int64
+		if err := db.QueryRow("select count(*), coalesce(sum(total_tokens),0) from "+
+			models.CronyAgentSessionTableName+" where created >= ? and total_tokens > 0",
+			since).Scan(&sessCountDB, &sessTotalDB); err != nil {
+			cc.t.Fatalf("按窗口统计会话 token 失败: %v", err)
+		}
+		if got := int64(asNum(out["session_count"])); got != sessCountDB {
+			cc.t.Fatalf("session_count=%d 与库内窗口统计不一致（库=%d）", got, sessCountDB)
+		}
+		if got := int64(asNum(out["session_tokens_total"])); got != sessTotalDB {
+			cc.t.Fatalf("session_tokens_total=%d 与库内窗口统计不一致（库=%d）", got, sessTotalDB)
+		}
+
+		var deniedAll int64
+		_ = db.QueryRow("select count(*) from "+models.CronyJobHealTableName+
+			" where status = ?", string(models.HealStatusDenied)).Scan(&deniedAll)
+		cc.note("窗口起点=%d（近 %d 天）：自愈分桶 %v（全时段『已出结论』%d 行，其中 denied %d 行不计入分母）；"+
+			"审批 通过=%d/拒绝=%d；会话 %d 次 / %d token —— 接口与库逐项一致",
+			since, days, healBy, decidedAll, deniedAll, approvedDB, rejectedDB, sessCountDB, sessTotalDB)
+	})
+}
+
+// fmtRate 把比率渲染成可读文本：负数（NoSample）显示"无样本"。
+// 验收报告里"无样本"必须与 0% 一眼分得开，否则报告本身就在犯这条用例要拦的错。
+func fmtRate(r float64) string {
+	if r < 0 {
+		return "无样本"
+	}
+	return strconv.FormatFloat(r*100, 'f', 1, 64) + "%"
+}
+
+// fmtSeconds 把秒数渲染成可读文本：负数（NoSample）显示"无样本"。
+// 与 fmtRate 分开是因为**单位**不同：把秒当百分数渲染过一次（"单次 1097036.6%"），
+// 这类错在证据里同样会误导人。
+func fmtSeconds(sec float64) string {
+	if sec < 0 {
+		return "无样本"
+	}
+	return strconv.FormatFloat(sec, 'f', 1, 64) + "s"
 }

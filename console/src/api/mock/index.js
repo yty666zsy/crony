@@ -1605,14 +1605,29 @@ export function schedulerAllocate({ job_id: jobId } = {}) {
 }
 
 export function opsMetrics() {
+  // ⚠ 这里的数字必须满足真后端的契约（PHASE18）：
+  //   - 比率 = 分子/分母，**分母为 0 时是 -1（无样本）而不是 0**；
+  //   - metrics_window_days 的窗口内计数 ≤ 全时段计数（heals_by_status）；
+  //   - decided = succeeded + escalated + failed；decided = approved + rejected。
+  // smoke-mock.mjs 会把这些恒等式逐条断言 —— Mock 一旦与后端口径脱节，
+  // 前端会"在 Mock 里全对、在真机上全错"（F1–F10 就是这么来的）。
   return {
     code: 200,
     data: {
       runs_today: 42, runs_success_today: 39, success_rate_today: 0.928,
       avg_duration_ms_today: 3120, jobs_total: 18, jobs_assigned: 12,
       nodes_total: 3, nodes_up: 3, approvals_pending: 1,
-      heals_by_status: { denied: 2, executed: 1, succeeded: 3, escalated: 1 },
+      heals_by_status: { denied: 2, executed: 1, succeeded: 3, escalated: 1, failed: 1 },
       memory_enabled: 45, generated_at: Math.floor(Date.now() / 1000),
+
+      // ---- 方案 §指标看板要求的 7 项（PHASE18 补齐，近 7 天窗口）----
+      metrics_window_days: 7,
+      mttr_seconds: 42.5,
+      heal_decided: 4, heal_succeeded: 2, heal_escalated: 1, heal_failed: 1,
+      auto_repair_rate: 0.5, human_takeover_rate: 0.25, misaction_rate: 0.25,
+      approval_approved: 4, approval_rejected: 2, approval_decided: 6,
+      approval_pass_rate: 4 / 6,
+      session_count: 12, session_tokens_total: 48000, session_avg_tokens: 4000,
     },
     msg: 'ok',
   }

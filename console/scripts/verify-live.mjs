@@ -1007,6 +1007,92 @@ await server.close()
   }
 }
 
+// ---------------------------------------------------------------------------
+// 101) PHASE18：指标看板补全项（方案 §指标看板 的 7 项里，除"今日成功率"外的 6 项）。
+//
+// 断言的是**对外承诺**，不是"接口能返回"：
+//   - 6 个指标值与它们的分子/分母同时存在（只给一个比率，人没法判断
+//     它是"全坏"还是"没数据"）；
+//   - 比率 = 分子/分母，且**分母为 0 时必须是 -1（无样本）而不是 0%**；
+//   - 窗口 ⊆ 全时段（近 N 天的计数不得大于 heals_by_status 的全量计数）。
+// 这几条不成立时，看板会显示错误百分比、或把"没有数据"显示成"0%"，
+// 而页面本身**不会报错** —— 与 F1–F10 同一类只能在真后端上抓到的缺陷。
+// ---------------------------------------------------------------------------
+{
+  const opsApi = mods.ops
+  const ov = await step('POST /ops/metrics/overview（运维智能化看板数据源）', () =>
+    opsApi.fetchMetricsOverview(),
+  )
+  if (ov.ok) {
+    const m = ov.value || {}
+    const near = (a, b) => Math.abs(a - b) < 1e-9
+    const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : NaN)
+    // 比率与分子的口径一致性：分母 0 ↔ 比率 -1（无样本）；否则必须等于 num/den。
+    const ratioOK = (rate, n, d) => {
+      if (d === 0) return rate === -1
+      return d > 0 && near(rate, n / d)
+    }
+    const pctText = (r) => (r < 0 ? '无样本' : (r * 100).toFixed(1) + '%')
+
+    check(
+      'M1 方案 7 项指标齐备：MTTR / 自动修复率 / 人工接管率 / 误动作率 / 会话 token 成本 / 审批通过率（各带分子分母）',
+      [
+        'mttr_seconds', 'metrics_window_days', 'heal_decided', 'heal_succeeded', 'heal_escalated',
+        'heal_failed', 'auto_repair_rate', 'human_takeover_rate', 'misaction_rate',
+        'approval_approved', 'approval_rejected', 'approval_decided', 'approval_pass_rate',
+        'session_count', 'session_tokens_total', 'session_avg_tokens',
+      ].every((k) => k in m),
+      `窗口=${m.metrics_window_days}天 缺字段=${[
+        'mttr_seconds', 'metrics_window_days', 'heal_decided', 'heal_succeeded', 'heal_escalated',
+        'heal_failed', 'auto_repair_rate', 'human_takeover_rate', 'misaction_rate',
+        'approval_approved', 'approval_rejected', 'approval_decided', 'approval_pass_rate',
+        'session_count', 'session_tokens_total', 'session_avg_tokens',
+      ].filter((k) => !(k in m)).join(',') || '无'}`,
+    )
+
+    check(
+      'M2 自愈三率 = 分子/分母，且分母为 0 时是「无样本」而不是 0%',
+      m.heal_decided === m.heal_succeeded + m.heal_escalated + m.heal_failed &&
+        ratioOK(m.auto_repair_rate, m.heal_succeeded, m.heal_decided) &&
+        ratioOK(m.human_takeover_rate, m.heal_escalated, m.heal_decided) &&
+        ratioOK(m.misaction_rate, m.heal_failed, m.heal_decided),
+      `decided=${m.heal_decided}(成功${m.heal_succeeded}/转人${m.heal_escalated}/失败${m.heal_failed}) ` +
+        `自动修复=${pctText(num(m.auto_repair_rate))} 接管=${pctText(num(m.human_takeover_rate))} 误动作=${pctText(num(m.misaction_rate))}`,
+    )
+
+    check(
+      'M3 审批通过率只看有结论的单子（待审批/超时/撤回不进分母），且批准后流转不改口径',
+      m.approval_decided === m.approval_approved + m.approval_rejected &&
+        ratioOK(m.approval_pass_rate, m.approval_approved, m.approval_decided),
+      `approved=${m.approval_approved} rejected=${m.approval_rejected} decided=${m.approval_decided} ` +
+        `通过率=${pctText(num(m.approval_pass_rate))}`,
+    )
+
+    check(
+      'M4 单次会话 token 成本 = 已记账会话的均值（未记账的 0 不进分母）',
+      ratioOK(m.session_avg_tokens, m.session_tokens_total, m.session_count),
+      `会话=${m.session_count} 共${m.session_tokens_total} token 均值=${
+        m.session_avg_tokens < 0 ? '无样本' : Math.round(m.session_avg_tokens)
+      }`,
+    )
+
+    check(
+      'M5 MTTR 与「自动修复率」共用同一个分子（成功自愈的处置），两个指标不会互相矛盾',
+      m.heal_succeeded === 0 ? m.mttr_seconds === -1 : m.mttr_seconds >= 0,
+      `成功自愈=${m.heal_succeeded} MTTR=${m.mttr_seconds < 0 ? '无样本' : Math.round(m.mttr_seconds) + 's'}`,
+    )
+
+    const all = m.heals_by_status || {}
+    const win = { succeeded: m.heal_succeeded, escalated: m.heal_escalated, failed: m.heal_failed }
+    const okWin = Object.entries(win).every(([k, v]) => v <= (all[k] || 0))
+    check(
+      'M6 窗口内计数 ⊆ 全时段计数（"近 N 天"不能比"全部"还多）',
+      okWin && Number.isInteger(m.metrics_window_days) && m.metrics_window_days >= 1,
+      `全量=${JSON.stringify(all)} 窗口=${JSON.stringify(win)}`,
+    )
+  }
+}
+
 console.log('\n===== 真实联调结果 =====')
 console.log(`通过 ${results.length - failed}/${results.length}，失败 ${failed}`)
 for (const r of results.filter((x) => !x.ok)) console.log(`  FAIL ${r.name} — ${r.detail}`)

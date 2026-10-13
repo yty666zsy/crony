@@ -593,6 +593,49 @@ check('阶段 5 放量档位 Mock：收紧永不拒绝、加宽要证据、已�
   assert.equal(bad.code, 1001, 'L0 不是放量目标（应改用 tighten）')
 })
 
+check('阶段 5 指标看板 Mock：比率分母为 0 时是"无样本"(-1) 而不是 0，且计数自洽', () => {
+  const m = mock.opsMetrics().data
+  const eq = (a, b, msg) => assert.ok(Math.abs(a - b) < 1e-9, `${msg}: ${a} != ${b}`)
+
+  // 恒等式：必须与后端 metrics.go 的三条 fold 规则一致。
+  // "denied/planned/executed 不进分母"这条尤其重要 —— 把策略拒绝算进分母，
+  // 等于让系统为自己的正确行为（不动手）扣分。
+  assert.equal(m.heal_decided, m.heal_succeeded + m.heal_escalated + m.heal_failed,
+    'decided = succeeded + escalated + failed')
+  eq(m.auto_repair_rate, m.heal_succeeded / m.heal_decided, '自动修复率 = succeeded/decided')
+  eq(m.human_takeover_rate, m.heal_escalated / m.heal_decided, '人工接管率 = escalated/decided')
+  eq(m.misaction_rate, m.heal_failed / m.heal_decided, '误动作率 = failed/decided')
+  assert.equal(m.approval_decided, m.approval_approved + m.approval_rejected,
+    'decided = approved + rejected（pending/expired/canceled 不进分母）')
+  eq(m.approval_pass_rate, m.approval_approved / m.approval_decided, '审批通过率 = approved/decided')
+  eq(m.session_avg_tokens, m.session_tokens_total / m.session_count, '单次会话 token 成本 = total/count')
+
+  // 窗口 ⊆ 全时段：近 N 天的计数不得大于 heals_by_status 的全量计数。
+  const all = m.heals_by_status || {}
+  for (const [k, v] of [['succeeded', m.heal_succeeded], ['escalated', m.heal_escalated], ['failed', m.heal_failed]]) {
+    assert.ok(v <= (all[k] || 0), `${k}: 窗口计数 ${v} 不得大于全量 ${all[k] || 0}`)
+  }
+  assert.ok(m.metrics_window_days >= 1, '窗口天数必须是正整数')
+
+  // "无样本"语义：比率 <0 只能出现在分母为 0 时（0% 与无样本必须分得开）。
+  for (const [rate, den] of [
+    [m.auto_repair_rate, m.heal_decided],
+    [m.human_takeover_rate, m.heal_decided],
+    [m.misaction_rate, m.heal_decided],
+    [m.approval_pass_rate, m.approval_decided],
+    [m.session_avg_tokens, m.session_count],
+  ]) {
+    assert.equal(rate < 0, den === 0, `比率的无样本语义与分母不一致：rate=${rate} den=${den}`)
+  }
+
+  for (const k of ['mttr_seconds', 'metrics_window_days', 'heal_decided', 'heal_succeeded',
+    'heal_escalated', 'heal_failed', 'auto_repair_rate', 'human_takeover_rate', 'misaction_rate',
+    'approval_approved', 'approval_rejected', 'approval_decided', 'approval_pass_rate',
+    'session_count', 'session_tokens_total', 'session_avg_tokens']) {
+    assert.ok(k in m, `方案指标契约缺字段 ${k}`)
+  }
+})
+
 /* ===================== 工具函数：时间口径（秒 / 毫秒 / ISO 三者都要对） ===================== */
 
 check('utils/format：时间格式化兼容 Unix 秒 / 毫秒 / ISO（毫秒字段不得再乘 1000）', async () => {
