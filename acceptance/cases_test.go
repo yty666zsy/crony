@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/tmnhs/crony/common/models"
+	"github.com/tmnhs/crony/common/pkg/etcdclient"
 )
 
 // caseCtx 给每个用例一个"可写证据"的地方：跳过时也必须留下原因（SKIP ≠ 通过）。
@@ -1723,17 +1724,19 @@ func TestAcceptanceSuite(t *testing.T) {
 		if db == nil {
 			cc.skip("未配置 CRONY_TEST_MYSQL_DSN：无法核对 job_run_step")
 		}
-		// 只认**真实执行产生**的 run：run_id 形如 j<job_id>-t<槽位>（models.RunIDForSlot），
-		// 且步骤数 ≥ 3（本套件自己造的夹具是 1~2 步、id 形如 <tag>-run）。
+		// 只认**真实执行产生**的 run：run_id 形如 j<job_id>-t<槽位>（调度）
+		// 或 j<job_id>-m<纳秒>-<序号>（手动/ Agent 触发，见 models.RunIDForSlot /
+		// NewManualRunID），且步骤数 ≥ 3（本套件自己造的夹具是 1~2 步、id 形如 <tag>-run）。
 		// 为什么要这样卡：拿夹具当"执行证据"等于验自己写的行，报告会好看但什么都没证明。
-		// 本机 etcd 未启动 → 黑盒套件触发不了节点执行 DAG，此时必须**老实地 SKIP**。
+		// 阶段 5 收尾时本机已起 etcd + 真节点舰队，黑盒侧能触发真实的 DAG 执行，
+		// 因此这里同时接受调度（-t）与手动（-m）两种真实 run；夹具一律不以 j 开头，不会被误认。
 		var runID string
 		var stepCount int
 		err := db.QueryRow("select run_id, step_count from job_run "+
-			"where step_count >= 3 and run_id like 'j%-t%' order by id desc limit 1").
+			"where step_count >= 3 and run_id like 'j%-%' order by id desc limit 1").
 			Scan(&runID, &stepCount)
 		if err != nil {
-			cc.skip("库里没有真实执行产生的多步骤 run（本机 etcd 未启动 → 黑盒触发不了节点执行 DAG）。" +
+			cc.skip("库里没有真实执行产生的多步骤 run（需要 etcd + 至少一个真节点才会产生）。" +
 				"执行语义的证据在集成测试：TestMySQLRunCoordinatorMultiStepDAG / DAGSkipsDownstreamOnFailure / " +
 				"DAGFailFastStopsPendingBranches / RejectsInvalidPlanOnRealDB（真库 + 真进程，含跳过原因与汇聚策略落库）")
 		}
@@ -2491,5 +2494,208 @@ func TestAcceptanceSuite(t *testing.T) {
 		}
 		cc.note("审计合并契约齐备（本页 %d 行 / 共 %v 行）：来源标注、结果枚举、ip 留空均正确",
 			len(list), page["total"])
+	})
+
+	/* ---------------------- 阶段 5 收尾：节点舰队与多目标调度（新增） ---------------------- */
+
+	// AC-47：节点列表必须来自真实库、uuid 唯一、在线计数与库内一致。
+	// 舰队上到 20 个节点后，"列表/统计各说各话"这类漂移最容易被忽视，也最影响排障。
+	run("AC-47", "节点舰队：列表契约完整、uuid 唯一、在线计数与库内一致", func(cc *caseCtx) {
+		page, err := c.postOK("/node/search", map[string]any{"page": 1, "page_size": 500})
+		if err != nil {
+			cc.t.Fatalf("节点检索失败: %v", err)
+		}
+		total := int(asNum(page["total"]))
+		list := asSlice(page["list"])
+		if total <= 0 {
+			cc.skip("库里没有任何节点：节点舰队未启动，本用例需要至少 1 个已注册节点")
+		}
+		if len(list) != total {
+			cc.t.Fatalf("total=%d 与返回行数 %d 不一致（分页契约破了）", total, len(list))
+		}
+		seen := map[string]bool{}
+		online := 0
+		for _, x := range list {
+			m := asMap(x)
+			uuid := strings.TrimSpace(asStr(m["uuid"]))
+			if uuid == "" {
+				cc.t.Fatalf("节点行缺 uuid：%+v", m)
+			}
+			for _, k := range []string{"hostname", "ip", "version"} {
+				if strings.TrimSpace(asStr(m[k])) == "" {
+					cc.t.Fatalf("节点 %s 缺字段 %q（控制台节点页会直接渲染它）: %+v", uuid, k, m)
+				}
+			}
+			if seen[uuid] {
+				cc.t.Fatalf("节点 uuid 重复：%s（同一节点两行会让调度与统计口径分裂）", uuid)
+			}
+			seen[uuid] = true
+			if int(asNum(m["status"])) == int(models.NodeConnSuccess) {
+				online++
+			}
+		}
+		if db == nil {
+			cc.note("节点 %d 个（uuid 唯一、契约字段齐全），在线 %d（未配置 DSN，跳过库内交叉校验）", total, online)
+			return
+		}
+		var dbTotal, dbOnline int
+		if err := db.QueryRow(
+			"select count(*), coalesce(sum(case when status = ? then 1 else 0 end), 0) from node",
+			models.NodeConnSuccess).Scan(&dbTotal, &dbOnline); err != nil {
+			cc.t.Fatalf("读库内节点数失败: %v", err)
+		}
+		if dbTotal != total {
+			cc.t.Fatalf("接口 total=%d 与库内节点行数 %d 不一致（列表不是来自真实库）", total, dbTotal)
+		}
+		stat, err := c.getOK("/statis/today")
+		if err != nil {
+			cc.t.Fatalf("读取今日统计失败: %v", err)
+		}
+		if got := int(asNum(stat["normal_node_count"])); got != dbOnline {
+			cc.t.Fatalf("统计接口在线数=%d 与库内 status=%d 的行数=%d 不一致", got, models.NodeConnSuccess, dbOnline)
+		}
+		cc.note("节点 %d 个（在线 %d / 失联 %d）：uuid 唯一、契约字段齐全、列表与统计均与库内一致",
+			dbTotal, dbOnline, dbTotal-dbOnline)
+	})
+
+	// AC-48：节点失联（etcd 节点键消失）必须触发 FailOver：该节点上的任务被重分配，
+	// 且旧节点的 etcd 任务键被清理。
+	//
+	// 这条路径**只有 etcd 事件能触发**，所以前置条件是 etcd 探针（CRONY_ACC_ETCD_ENDPOINTS）；
+	// 未配置就 SKIP 并写明原因。用例自造一个"合成节点"当牺牲品（绝不碰真实节点）：
+	// 先在库里插一行 + 往 etcd 写注册键（模拟上线），建一个分配在它上面的任务，
+	// 再删掉注册键（模拟失联），最后等 FailOver 把任务搬走。
+	run("AC-48", "节点失联：etcd 节点键消失后任务被重分配且旧键被清理（FailOver）", func(cc *caseCtx) {
+		if db == nil {
+			cc.skip("未配置 CRONY_TEST_MYSQL_DSN：无法核对任务归属")
+		}
+		cli := newEtcdClient(cc.t, os.Getenv("CRONY_ACC_ETCD_ENDPOINTS"))
+		if cli == nil {
+			cc.skip("未配置 CRONY_ACC_ETCD_ENDPOINTS：FailOver 只由 etcd 节点事件驱动，无探针则无法触发（不是系统缺陷）")
+		}
+		tag := strings.TrimSpace(os.Getenv("CRONY_ACC_RUN_TAG"))
+		if tag == "" {
+			tag = "acc-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+		}
+		victim := "acc-failover-" + tag
+		ctx := context.Background()
+
+		// 1) 牺牲节点：库内一行（在线）+ etcd 注册键
+		if _, err := db.Exec(`insert into node
+			(pid, ip, hostname, uuid, version, status, up, down, labels, capacity)
+			values ('1', '127.0.0.1', 'acc-victim', ?, 'acceptance', ?, ?, 0, '', 0)`,
+			victim, models.NodeConnSuccess, time.Now().Unix()); err != nil {
+			cc.t.Fatalf("造牺牲节点失败（验收库需要 INSERT 权限）: %v", err)
+		}
+		nodeKey := fmt.Sprintf(etcdclient.KeyEtcdNode, victim)
+		val, _ := json.Marshal(models.Node{
+			UUID: victim, Hostname: "acc-victim", IP: "127.0.0.1", PID: "1",
+			Version: "acceptance", Status: models.NodeConnSuccess,
+		})
+		if _, err := cli.Put(ctx, nodeKey, string(val)); err != nil {
+			cc.t.Fatalf("写 etcd 节点注册键失败: %v", err)
+		}
+		// 2) 建一个分配在牺牲节点上的任务（走公开接口：写库 + 写 etcd 任务键）
+		created, err := c.postOK("/job/add", map[string]any{
+			"name": "ACC-FAILOVER-" + tag, "command": "cmd /c echo failover",
+			"job_type": 1, "spec": "0 0 5 * * *", "timeout": 30, "notify_type": 1,
+			"allocation": 1, "run_on": victim,
+		})
+		if err != nil {
+			cc.t.Fatalf("在牺牲节点上建任务失败: %v", err)
+		}
+		jobID := int(asNum(created["id"]))
+		if jobID <= 0 {
+			cc.t.Fatalf("建任务未返回 id: %+v", created)
+		}
+		jobKey := fmt.Sprintf(etcdclient.KeyEtcdJob, victim, jobID)
+		cc.t.Cleanup(func() {
+			_, _ = c.postOK("/job/del", map[string]any{"ids": []int{jobID}})
+			_, _ = db.Exec("delete from node where uuid = ?", victim)
+			_, _ = cli.Delete(context.Background(), nodeKey)
+		})
+		// 3) 让调度器不再把牺牲节点当候选：否则任务可能被"重分配"回它自己，用例变成假阴性。
+		if _, err := db.Exec("update node set status = ? where uuid = ?", models.NodeConnFail, victim); err != nil {
+			cc.t.Fatalf("把牺牲节点置为失联失败: %v", err)
+		}
+		// 4) 模拟失联：删掉 etcd 注册键
+		if _, err := cli.Delete(ctx, nodeKey); err != nil {
+			cc.t.Fatalf("删除 etcd 节点注册键失败: %v", err)
+		}
+		// 5) 等 FailOver：任务归属换成别的节点
+		deadline := time.Now().Add(30 * time.Second)
+		var moved string
+		for time.Now().Before(deadline) {
+			var runOn string
+			if err := db.QueryRow("select coalesce(run_on, '') from job where id = ?", jobID).Scan(&runOn); err != nil {
+				cc.t.Fatalf("读回任务归属失败: %v", err)
+			}
+			if runOn != "" && runOn != victim {
+				moved = runOn
+				break
+			}
+			time.Sleep(time.Second)
+		}
+		if moved == "" {
+			cc.t.Fatalf("节点失联后任务 %d 仍挂在 %s 上（FailOver 未生效：任务不会在新节点上被调度）", jobID, victim)
+		}
+		gr, err := cli.Get(ctx, jobKey)
+		if err != nil {
+			cc.t.Fatalf("读旧 etcd 任务键失败: %v", err)
+		}
+		if gr.Count != 0 {
+			cc.t.Fatalf("FailOver 成功后旧节点的 etcd 任务键 %s 应被清理，实际仍存在", jobKey)
+		}
+		var newNodeCount int
+		if err := db.QueryRow("select count(*) from node where uuid = ?", moved).Scan(&newNodeCount); err != nil {
+			cc.t.Fatalf("核对新节点失败: %v", err)
+		}
+		if newNodeCount != 1 {
+			cc.t.Fatalf("任务被搬到的节点 %s 在库内不存在", moved)
+		}
+		cc.note("牺牲节点 %s 失联后，任务 %d 被重分配给 %s，旧 etcd 任务键已清理", victim, jobID, moved)
+	})
+
+	// AC-49：硬约束必须真的挡人。require_labels 指向一个不存在的标签时，
+	// 调度器必须"一个都选不出来"，而不是随手挑一个（乱选会把任务派到装不了它的机器上）。
+	run("AC-49", "多目标调度硬约束：不满足 require_labels 的节点一律被排除", func(cc *caseCtx) {
+		tag := strings.TrimSpace(os.Getenv("CRONY_ACC_RUN_TAG"))
+		if tag == "" {
+			tag = "acc-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+		}
+		created, err := c.postOK("/job/add", map[string]any{
+			"name": "ACC-SELECTOR-" + tag, "command": "cmd /c echo selector",
+			"job_type": 1, "spec": "0 0 6 * * *", "timeout": 30, "notify_type": 1,
+			"allocation": 1, "run_on": nodeUUID,
+			"node_selector": `{"require_labels":{"acc-fleet-nonexistent":"1"}}`,
+		})
+		if err != nil {
+			cc.skip("无法建带 node_selector 的任务（该任务走手动分配，需要一个在线节点 %s）: %v", nodeUUID, err)
+		}
+		jobID := int(asNum(created["id"]))
+		if jobID <= 0 {
+			cc.t.Fatalf("建带选择器的任务未返回 id: %+v", created)
+		}
+		cc.t.Cleanup(func() { _, _ = c.postOK("/job/del", map[string]any{"ids": []int{jobID}}) })
+
+		dec, err := c.postOK("/ops/scheduler/allocate", map[string]any{"job_id": jobID})
+		if err != nil {
+			cc.t.Fatalf("调度解释失败: %v", err)
+		}
+		d := asMap(dec["decision"])
+		req := asMap(dec["requirement"])
+		if chosen := strings.TrimSpace(asStr(d["chosen"])); chosen != "" {
+			cc.t.Fatalf("require_labels 指向不存在的标签时不得选出节点（会派到装不了它的机器上），实际 chosen=%q", chosen)
+		}
+		// 注意键名口径：requirement 是调度内核的结构体直出（字段名即键名，PascalCase），
+		// 不是 snake_case。两种都认，避免把"契约命名风格"误判成功能缺陷。
+		labels := asMap(req["RequireLabels"])
+		if len(labels) == 0 {
+			labels = asMap(req["require_labels"])
+		}
+		if len(labels) == 0 {
+			cc.t.Fatalf("调度解释必须回显硬约束（否则无法复盘为什么没选出来）: %+v", req)
+		}
+		cc.note("硬约束 require_labels=%v 下 chosen 为空（集群里没有满足条件的节点），硬约束没有被忽略", labels)
 	})
 }

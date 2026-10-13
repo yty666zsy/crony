@@ -26,6 +26,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/coreos/etcd/clientv3"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/tmnhs/crony/common/models"
 	"github.com/tmnhs/crony/common/pkg/agentmemory"
@@ -724,6 +725,35 @@ func (f memoryFixture) OutcomeResultText() string {
 	default:
 		return "验收夹具：只给了建议，本次没有动作"
 	}
+}
+
+// ---------- etcd 探针（可选：FailOver 只能由 etcd 事件驱动） ----------
+
+// newEtcdClient 按 endpoints（逗号分隔）建一个临时 etcd 客户端；未配置时返回 nil。
+//
+// 为什么验收需要它：节点的上下线只通过 etcd 的 `/crony/node/<uuid>` 键的增删事件传播，
+// "节点失联 → 任务重分配（FailOver）"这条路径**没有任何 HTTP 入口**可以触发。
+// 不给验收一根探针，这个能力就只能永远 SKIP；有了它，用例可以自造一个"合成节点"，
+// 写完注册键再删掉，从而真实地驱动一次 FailOver，而完全不需要动真节点。
+//
+// 端点未配置时返回 nil，由用例自行 SKIP 并写明原因（三态口径）。
+func newEtcdClient(t *testing.T, endpoints string) *clientv3.Client {
+	t.Helper()
+	eps := make([]string, 0, 2)
+	for _, e := range strings.Split(endpoints, ",") {
+		if v := strings.TrimSpace(e); v != "" {
+			eps = append(eps, v)
+		}
+	}
+	if len(eps) == 0 {
+		return nil
+	}
+	cli, err := clientv3.New(clientv3.Config{Endpoints: eps, DialTimeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("连接 etcd 失败（endpoints=%v）: %v", eps, err)
+	}
+	t.Cleanup(func() { _ = cli.Close() })
+	return cli
 }
 
 // ---------- 三态报告 ----------
