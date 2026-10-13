@@ -8,11 +8,13 @@ import (
 type (
 	ReqJobSearch struct {
 		PageInfo
-		ID     int            `json:"id" form:"id"`
-		Name   string         `json:"name" form:"name"`
-		RunOn  string         `json:"run_on" form:"run_on"`
-		Type   models.JobType `json:"job_type" form:"type"`
-		Status int            `json:"status" form:"status"`
+		ID    int            `json:"id" form:"id"`
+		Name  string         `json:"name" form:"name"`
+		RunOn string         `json:"run_on" form:"run_on"`
+		Type  models.JobType `json:"job_type" form:"type"`
+		// Status 用指针区分"不筛选"与"筛选未分配(status=0)"：
+		// 未分配就是 0，用 int 时 0 会被当成"没传"，导致该筛选条件永远失效。
+		Status *int `json:"status" form:"status"`
 	}
 	ReqJobLogSearch struct {
 		PageInfo

@@ -32,8 +32,8 @@ func (j *JobService) Search(s *request.ReqJobSearch) ([]models.Job, int64, error
 	if s.Type > 0 {
 		db = db.Where("type = ?", s.Type)
 	}
-	if s.Status > 0 {
-		db = db.Where("status = ? ", s.Status)
+	if s.Status != nil {
+		db = db.Where("status = ? ", *s.Status)
 	}
 	// make([]T, 0) 的原因同 node.go：非空切片会让 GORM 追加而不是覆盖。
 	jobs := make([]models.Job, 0)

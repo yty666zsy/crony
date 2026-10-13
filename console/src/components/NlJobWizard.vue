@@ -304,8 +304,8 @@ function close() {
             </span>
             <span v-if="draft.concurrency_value" class="chip">并发值 {{ draft.concurrency_value }}</span>
             <span class="chip">时区 {{ draft.timezone }}</span>
-            <span v-if="draft.repairs?.length" class="chip border-warn/40 text-warn">
-              内核自动修正 {{ draft.repairs.length }} 处
+            <span v-if="draft.repairs > 0" class="chip border-warn/40 text-warn">
+              内核自动修正 {{ draft.repairs }} 轮
             </span>
           </div>
 
@@ -333,11 +333,12 @@ function close() {
               <p class="section-label">内核给出的理由（rationale）</p>
               <p class="mt-0.5 text-[11px] leading-5 text-ink-muted">{{ draft.rationale }}</p>
             </div>
-            <div v-if="draft.repairs?.length">
+            <div v-if="draft.repairs > 0">
               <p class="section-label text-warn">内核自动修正（repairs）</p>
-              <ul class="mt-0.5 space-y-1">
-                <li v-for="r in draft.repairs" :key="r" class="text-[11px] leading-5 text-warn">· {{ r }}</li>
-              </ul>
+              <p class="mt-0.5 text-[11px] leading-5 text-warn">
+                内核在结构/语义校验失败后自动重试并修正了 {{ draft.repairs }} 轮；
+                差异体现在上面的命令与 rationale 里（repairs 是**轮数**，不是问题清单）。
+              </p>
             </div>
             <div>
               <p class="section-label">模型身份</p>

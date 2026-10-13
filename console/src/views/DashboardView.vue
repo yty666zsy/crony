@@ -80,7 +80,7 @@ const runsCard = computed(() => {
   const k = kpi.value || {}
   return {
     total: k.runs_today ?? 0,
-    hint: `成功 ${(k.runs_today || 0) - (k.failed_today || 0) - (k.timeout_today || 0) - (k.skipped_today || 0)} · 失败 ${k.failed_today ?? 0} · 跳过 ${k.skipped_today ?? 0}`,
+    hint: `成功 ${k.success_today ?? 0} · 失败 ${k.failed_today ?? 0} · 跳过 ${k.skipped_today ?? 0}`,
     source: '今日 · GET /statis/overview',
     successRate: k.success_rate_today ?? 0,
     skipRate: null,

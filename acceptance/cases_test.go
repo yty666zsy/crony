@@ -3463,4 +3463,340 @@ func TestAcceptanceSuite(t *testing.T) {
 		cc.note("无记录→沿用上限 %s；评测 4 条不通过(run_id=%d)→自动收回 L0 且生效级别实测 L0；坏信号下加宽被拒 code=1026；全绿后 %s；人工收紧→L0；清理后 rollout_state/eval_run 残留 0 行",
 			asStr(eff0["configured_ceiling"]), bad, widenOutcome)
 	})
+
+	// -----------------------------------------------------------------------
+	// 阶段 5 收尾（PHASE16）：控制台契约缺陷 F1–F10。
+	//
+	// 这一组缺陷的共同错法是「前端按 Mock 自造契约写，真后端字段名/筛选语义不符」：
+	// 页面**不报错**，只是静默显示 —、空白或返回全部。Mock 模式发现不了，单测也发现不了
+	// ——断言必须落在**真后端的字段名与筛选语义**上。这不是"再测一遍已经好的东西"，
+	// 而是把上一轮真机确证的 10 个缺陷固化成可复跑的门槛。
+	// -----------------------------------------------------------------------
+
+	run("AC-58", "大屏『今日执行/成功率』：概览 kpi 必须给 success_today/running_now（job_run 口径），且成功数不超执行总数", func(cc *caseCtx) {
+		data, err := c.getOK("/statis/overview")
+		if err != nil {
+			cc.t.Fatalf("读概览失败: %v", err)
+		}
+		kpi := asMap(data["kpi"])
+		if _, ok := kpi["success_today"]; !ok {
+			cc.t.Fatalf("kpi 缺 success_today（大屏『成功 N』会显示 —），实际键=%v", kpi)
+		}
+		if _, ok := kpi["running_now"]; !ok {
+			cc.t.Fatalf("kpi 缺 running_now（大屏『运行中 N』会显示 —），实际键=%v", kpi)
+		}
+		succ, runs := int(asNum(kpi["success_today"])), int(asNum(kpi["runs_today"]))
+		if succ < 0 || succ > runs {
+			cc.t.Fatalf("success_today(%d) 必须落在 [0, runs_today(%d)] —— 否则就是编出来的数", succ, runs)
+		}
+		cc.note("kpi.success_today=%d running_now=%d runs_today=%d success_rate_today=%v",
+			succ, int(asNum(kpi["running_now"])), runs, kpi["success_rate_today"])
+	})
+
+	run("AC-59", "总览的迷你趋势与『最近任务』来自真实执行：trends 为 4×12 分桶、recent_tasks 每条都是 job_run 行", func(cc *caseCtx) {
+		data, err := c.getOK("/statis/overview")
+		if err != nil {
+			cc.t.Fatalf("读概览失败: %v", err)
+		}
+		tr := asMap(data["trends"])
+		for _, key := range []string{"runs_today", "runs_failed", "success_rate_today", "avg_duration"} {
+			if arr := asSlice(tr[key]); len(arr) != 12 {
+				cc.t.Fatalf("trends.%s 必须是 12 段（2 小时一桶），实际 %d 段（trends 键=%v）", key, len(arr), tr)
+			}
+		}
+		rt := asSlice(data["recent_tasks"])
+		if len(rt) == 0 {
+			cc.skip("当前没有 job_run：观测不到『最近任务』的行形态（数据为空，不是契约错误）")
+		}
+		for i, raw := range rt {
+			r := asMap(raw)
+			for _, key := range []string{"run_id", "job_name", "status", "duration_ms", "started_at"} {
+				if _, ok := r[key]; !ok {
+					cc.t.Fatalf("recent_tasks[%d] 缺字段 %q（控制台表格会显示空白），实际键=%v", i, key, r)
+				}
+			}
+		}
+		first := asMap(rt[0])
+		cc.note("trends 4×12；recent_tasks %d 条，首条 run_id=%s job=%s status=%v duration_ms=%v",
+			len(rt), asStr(first["run_id"]), asStr(first["job_name"]), first["status"], first["duration_ms"])
+	})
+
+	run("AC-60", "大屏周执行分布：/statis/week 返回 {date,count} 序列（job_log 只有成功/失败两组），不是平行下标数组", func(cc *caseCtx) {
+		data, err := c.getOK("/statis/week")
+		if err != nil {
+			cc.t.Fatalf("读周统计失败: %v", err)
+		}
+		if _, ok := data["success_date_count"]; !ok {
+			cc.t.Fatalf("/statis/week 缺 success_date_count（大屏柱状图会整块空白），实际键=%v", data)
+		}
+		if _, ok := data["fail_date_count"]; !ok {
+			cc.t.Fatalf("/statis/week 缺 fail_date_count，实际键=%v", data)
+		}
+		for _, key := range []string{"success_date_count", "fail_date_count"} {
+			for i, raw := range asSlice(data[key]) {
+				row := asMap(raw)
+				d := asStr(row["date"])
+				if len(d) != 10 || d[4] != '-' || d[7] != '-' {
+					cc.t.Fatalf("%s[%d].date 应为 YYYY-MM-DD，实际 %q", key, i, d)
+				}
+				if _, ok := row["count"]; !ok {
+					cc.t.Fatalf("%s[%d] 缺 count 字段", key, i)
+				}
+			}
+		}
+		cc.note("success_date_count=%d 段 fail_date_count=%d 段（空数组=该区间无失败，属正常）",
+			len(asSlice(data["success_date_count"])), len(asSlice(data["fail_date_count"])))
+	})
+
+	run("AC-61", "自愈：详情在 heal 键下、列表行只给 status/action，且策略接口提供覆盖真行的中文映射", func(cc *caseCtx) {
+		list, err := c.postOK("/agent/heal/search", map[string]any{"page": 1, "page_size": 5})
+		if err != nil {
+			cc.t.Fatalf("读自愈列表失败: %v", err)
+		}
+		rows := asSlice(list["list"])
+		if len(rows) == 0 {
+			cc.skip("当前没有自愈记录：观测不到自愈行的字段形态（数据为空，不是契约错误）")
+		}
+		row := asMap(rows[0])
+		healID := asStr(row["heal_id"])
+		if healID == "" {
+			cc.t.Fatalf("自愈行缺 heal_id: %v", row)
+		}
+		// 护栏：后端一旦补了 status_text/pending_observation，这条会 FAIL，提醒改用后端值，
+		// 而不是让"前端自己映射"这条临时约定悄悄固化下来。
+		if _, ok := row["status_text"]; ok {
+			cc.t.Fatalf("后端新增了 status_text：控制台不该再自己映射状态中文，请改用后端值（这是护栏，不是缺陷）")
+		}
+		if _, ok := row["pending_observation"]; ok {
+			cc.t.Fatalf("后端新增了 pending_observation：控制台不该再自己推断『观察中』，请改用后端值")
+		}
+		found, err := c.postOK("/agent/heal/find", map[string]any{"heal_id": healID})
+		if err != nil {
+			cc.t.Fatalf("读自愈详情失败: %v", err)
+		}
+		if _, ok := found["heal"]; !ok {
+			cc.t.Fatalf("/agent/heal/find 未返回 heal 键（控制台详情面板会整块空白），实际键=%v", found)
+		}
+		heal := asMap(found["heal"])
+		if asStr(heal["heal_id"]) != healID {
+			cc.t.Fatalf("详情 heal_id(%s) 与列表(%s) 不一致", asStr(heal["heal_id"]), healID)
+		}
+		pol, err := c.postOK("/agent/heal/policy", map[string]any{})
+		if err != nil {
+			cc.t.Fatalf("读自愈策略失败: %v", err)
+		}
+		sn, an := asMap(pol["status_names"]), asMap(pol["action_names"])
+		if len(sn) == 0 || len(an) == 0 {
+			cc.t.Fatalf("策略接口未给 status_names/action_names：控制台无法把 %q/%q 显示成中文",
+				asStr(row["status"]), asStr(row["action"]))
+		}
+		if asStr(sn[asStr(row["status"])]) == "" {
+			cc.t.Fatalf("status_names 未覆盖真行状态 %q（列表会出现英文或空白）", asStr(row["status"]))
+		}
+		if asStr(an[asStr(row["action"])]) == "" {
+			cc.t.Fatalf("action_names 未覆盖真行动作 %q", asStr(row["action"]))
+		}
+		cc.note("详情在 heal 键下（heal_id=%s status=%s→%s action=%s→%s）；列表无 status_text/pending_observation（前端自己映射）",
+			healID, asStr(row["status"]), asStr(sn[asStr(row["status"])]),
+			asStr(row["action"]), asStr(an[asStr(row["action"])]))
+	})
+
+	run("AC-62", "经验库成功率：统计与召回命中都给出 success_rate_text（三态文案：无样本 / x%），不让前端自己拼", func(cc *caseCtx) {
+		st, err := c.postOK("/agent/memory/stats", map[string]any{})
+		if err != nil {
+			cc.t.Fatalf("读经验统计失败: %v", err)
+		}
+		text := asStr(st["success_rate_text"])
+		if text == "" {
+			cc.t.Fatalf("统计缺 success_rate_text（控制台成功率卡会空白），实际键=%v", st)
+		}
+		known := asBool(st["success_rate_known"])
+		if known && !strings.Contains(text, "%") {
+			cc.t.Fatalf("有执行样本时文案必须含百分比，实际 %q", text)
+		}
+		if !known && !strings.Contains(text, "无执行样本") {
+			cc.t.Fatalf("无可执行样本时必须明说『无执行样本』（显示 0%% 等于说『从没成功过』），实际 %q", text)
+		}
+		search, err := c.postOK("/agent/memory/search", map[string]any{"page": 1, "page_size": 1})
+		if err != nil {
+			cc.t.Fatalf("读经验列表失败: %v", err)
+		}
+		items := asSlice(search["list"])
+		if len(items) == 0 {
+			cc.skip("经验库为空：只验到统计口径，召回命中无法观测")
+		}
+		recall, err := c.postOK("/agent/memory/recall", map[string]any{
+			"symptom": asStr(asMap(items[0])["symptom"]), "top_k": 3,
+		})
+		if err != nil {
+			cc.t.Fatalf("召回失败: %v", err)
+		}
+		hits := asSlice(recall["hits"])
+		if len(hits) == 0 {
+			cc.skip("召回未命中任何经验：观测不到命中行的 success_rate_text")
+		}
+		for i, raw := range hits {
+			if asStr(asMap(raw)["success_rate_text"]) == "" {
+				cc.t.Fatalf("召回命中[%d] 缺 success_rate_text（召回区的成功率会空白）: %v", i, asMap(raw))
+			}
+		}
+		cc.note("统计 known=%v text=%q；召回 %d 条命中全部带 success_rate_text（首条 %q）",
+			known, text, len(hits), asStr(asMap(hits[0])["success_rate_text"]))
+	})
+
+	run("AC-63", "经验库按动作类型筛选真的生效（action_kind=tool/advice 各自收敛，且只回对应类型）", func(cc *caseCtx) {
+		all, err := c.postOK("/agent/memory/search", map[string]any{"page_size": 1})
+		if err != nil {
+			cc.t.Fatalf("读经验基线失败: %v", err)
+		}
+		tool, err := c.postOK("/agent/memory/search", map[string]any{"action_kind": "tool", "page_size": 50})
+		if err != nil {
+			cc.t.Fatalf("按 action_kind=tool 检索失败: %v", err)
+		}
+		advice, err := c.postOK("/agent/memory/search", map[string]any{"action_kind": "advice", "page_size": 1})
+		if err != nil {
+			cc.t.Fatalf("按 action_kind=advice 检索失败: %v", err)
+		}
+		for _, raw := range asSlice(tool["list"]) {
+			if asStr(asMap(raw)["action_kind"]) != "tool" {
+				cc.t.Fatalf("action_kind=tool 却返回了 %q 的行", asStr(asMap(raw)["action_kind"]))
+			}
+		}
+		allTotal := int(asNum(all["total"]))
+		toolTotal, adviceTotal := int(asNum(tool["total"])), int(asNum(advice["total"]))
+		if toolTotal == 0 || adviceTotal == 0 {
+			cc.skip("库里只存在单一 action_kind（tool=%d advice=%d）：无法用『总数收敛』判定筛选是否生效",
+				toolTotal, adviceTotal)
+		}
+		if toolTotal+adviceTotal > allTotal {
+			cc.t.Fatalf("tool(%d)+advice(%d) 竟超过总数(%d)：筛选语义自相矛盾", toolTotal, adviceTotal, allTotal)
+		}
+		if toolTotal == allTotal && adviceTotal == allTotal {
+			cc.t.Fatalf("两种 action_kind 各自都等于总数(%d)：筛选根本没生效（后端把该条件忽略了）", allTotal)
+		}
+		cc.note("baseline=%d；tool=%d advice=%d（各自都小于总数 → 筛选生效）", allTotal, toolTotal, adviceTotal)
+	})
+
+	run("AC-64", "节点按主机名/部分 IP 检索真的生效：不存在的关键字必须返回 0（此前任何输入都返回全部）", func(cc *caseCtx) {
+		all, err := c.postOK("/node/search", map[string]any{"page": 1, "page_size": 5})
+		if err != nil {
+			cc.t.Fatalf("读节点基线失败: %v", err)
+		}
+		list := asSlice(all["list"])
+		if len(list) == 0 {
+			cc.skip("没有节点数据：观测不到检索效果")
+		}
+		host := asStr(asMap(list[0])["hostname"])
+		frag := host
+		if len(frag) > 4 {
+			frag = frag[:4] // 主机名是 ASCII，按字节截断安全
+		}
+		hit, err := c.postOK("/node/search", map[string]any{"hostname": frag, "page": 1, "page_size": 50})
+		if err != nil {
+			cc.t.Fatalf("按 hostname 检索失败: %v", err)
+		}
+		miss, err := c.postOK("/node/search", map[string]any{"hostname": "zzz-not-exist-zzz", "page": 1, "page_size": 50})
+		if err != nil {
+			cc.t.Fatalf("按不存在的 hostname 检索失败: %v", err)
+		}
+		hitRows := asSlice(hit["list"])
+		if len(hitRows) == 0 {
+			cc.t.Fatalf("按真主机名前缀 %q 检索却 0 条", frag)
+		}
+		for _, raw := range hitRows {
+			if !strings.Contains(asStr(asMap(raw)["hostname"]), frag) {
+				cc.t.Fatalf("hostname 筛选返回了不含 %q 的节点 %q", frag, asStr(asMap(raw)["hostname"]))
+			}
+		}
+		if n := int(asNum(miss["total"])); n != 0 {
+			cc.t.Fatalf("不存在的 hostname 返回 %d 条：筛选没生效（此前任何输入都返回全部）", n)
+		}
+		cc.note("baseline=%d；hostname≈%q → %d 条且全部含该片段；不存在 → 0 条",
+			int(asNum(all["total"])), frag, len(hitRows))
+	})
+
+	run("AC-65", "任务按状态筛选：status=0（未分配）必须可筛，且只返回 status=0 的行", func(cc *caseCtx) {
+		all, err := c.postOK("/job/search", map[string]any{"page": 1, "page_size": 1})
+		if err != nil {
+			cc.t.Fatalf("读任务基线失败: %v", err)
+		}
+		zero, err := c.postOK("/job/search", map[string]any{"status": 0, "page": 1, "page_size": 50})
+		if err != nil {
+			cc.t.Fatalf("按 status=0 检索失败（把 0 当成『没传』会直接失败或返回全部）: %v", err)
+		}
+		rows := asSlice(zero["list"])
+		if len(rows) == 0 {
+			cc.skip("库里没有未分配(status=0)的任务：观测不到该筛选的效果")
+		}
+		for _, raw := range rows {
+			if int(asNum(asMap(raw)["status"])) != 0 {
+				cc.t.Fatalf("筛选 status=0 却返回了 status=%v 的任务", asMap(raw)["status"])
+			}
+		}
+		allTotal, zeroTotal := int(asNum(all["total"])), int(asNum(zero["total"]))
+		if zeroTotal > allTotal {
+			cc.t.Fatalf("status=0 命中 %d 竟多于任务总数 %d", zeroTotal, allTotal)
+		}
+		cc.note("baseline=%d；status=0 → %d 条且全部为未分配", allTotal, zeroTotal)
+	})
+
+	run("AC-66", "审计的『人工』操作者：管理员批准一张审批单后，审计里出现 operator_type=human 的行（且不出现字典外的类型）", func(cc *caseCtx) {
+		requireDB(cc)
+		id := provisionApprovalFixture(t, db, approvalFixture{Reason: "验收夹具：人工批准后审计应留 human 操作者"})
+		if _, _, _, err := approvalDecision("/agent/approval/approve", id, "验收：人工决策"); err != nil {
+			cc.t.Fatalf("%v", err)
+		}
+		audit, err := c.postOK("/audit/search", map[string]any{"page": 1, "page_size": 200})
+		if err != nil {
+			cc.t.Fatalf("读审计失败: %v", err)
+		}
+		rows := asSlice(audit["list"])
+		if len(rows) == 0 {
+			cc.skip("审计为空：观测不到任何 operator_type")
+		}
+		// 控制台 operatorTypeMeta 的全部取值；后端一旦输出别的一律算失败（标签会空白）。
+		known := map[string]bool{"user": true, "system": true, "agent": true, "human": true, "anonymous": true}
+		var unknown []string
+		sawHuman := false
+		for i, raw := range rows {
+			ot := asStr(asMap(raw)["operator_type"])
+			if !known[ot] {
+				unknown = append(unknown, fmt.Sprintf("[%d]=%q", i, ot))
+			}
+			if ot == "human" {
+				sawHuman = true
+			}
+		}
+		if len(unknown) > 0 {
+			cc.t.Fatalf("审计出现了控制台字典不认识的操作者类型（标签会空白）: %v", unknown)
+		}
+		if !sawHuman {
+			cc.t.Fatalf("人工批准后审计里没有 operator_type=human 的行 —— 人工决策没被记成人工，或审计没纳入审批来源")
+		}
+		cc.note("审计 %d 行：观察到 human 操作者，且未出现字典外的 operator_type", len(rows))
+	})
+
+	run("AC-67", "NL 起草的 repairs 是『修正轮数』(int) 而不是问题清单数组（前端按数组渲染会永不显示）", func(cc *caseCtx) {
+		data, err := c.postOK("/agent/nljob/draft", map[string]any{
+			"text": "每天凌晨 3 点打印一行 hello 到日志", "node_uuid": nodeUUID, "timezone": "Asia/Shanghai",
+		})
+		if err != nil {
+			if llmUnavailable(err) {
+				cc.skip("admin 未配置可用的模型凭据（CRONY_LLM_API_KEY）：NL 起草需要真模型，观测不到 repairs 字段")
+			}
+			cc.t.Fatal(err)
+		}
+		draft := asMap(data["draft"])
+		raw, ok := draft["repairs"]
+		if !ok {
+			cc.t.Fatalf("草案缺 repairs 字段（前端『内核自动修正』提示依赖它），实际键=%v", draft)
+		}
+		if _, isSlice := raw.([]any); isSlice {
+			cc.t.Fatalf("repairs 是数组（%v）：后端契约是 int 轮数，前端按数组渲染会永不显示", raw)
+		}
+		if n := asNum(raw); n < 0 || n != float64(int(n)) {
+			cc.t.Fatalf("repairs 应是 >=0 的整数轮数，实际 %v", raw)
+		}
+		cc.note("repairs=%v（Go 类型 %T）—— 修正轮数，不是问题清单", raw, raw)
+	})
 }

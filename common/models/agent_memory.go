@@ -370,6 +370,7 @@ func (m *AgentMemory) Validate() error {
 // MemoryQuery 经验列表查询条件（接口 /agent/memory/search）。
 type MemoryQuery struct {
 	AgentKind  string
+	ActionKind string
 	Outcome    string
 	Tool       string
 	TargetNode string
@@ -400,6 +401,9 @@ func ListAgentMemories(db *gorm.DB, q MemoryQuery) ([]AgentMemory, int64, error)
 	tx := db.Table(CronyAgentMemoryTableName)
 	if v := strings.TrimSpace(q.AgentKind); v != "" {
 		tx = tx.Where("agent_kind = ?", v)
+	}
+	if v := strings.TrimSpace(q.ActionKind); v != "" {
+		tx = tx.Where("action_kind = ?", v)
 	}
 	if v := strings.TrimSpace(q.Outcome); v != "" {
 		tx = tx.Where("outcome = ?", v)

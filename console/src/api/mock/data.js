@@ -2696,10 +2696,12 @@ export const overview = {
     agent_sessions_today: 4,
     agent_sessions_failed_today: 1,
     runs_today: 184,
+    success_today: 176,
     success_rate_today: 96.2,
     failed_today: 5,
     timeout_today: 1,
     skipped_today: 2,
+    running_now: 1,
     avg_duration_ms: 8420,
     kb_docs: 8,
     pending_approvals: 1,
@@ -2709,7 +2711,7 @@ export const overview = {
     runs_today: [12, 9, 14, 18, 16, 21, 19, 24, 22, 18, 15, 12],
     success_rate_today: [94, 96, 95, 97, 98, 96, 93, 95, 97, 96, 98, 96],
     runs_failed: [1, 0, 2, 1, 0, 1, 2, 1, 0, 1, 1, 0],
-    avg_duration: [7.2, 8.1, 6.4, 9.2, 8.8, 7.5, 0, 8.4, 9.1, 7.7, 8.2, 8.4],
+    avg_duration: [7200, 8100, 6400, 9200, 8800, 7500, 0, 8400, 9100, 7700, 8200, 8400],
   },
   servers: {
     total: 6,
@@ -2814,26 +2816,35 @@ export const quickActions = [
  * 10. 统计（真实接口：/statis/today、/statis/week、/statis/system）
  * ------------------------------------------------------------------ */
 
+/** N 天前的 'YYYY-MM-DD'（与 MySQL FROM_UNIXTIME(x,'%Y-%m-%d') 同形）。 */
+function dayKeyAgo(days) {
+  const d = new Date(NOW - days * 24 * HOUR)
+  return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`
+}
+
 export const statisToday = {
-  job_total: 12,
-  job_success: 177,
-  job_fail: 5,
-  job_running: 1,
-  job_wait: 1,
-  job_timeout: 1,
-  node_total: 6,
-  node_online: 5,
+  // 字段名与真后端 GET /statis/today（resp.RspSystemStatistics）完全一致。
+  // 控制台大屏已改用 /statis/overview 的 kpi（job_run 口径），这里保留真契约形态，
+  // 避免"Mock 自己发明一套字段名"再把前端带偏。
+  normal_node_count: 5,
+  fail_node_count: 1,
+  job_exc_success_count: 177,
+  job_running_count: 1,
+  job_exc_fail_count: 5,
 }
 
 export const statisWeek = {
-  date: Array.from({ length: 7 }, (_, i) => {
-    const d = new Date(NOW - (6 - i) * 24 * HOUR)
-    return `${d.getMonth() + 1}/${d.getDate()}`
-  }),
-  success: [162, 178, 171, 184, 190, 168, 177],
-  fail: [8, 4, 9, 5, 3, 7, 5],
-  timeout: [1, 0, 2, 1, 0, 1, 1],
-  skipped: [3, 1, 2, 4, 2, 1, 2],
+  // 与真后端 GET /statis/week（resp.RspDateCount）一致的形状：
+  // 只有"成功/失败"两组 {date,count} 序列（数据源是 job_log，无 timeout/skipped 维度）。
+  // count 是**字符串**（后端 DateCount.Count 就是 string）。
+  success_date_count: [162, 178, 171, 184, 190, 168, 177].map((count, i) => ({
+    date: dayKeyAgo(6 - i),
+    count: String(count),
+  })),
+  fail_date_count: [8, 4, 9, 5, 3, 7, 5].map((count, i) => ({
+    date: dayKeyAgo(6 - i),
+    count: String(count),
+  })),
 }
 
 /* ------------------------------------------------------------------ *

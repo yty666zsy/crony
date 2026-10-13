@@ -38,6 +38,9 @@ const operatorTypeMeta = {
   user: { text: '用户', color: '#38bdf8' },
   system: { text: '系统', color: '#7c8aa8' },
   agent: { text: 'AI Agent', color: '#3b82f6' },
+  // human：写动作审批由**人工**拍板时后端会返回这个 operator_type（audit.go 的 approvalEntry），
+  // 早前这里没有这一项，真机上"谁批的"会显示成一个没有文字也没有颜色的空 chip。
+  human: { text: '人工', color: '#f59e0b' },
   anonymous: { text: '匿名', color: '#ef4444' },
 }
 

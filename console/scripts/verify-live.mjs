@@ -103,6 +103,11 @@ try {
     job: await server.ssrLoadModule('/src/api/job.js'),
     // 阶段 5：回放评测台走的是 api/ops.js（与 EvalView 同一条链路）。
     ops: await server.ssrLoadModule('/src/api/ops.js'),
+    // 阶段 5 收尾：统计/节点/自愈三个模块用于校验"前端读的字段名 == 真后端字段名"。
+    // 必须在 server.close() 之前加载（脚本中段会关掉 Vite 服务）。
+    statis: await server.ssrLoadModule('/src/api/statis.js'),
+    node: await server.ssrLoadModule('/src/api/node.js'),
+    selfheal: await server.ssrLoadModule('/src/api/selfheal.js'),
   }
 } catch (err) {
   console.error('加载控制台 API 模块失败:', err?.message || err)
@@ -800,6 +805,170 @@ await server.close()
       empty.value?.report === null && !!empty.value?.note,
       `report=${empty.value?.report} note=${summary(empty.value?.note, 60)}`,
     )
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 99) 阶段 5 收尾：控制台读的**字段名与筛选语义**必须与真后端一致。
+//
+// 背景（2026-10-13 实测）：前端曾读 `today.job_success` / `week.timeout` 一类
+// **Mock 自造**的字段名，真后端从不返回 —— 真机上大屏三张卡显示 "—"、周趋势图
+// 整块空白，页面却"没有报错"。这类缺陷靠单测和 Mock 都发现不了，只能对着真后端断言。
+// 这里把其中可自动判定的 8 组固化成检查（F1/F2/F3/F4/F5/F6/F7/F8）。
+// ---------------------------------------------------------------------------
+{
+  const statis = mods.statis
+  const nodeApi = mods.node
+  const selfheal = mods.selfheal
+
+  // ---- F1 / F3：概览 KPI、迷你趋势、最近任务 ----
+  const ov = await step('GET /statis/overview（大屏 + 总览 KPI）', () => statis.fetchOverview())
+  if (ov.ok) {
+    const k = ov.value?.kpi || {}
+    check(
+      'F1 概览 kpi 提供 success_today / running_now（大屏"今日执行/成功率"不再显示 —）',
+      typeof k.success_today === 'number' && typeof k.running_now === 'number',
+      `success_today=${k.success_today} running_now=${k.running_now}`,
+    )
+    const t = ov.value?.trends || {}
+    const trendsOk =
+      Array.isArray(t.runs_today) &&
+      t.runs_today.length === 12 &&
+      Array.isArray(t.success_rate_today) &&
+      t.success_rate_today.length === 12 &&
+      Array.isArray(t.runs_failed) &&
+      t.runs_failed.length === 12 &&
+      Array.isArray(t.avg_duration) &&
+      t.avg_duration.length === 12
+    check(
+      'F3 概览 trends 为 4×12 真实分桶（KPI 卡迷你趋势图有数据源）',
+      trendsOk,
+      Object.keys(t)
+        .map((x) => `${x}:${Array.isArray(t[x]) ? t[x].length : 'n/a'}`)
+        .join(' '),
+    )
+    const rt = ov.value?.recent_tasks
+    check(
+      'F3 概览 recent_tasks 为真实 job_run 行（Recent Tasks 表有数据）',
+      Array.isArray(rt) &&
+        rt.every((r) => 'run_id' in r && 'job_name' in r && 'status' in r && 'duration_ms' in r),
+      `条数=${rt?.length}`,
+    )
+  }
+
+  // ---- F2：周趋势的真实结构（{date,count} 序列，而不是 Mock 的平行下标数组）----
+  const wk = await step('GET /statis/week（大屏周执行分布）', () => statis.fetchWeekStatistics())
+  if (wk.ok) {
+    const shapeOk =
+      Array.isArray(wk.value?.success_date_count) &&
+      Array.isArray(wk.value?.fail_date_count) &&
+      wk.value.success_date_count.every((d) => typeof d.date === 'string' && 'count' in d)
+    check(
+      'F2 周趋势返回 {date,count} 序列（大屏柱状图按真契约渲染，不再空白）',
+      shapeOk,
+      `success=${wk.value?.success_date_count?.length} fail=${wk.value?.fail_date_count?.length}`,
+    )
+  }
+
+  // ---- F5：经验统计的成功率文案（三态：无样本 / x%）----
+  const ms = await step('POST /agent/memory/stats（经验库统计）', () => mods.memory.memoryStats())
+  if (ms.ok) {
+    const known = ms.value?.success_rate_known === true
+    const text = ms.value?.success_rate_text
+    check(
+      'F5 经验统计给出 success_rate_text（真机上成功率不再空白）',
+      typeof text === 'string' && text.length > 0 && (!known || text.includes('%')),
+      `known=${known} text=${summary(text, 40)}`,
+    )
+  }
+
+  // ---- F6：经验检索按 action_kind 过滤（此前该条件被后端忽略）----
+  const memAll = await step('POST /agent/memory/search（基线）', () =>
+    mods.memory.searchMemories({ page_size: 1 }),
+  )
+  const memTool = await step('POST /agent/memory/search action_kind=tool', () =>
+    mods.memory.searchMemories({ action_kind: 'tool', page_size: 50 }),
+  )
+  if (memAll.ok && memTool.ok) {
+    const allTotal = memAll.value?.total ?? 0
+    const rows = memTool.value?.list || []
+    check(
+      'F6 经验检索按 action_kind 过滤生效（返回行类型全为 tool，且总数不超过基线）',
+      rows.length > 0 &&
+        rows.every((r) => r.action_kind === 'tool') &&
+        (allTotal === 0 || memTool.value.total <= allTotal) &&
+        (allTotal === 0 || memTool.value.total < allTotal || allTotal === rows.length),
+      `all=${allTotal} tool=${memTool.value?.total} 返回=${rows.length}`,
+    )
+  }
+
+  // ---- F7：节点检索按 hostname 模糊过滤（此前字段没接，输入什么都返回全部）----
+  const nodesAll = await step('POST /node/search（基线）', () => nodeApi.searchNodes({ page: 1, page_size: 5 }))
+  if (nodesAll.ok && (nodesAll.value?.list || []).length > 0) {
+    const sample = nodesAll.value.list[0].hostname
+    const frag = String(sample).slice(0, Math.min(4, String(sample).length))
+    const nodesHit = await step(`POST /node/search hostname≈${frag}`, () =>
+      nodeApi.searchNodes({ hostname: frag, page: 1, page_size: 50 }),
+    )
+    const nodesMiss = await step('POST /node/search hostname=不存在', () =>
+      nodeApi.searchNodes({ hostname: 'zzz-not-exist-zzz', page: 1, page_size: 50 }),
+    )
+    if (nodesHit.ok && nodesMiss.ok) {
+      const list = nodesHit.value?.list || []
+      check(
+        'F7 节点 hostname 模糊匹配生效，且不存在的关键字返回 0（此前任何输入都返回全部）',
+        list.length > 0 &&
+          list.every((n) => String(n.hostname).includes(frag)) &&
+          (nodesMiss.value?.total ?? -1) === 0,
+        `命中=${list.length} 关键字=${frag} 不存在时 total=${nodesMiss.value?.total}`,
+      )
+    }
+  }
+
+  // ---- F8：任务检索 status=0（未分配）必须可筛选 ----
+  const jobAll = await step('POST /job/search（基线）', () => mods.job.searchJobs({ page: 1, page_size: 1 }))
+  const jobZero = await step('POST /job/search status=0', () =>
+    mods.job.searchJobs({ status: 0, page: 1, page_size: 50 }),
+  )
+  if (jobAll.ok && jobZero.ok) {
+    const allTotal = jobAll.value?.total ?? 0
+    const rows = jobZero.value?.list || []
+    check(
+      'F8 任务检索 status=0 只返回未分配任务（此前 0 被当成"没传"，等于没筛）',
+      rows.every((j) => j.status === 0) && jobZero.value.total <= allTotal,
+      `all=${allTotal} status0=${jobZero.value?.total} 返回=${rows.length}`,
+    )
+  }
+
+  // ---- F4：自愈详情是 {heal:{...}}，且状态/动作的中文映射来自策略接口 ----
+  const healRows = await step('POST /agent/heal/search（自愈单）', () =>
+    selfheal.searchHeals({ page: 1, page_size: 5 }),
+  )
+  if (healRows.ok && (healRows.value?.list || []).length > 0) {
+    const row = healRows.value.list[0]
+    check(
+      'F4 自愈列表行只有 status/action（没有 status_text/pending_observation）——前端必须自己映射',
+      !!row.status && !('status_text' in row) && !('pending_observation' in row),
+      `status=${row.status} action=${row.action}`,
+    )
+    const found = await step('POST /agent/heal/find', () => selfheal.findHeal(row.heal_id))
+    if (found.ok) {
+      check(
+        'F4 自愈详情在 heal 键下（此前前端把整个响应体当明细用，详情面板整块空白）',
+        found.value?.heal?.heal_id === row.heal_id && !!found.value?.heal?.status,
+        `heal_id=${found.value?.heal?.heal_id}`,
+      )
+    }
+    const pol = await step('POST /agent/heal/policy（策略边界 + 中文映射）', () => selfheal.fetchHealPolicy())
+    if (pol.ok) {
+      const sn = pol.value?.status_names || {}
+      const an = pol.value?.action_names || {}
+      check(
+        'F4 策略接口提供 status_names / action_names，且覆盖真行的 status/action（列表能显示中文）',
+        Object.keys(sn).length > 0 && Object.keys(an).length > 0 && !!sn[row.status] && !!an[row.action],
+        `status_names=${Object.keys(sn).length} action_names=${Object.keys(an).length} ${row.status}→${sn[row.status]}`,
+      )
+    }
   }
 }
 

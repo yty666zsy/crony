@@ -150,10 +150,18 @@ func memoryOutcomeText(o string) string {
 // 为什么不能只给一个数字：把"没有执行样本"渲染成 0%，等于告诉运维
 // "这个动作从来没成功过"——而事实是"它从来没被允许跑过"。这两句话会导致完全相反的决策。
 func memorySuccessRateText(rate float64, known bool, m *models.AgentMemory) string {
+	return memoryRateText(rate, known, int64(m.SuccessCount), int64(m.FailCount))
+}
+
+// memoryRateText 按"成功/失败计数"生成成功率文本。
+//
+// 列表行、召回命中、全局统计三处都要给同一套文案；早前只有列表行有
+// success_rate_text，另外两处前端拿不到，真机上要么空白要么只能显示"无执行样本"。
+func memoryRateText(rate float64, known bool, success, fail int64) string {
 	if !known {
 		return "无执行样本（成功 0 / 失败 0；被拒/未执行不计入成功率）"
 	}
-	return fmt.Sprintf("%.1f%%（成功 %d / 失败 %d）", rate*100, m.SuccessCount, m.FailCount)
+	return fmt.Sprintf("%.1f%%（成功 %d / 失败 %d）", rate*100, success, fail)
 }
 
 // ---------- 列表 / 详情 ----------
@@ -162,6 +170,7 @@ func memorySuccessRateText(rate float64, known bool, m *models.AgentMemory) stri
 func (a *AgentRouter) MemorySearch(c *gin.Context) {
 	var req struct {
 		AgentKind  string `json:"agent_kind"`
+		ActionKind string `json:"action_kind"`
 		Outcome    string `json:"outcome"`
 		Tool       string `json:"tool"`
 		TargetNode string `json:"target_node"`
@@ -182,6 +191,7 @@ func (a *AgentRouter) MemorySearch(c *gin.Context) {
 	}
 	list, total, err := svc.Search(models.MemoryQuery{
 		AgentKind:  strings.TrimSpace(req.AgentKind),
+		ActionKind: strings.TrimSpace(req.ActionKind),
 		Outcome:    strings.TrimSpace(req.Outcome),
 		Tool:       strings.TrimSpace(req.Tool),
 		TargetNode: strings.TrimSpace(req.TargetNode),
@@ -255,7 +265,9 @@ type memoryRecallHitView struct {
 	Reasons          []string `json:"reasons"`
 	SuccessRate      float64  `json:"success_rate"`
 	SuccessRateKnown bool     `json:"success_rate_known"`
-	Occurrences      int      `json:"occurrence_count"`
+	// SuccessRateText 与列表行同口径（无执行样本 / x%（成功 a / 失败 b））。
+	SuccessRateText string `json:"success_rate_text"`
+	Occurrences     int    `json:"occurrence_count"`
 	// 结果构成：outcome 只是**最近一次**的结果，出现多次时前端要能显示全貌，
 	// 否则"最近一次被拦下"会被读成"这个动作一直跑不通"。
 	SuccessCount int   `json:"success_count"`
@@ -324,6 +336,7 @@ func (a *AgentRouter) MemoryRecall(c *gin.Context) {
 			Reasons:          h.Reasons,
 			SuccessRate:      h.SuccessRate,
 			SuccessRateKnown: h.SuccessRateKnown,
+			SuccessRateText:  memoryRateText(h.SuccessRate, h.SuccessRateKnown, int64(h.SuccessCount), int64(h.FailCount)),
 			Occurrences:      h.Occurrences,
 			SuccessCount:     h.SuccessCount,
 			FailCount:        h.FailCount,
@@ -386,6 +399,11 @@ func (a *AgentRouter) MemoryStats(c *gin.Context) {
 		resp.FailWithMessage(resp.ERROR, "[agent/memory/stats] 统计失败", c)
 		return
 	}
+	rateKnown := st.SuccessRate != nil
+	rate := 0.0
+	if rateKnown {
+		rate = *st.SuccessRate
+	}
 	data := gin.H{
 		"total":       st.Total,
 		"enabled":     st.Enabled,
@@ -398,7 +416,9 @@ func (a *AgentRouter) MemoryStats(c *gin.Context) {
 		"last_seen":   st.LastSeen,
 		// 口径说明：成功率的分母**只含真正执行过的动作**。
 		"success_rate":       st.SuccessRate,
-		"success_rate_known": st.SuccessRate != nil,
+		"success_rate_known": rateKnown,
+		// 与列表行/召回命中同款文案，前端不用自己拼百分比。
+		"success_rate_text": memoryRateText(rate, rateKnown, st.SuccessSum, st.FailSum),
 		"definition": gin.H{
 			"success_rate": "成功 / (成功 + 失败)",
 			"excluded":     []string{"blocked（未执行）", "denied（被拒）", "advised（只建议）"},

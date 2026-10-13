@@ -73,14 +73,14 @@
         </el-table-column>
         <el-table-column label="状态" width="160">
           <template #default="{ row }">
-            <el-tag :type="statusType(row.status)" size="small">{{ row.status_text }}</el-tag>
-            <el-tag v-if="row.pending_observation" size="small" type="warning" effect="plain" class="ml">观察中</el-tag>
+            <el-tag :type="statusType(row.status)" size="small">{{ statusNames[row.status] || row.status }}</el-tag>
+            <el-tag v-if="pendingObservation(row)" size="small" type="warning" effect="plain" class="ml">观察中</el-tag>
           </template>
         </el-table-column>
         <el-table-column label="失败分类 / 动作" min-width="180">
           <template #default="{ row }">
             <div>{{ row.failure_class }}</div>
-            <div class="dim">{{ row.action_text || '无动作' }}</div>
+            <div class="dim">{{ actionNames[row.action] || row.action || '无动作' }}</div>
           </template>
         </el-table-column>
         <el-table-column label="第几次 / 结果" width="150">
@@ -117,7 +117,7 @@
 
       <el-descriptions :column="3" border size="small">
         <el-descriptions-item label="状态">
-          <el-tag :type="statusType(detail.status)" size="small">{{ detail.status_text }}</el-tag>
+          <el-tag :type="statusType(detail.status)" size="small">{{ statusNames[detail.status] || detail.status }}</el-tag>
         </el-descriptions-item>
         <el-descriptions-item label="任务">#{{ detail.job_id }} {{ detail.job_name }}</el-descriptions-item>
         <el-descriptions-item label="第几次尝试">attempt {{ detail.attempt }}</el-descriptions-item>
@@ -228,6 +228,14 @@ const statusType = (s) => {
 
 const fmtTs = (sec) => (sec ? new Date(sec * 1000).toLocaleString() : '—')
 
+/**
+ * 是否"仍在等观测结果"。
+ * 后端返回的每一行只有 status（planned/denied/executed/succeeded/failed/escalated），
+ * 没有 pending_observation 字段——终态之外的都是还没落定，这里按真实语义推导，
+ * 而不是依赖 Mock 独有的字段。
+ */
+const pendingObservation = (row) => row?.status === 'executed' || row?.status === 'planned'
+
 // JSON 快照可能不是合法 JSON（历史数据/被截断），此时原样显示而不是吞掉。
 const pretty = (text) => {
   if (!text) return '（空）'
@@ -284,7 +292,10 @@ function onPage(p) {
 }
 
 async function openDetail(row) {
-  detail.value = await findHeal(row.heal_id)
+  // 后端 /agent/heal/find 的响应是 { heal: {...} }，早前直接把整个响应体当明细用，
+  // 于是 detail.heal_id / detail.status 全是 undefined，详情面板整块空白。
+  const res = await findHeal(row.heal_id)
+  detail.value = res?.heal || res || null
 }
 
 async function runScan() {

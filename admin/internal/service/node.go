@@ -313,8 +313,13 @@ func (n *NodeWatcherService) Search(s *request.ReqNodeSearch) ([]models.Node, in
 	if len(s.UUID) > 0 {
 		db = db.Where("uuid = ?", s.UUID)
 	}
+	// 主机名/IP 用**模糊**匹配：控制台是"搜索框"，精确匹配会让"只记得一半"的输入
+	// 直接搜不到（此前 hostname 字段根本没接，输入任何内容都返回全部）。
+	if len(s.Hostname) > 0 {
+		db = db.Where("hostname like ?", "%"+s.Hostname+"%")
+	}
 	if len(s.IP) > 0 {
-		db = db.Where("ip = ?", s.IP)
+		db = db.Where("ip like ?", "%"+s.IP+"%")
 	}
 	if s.Status > 0 {
 		db = db.Where("status = ?", s.Status)

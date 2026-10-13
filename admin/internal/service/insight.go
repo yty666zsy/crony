@@ -11,6 +11,7 @@ import (
 	"github.com/tmnhs/crony/common/pkg/crypt"
 	"github.com/tmnhs/crony/common/pkg/dbclient"
 	"github.com/tmnhs/crony/common/pkg/etcdclient"
+	"github.com/tmnhs/crony/common/pkg/logger"
 	"github.com/tmnhs/crony/common/pkg/tools"
 )
 
@@ -249,10 +250,12 @@ type OverviewKPI struct {
 	OnlineNodes      int64   `json:"online_nodes"`
 	TotalNodes       int64   `json:"total_nodes"`
 	RunsToday        int64   `json:"runs_today"`
+	SuccessToday     int64   `json:"success_today"`
 	SuccessRateToday float64 `json:"success_rate_today"`
 	FailedToday      int64   `json:"failed_today"`
 	TimeoutToday     int64   `json:"timeout_today"`
 	SkippedToday     int64   `json:"skipped_today"`
+	RunningNow       int64   `json:"running_now"`
 	AvgDurationMs    int64   `json:"avg_duration_ms"`
 	KBDocs           int64   `json:"kb_docs"`
 	PendingApprovals int64   `json:"pending_approvals"`
@@ -277,7 +280,40 @@ type OverviewAlert struct {
 type OverviewReport struct {
 	KPI    OverviewKPI     `json:"kpi"`
 	Alerts []OverviewAlert `json:"alerts"`
+	// Trends 是 KPI 卡的迷你趋势（12 个 2 小时片段，最近的最后）——控制台 StatCard 的
+	// Sparkline 直接吃数组，因此这里给数组而不是"环比百分比"。
+	Trends OverviewTrends `json:"trends"`
+	// RecentTasks 来自 job_run 的真实最近执行（不含样例数据）。
+	RecentTasks []OverviewTask `json:"recent_tasks"`
 }
+
+// OverviewTrends KPI 迷你趋势（各 12 段，最近的排在最后）。某段没有数据就是 0。
+type OverviewTrends struct {
+	RunsToday        []int64   `json:"runs_today"`
+	RunsFailed       []int64   `json:"runs_failed"`
+	SuccessRateToday []float64 `json:"success_rate_today"`
+	AvgDuration      []int64   `json:"avg_duration"`
+}
+
+// OverviewTask 「最近任务」一行（字段与控制台表格一一对应）。
+type OverviewTask struct {
+	RunID         string `json:"run_id"`
+	JobID         int    `json:"job_id"`
+	JobName       string `json:"job_name"`
+	Hostname      string `json:"hostname"`
+	IP            string `json:"ip"`
+	Status        int    `json:"status"`
+	DurationMs    int64  `json:"duration_ms"`
+	TriggerSource int    `json:"trigger_source"`
+	StartedAt     int64  `json:"started_at"`
+	ScheduledTime int64  `json:"scheduled_time"`
+}
+
+// 趋势分桶：12 段 × 2 小时 = 24 小时。
+const (
+	trendBucketWidth = 2 * 60 * 60
+	trendBucketCount = 12
+)
 
 // OverviewService 控制台概览（只读聚合）。
 type OverviewService struct{}
@@ -301,11 +337,15 @@ func (s *OverviewService) Report() OverviewReport {
 	k.FailedToday, _ = countRows(models.CronyJobRunTableName, "finished_at >= ? and status = ?", since, int(models.RunStatusFailed))
 	k.TimeoutToday, _ = countRows(models.CronyJobRunTableName, "finished_at >= ? and status = ?", since, int(models.RunStatusTimeout))
 	k.SkippedToday, _ = countRows(models.CronyJobRunTableName, "finished_at >= ? and status = ?", since, int(models.RunStatusSkipped))
+	k.SuccessToday, _ = countRows(models.CronyJobRunTableName, "finished_at >= ? and status = ?", since, int(models.RunStatusSuccess))
 	if k.RunsToday > 0 {
-		k.SuccessRateToday = round1(float64(mustCount(models.CronyJobRunTableName,
-			"finished_at >= ? and status = ?", since, int(models.RunStatusSuccess))) * 100 / float64(k.RunsToday))
+		k.SuccessRateToday = round1(float64(k.SuccessToday) * 100 / float64(k.RunsToday))
 	}
 	k.AvgDurationMs = avgDurationSince(since)
+	// 正在执行的次数（真实来源：etcd 里在跑的进程档案），取不到就是 0。
+	k.RunningNow, _ = DefaultJobService.GetRunningJobCount()
+	rep.Trends = buildOverviewTrends()
+	rep.RecentTasks = recentOverviewTasks(8)
 
 	// Agent 会话（真实计数；只有终态，故不报"在线数"）。
 	k.AgentSessionsTotal, _ = countRows(models.CronyAgentSessionTableName, "")
@@ -342,6 +382,80 @@ func avgDurationSince(since int64) int64 {
 		return 0
 	}
 	return int64(avg)
+}
+
+// buildOverviewTrends 聚合最近 24 小时的 job_run，切成 12 个 2 小时片段（最近的最后）。
+//
+// 全部来自真实执行记录：某段没有数据就是 0，不做插值、不用样例。
+// 起点对齐到分桶边界（now 往前 12 个整桶），避免首尾半桶被算错位置。
+func buildOverviewTrends() OverviewTrends {
+	t := OverviewTrends{
+		RunsToday:        make([]int64, trendBucketCount),
+		RunsFailed:       make([]int64, trendBucketCount),
+		SuccessRateToday: make([]float64, trendBucketCount),
+		AvgDuration:      make([]int64, trendBucketCount),
+	}
+	db := dbclient.GetMysqlDB()
+	if db == nil {
+		return t
+	}
+	now := time.Now().Unix()
+	lastBucket := now / trendBucketWidth
+	firstBucket := lastBucket - trendBucketCount + 1
+	start := firstBucket * trendBucketWidth
+
+	type agg struct {
+		Bucket int64
+		Runs   int64
+		Succ   int64
+		DurSum int64
+		DurCnt int64
+	}
+	var rows []agg
+	// 常量全部来自代码（不是外部输入），拼接安全。
+	sql := fmt.Sprintf(
+		"select (finished_at div %d) as bucket, count(*) as runs, "+
+			"sum(case when status = %d then 1 else 0 end) as succ, "+
+			"coalesce(sum(duration_ms),0) as dur_sum, "+
+			"sum(case when duration_ms > 0 then 1 else 0 end) as dur_cnt "+
+			"from %s where finished_at >= ? group by bucket",
+		trendBucketWidth, int(models.RunStatusSuccess), models.CronyJobRunTableName)
+	if err := db.Raw(sql, start).Scan(&rows).Error; err != nil {
+		logger.GetLogger().Warn("[overview] 趋势聚合失败，返回零值趋势：" + err.Error())
+		return t
+	}
+	for _, r := range rows {
+		idx := int(r.Bucket - firstBucket)
+		if idx < 0 || idx >= trendBucketCount {
+			continue
+		}
+		t.RunsToday[idx] = r.Runs
+		t.RunsFailed[idx] = r.Runs - r.Succ
+		if r.Runs > 0 {
+			t.SuccessRateToday[idx] = round1(float64(r.Succ) * 100 / float64(r.Runs))
+		}
+		if r.DurCnt > 0 {
+			t.AvgDuration[idx] = r.DurSum / r.DurCnt
+		}
+	}
+	return t
+}
+
+// recentOverviewTasks 取最近 N 次执行（真实 job_run）。查询失败返回空列表，不返回 nil。
+func recentOverviewTasks(limit int) []OverviewTask {
+	out := make([]OverviewTask, 0, limit)
+	db := dbclient.GetMysqlDB()
+	if db == nil {
+		return out
+	}
+	err := db.Table(models.CronyJobRunTableName).
+		Select("run_id, job_id, job_name, hostname, ip, status, duration_ms, trigger_source, started_at, scheduled_time").
+		Order("id desc").Limit(limit).Find(&out).Error
+	if err != nil {
+		logger.GetLogger().Warn("[overview] 最近任务查询失败：" + err.Error())
+		return make([]OverviewTask, 0)
+	}
+	return out
 }
 
 func alertsFromHealth(h HealthReport) []OverviewAlert {
