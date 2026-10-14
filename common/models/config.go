@@ -158,6 +158,43 @@ type (
 		// self-heal 对"某次执行失败"负责，SLO 对"一段时间内的结果"负责。
 		// 混在一起会让"周期性结果违约"与"单次失败"共用一套闸门，语义混淆。
 		Slo Slo `mapstructure:"slo" json:"slo" yaml:"slo" ini:"slo"`
+		// K8s Kubernetes 集群接入（阶段 K1 新增）。
+		//
+		// 缺省 = 未接入集群：k8s 任务步骤会**明确失败**（"本节点未接入 Kubernetes"），
+		// 只读的 k8s_readonly 工具干脆不注册（而不是注册一个"调用必失败"的工具，
+		// 那会让模型以为"看过集群了，什么都没发现"）。
+		K8s K8s `mapstructure:"k8s" json:"k8s" yaml:"k8s" ini:"k8s"`
+	}
+	// K8s 集群接入配置（阶段 K1）。
+	//
+	// 这里的每一项都是一条**边界**，不是"可选优化"：
+	// 创建 Pod 等于在集群里执行任意代码，所以默认一律关闭，必须显式打开。
+	K8s struct {
+		// Enabled 总开关（默认 false）。关着时不做任何集群调用。
+		Enabled bool `mapstructure:"enabled" json:"enabled" yaml:"enabled" ini:"enabled"`
+		// Kubeconfig kubeconfig 路径（空 = in-cluster → KUBECONFIG → ~/.kube/config）。
+		Kubeconfig string `mapstructure:"kubeconfig" json:"kubeconfig" yaml:"kubeconfig" ini:"kubeconfig"`
+		// Context kubeconfig 里的 context 名（空 = current-context）。
+		Context string `mapstructure:"context" json:"context" yaml:"context" ini:"context"`
+		// Namespace 默认命名空间（默认 default）。
+		Namespace string `mapstructure:"namespace" json:"namespace" yaml:"namespace" ini:"namespace"`
+		// AllowNamespaces 额外允许的命名空间（默认空 = 只允许 namespace 那一个）。
+		AllowNamespaces []string `mapstructure:"allow-namespaces" json:"allowNamespaces" yaml:"allow-namespaces" ini:"allow-namespaces"`
+		// AllowImages 允许的容器镜像白名单，支持 `busybox*` 前缀通配。
+		//
+		// 默认空 = **不允许任何镜像**（这是刻意的默认关闭）。写 `["*"]` 表示接受任意镜像。
+		AllowImages []string `mapstructure:"allow-images" json:"allowImages" yaml:"allow-images" ini:"allow-images"`
+		// DefaultCPU / DefaultMemory 容器 requests/limits（默认空 = 不设置）。
+		DefaultCPU    string `mapstructure:"default-cpu" json:"defaultCpu" yaml:"default-cpu" ini:"default-cpu"`
+		DefaultMemory string `mapstructure:"default-memory" json:"defaultMemory" yaml:"default-memory" ini:"default-memory"`
+		// ServiceAccountName Pod 使用的服务账号（默认空 = default）。
+		ServiceAccountName string `mapstructure:"service-account-name" json:"serviceAccountName" yaml:"service-account-name" ini:"service-account-name"`
+		// TTLSecondsAfterFinished Job 结束后保留多久自动清理（默认 600s）。
+		TTLSecondsAfterFinished int32 `mapstructure:"ttl-seconds-after-finished" json:"ttlSecondsAfterFinished" yaml:"ttl-seconds-after-finished" ini:"ttl-seconds-after-finished"`
+		// PollIntervalSeconds 等待 Job 结束的轮询间隔（默认 2s）。
+		PollIntervalSeconds int `mapstructure:"poll-interval-seconds" json:"pollIntervalSeconds" yaml:"poll-interval-seconds" ini:"poll-interval-seconds"`
+		// AllowPrivilegeEscalation 允许容器提权（默认 false）。
+		AllowPrivilegeEscalation bool `mapstructure:"allow-privilege-escalation" json:"allowPrivilegeEscalation" yaml:"allow-privilege-escalation" ini:"allow-privilege-escalation"`
 	}
 	// SelfHeal 自愈调度配置。所有默认值都是关闭/收紧的一档（见 selfheal.DefaultPolicy）。
 	SelfHeal struct {

@@ -24,8 +24,12 @@ func builtinToolInstances() []Tool {
 		&NodeProbeTool{},
 		&LogSearchTool{},
 		&SQLTool{},
-		// 写工具箱（唯一的内置写工具）
+		// 集群只读查询（阶段 K2）：全新能力面，静态风险必须先登记，
+		// 否则历史轨迹回放会把"查集群"判成"未分类"而失败。
+		&K8sReadonlyTool{},
+		// 写工具箱
 		&JobRetryTool{},
+		&K8sRolloutTool{},
 	}
 }
 

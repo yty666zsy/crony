@@ -21,6 +21,7 @@ func TestStaticRisksMatchRegistrableBuiltins(t *testing.T) {
 		NodeStatus: &fakeNodeSource{},
 		SQL:        &fakeSQLSource{},
 		Probe:      &fakeProbeSource{},
+		K8s:        &fakeK8sSource{},
 	})
 	if err != nil {
 		t.Fatalf("注册只读工具失败: %v", err)
@@ -28,6 +29,11 @@ func TestStaticRisksMatchRegistrableBuiltins(t *testing.T) {
 	// job_retry 是唯一的内置写工具，单独注册进来一起对齐。
 	if err := r.Register(&JobRetryTool{}); err != nil {
 		t.Fatalf("注册 job_retry 失败: %v", err)
+	}
+	// 阶段 K3 起写工具有两个，静态风险表必须一起覆盖（否则回放评测会把
+	// k8s_rollout_restart 判成"未分类"而失败）。
+	if err := r.Register(&K8sRolloutTool{}); err != nil {
+		t.Fatalf("注册 k8s_rollout_restart 失败: %v", err)
 	}
 
 	risks := StaticRisks()

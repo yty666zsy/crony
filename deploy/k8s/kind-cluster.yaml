@@ -1,0 +1,20 @@
+# crony 本地验证集群（kind，1 控制面 + 2 工作节点）。
+#
+# 为什么不用 Docker Desktop 自带的 Kubernetes：
+#   - 它是单节点，"跨节点调度"这件事根本演示不了；
+#   - 开关藏在 GUI 设置里，重启 Docker Desktop 会连带影响机器上其它容器。
+# kind 的集群跑在 Docker 里、有独立 kubeconfig，对其它容器零影响。
+#
+# 两个 worker 刻意打了 zone 标签：用来演示 crony 的多目标调度
+# （node_selector 的 require_labels）确实能把任务落到指定的可用区。
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: crony
+nodes:
+  - role: control-plane
+  - role: worker
+    labels:
+      crony.io/zone: zone-a
+  - role: worker
+    labels:
+      crony.io/zone: zone-b

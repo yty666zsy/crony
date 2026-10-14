@@ -204,6 +204,8 @@ func jobTypeName(t int) string {
 		return "HTTP 请求"
 	case models.JobTypeAgent:
 		return "Agent 型任务（只读巡检）"
+	case models.JobTypeK8s:
+		return "Kubernetes 容器任务（集群内 Job）"
 	default:
 		return fmt.Sprintf("未知(%d)", t)
 	}

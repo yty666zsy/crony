@@ -9,6 +9,7 @@ import (
 	"github.com/tmnhs/crony/common/pkg/agentruntime"
 	"github.com/tmnhs/crony/common/pkg/autonomy"
 	"github.com/tmnhs/crony/common/pkg/config"
+	"github.com/tmnhs/crony/common/pkg/k8sclient"
 	"github.com/tmnhs/crony/common/pkg/logger"
 	"github.com/tmnhs/crony/common/pkg/probechannel"
 	"github.com/tmnhs/crony/common/pkg/tools"
@@ -72,6 +73,18 @@ func InitAgentRuntime() (*agentruntime.Runtime, error) {
 		probeSource.SetPolicy(toolsPolicy)
 	}
 
+	// 阶段 K2：集群只读证据通道。
+	//
+	// 未配置集群（k8s.enabled=false）或 kubeconfig 不可用时**不注册** k8s_readonly：
+	// 注册一个"调用必失败"的工具会让模型以为"查过集群了，什么都没发现"，
+	// 那比"我知道我没有这个能力"更危险。
+	k8sClient, k8sErr := k8sclient.FromConfig(cfg.K8s)
+	if k8sErr != nil {
+		logger.GetLogger().Warn("[agent] 集群证据通道未启用（k8s_readonly 工具不注册）: " + k8sErr.Error())
+		k8sClient = nil
+	}
+	k8sSource := NewK8sReadSource(k8sClient)
+
 	rt, err := agentruntime.New(agentruntime.Options{
 		Config: cfg.LLM,
 		Policy: toolsPolicy,
@@ -88,6 +101,8 @@ func InitAgentRuntime() (*agentruntime.Runtime, error) {
 			// 没有它，模型只能猜"端口未监听"（实测它就是这么猜的）；
 			// 有了它，"未观测就断言"才可能被真正消除，而不是只被标记。
 			Probe: probeSource,
+			// 阶段 K2：集群证据（Pod/事件/容器日志/Deployment/节点）。
+			K8s: k8sSource,
 		},
 		// 阶段 4：每次工具调用（含被拒的）都落 agent_tool_audit。
 		// 观察者内部对"数据库未就绪/落库失败"只记日志，不影响调用。
@@ -108,7 +123,11 @@ func InitAgentRuntime() (*agentruntime.Runtime, error) {
 	approvalStore := NewGormApprovalStore()
 	approvalService := NewApprovalService(approvalStore, rt, toolsPolicy)
 	SetApprovalService(approvalService)
-	writeNames, werr := rt.ConfigureWrites(approvalService, tools.WriteSources{Retry: NewJobRetryExecutor()})
+	writeNames, werr := rt.ConfigureWrites(approvalService, tools.WriteSources{
+		Retry: NewJobRetryExecutor(),
+		// 阶段 K3：集群写动作（滚动重启）。集群未接入时为 nil → 工具不注册。
+		Rollout: NewK8sRolloutExecutor(k8sClient),
+	})
 	if werr != nil {
 		// 写工具装配失败不拖垮整个 Agent 能力（只读诊断仍然可用），但必须显式告警：
 		// 静默降级会让"我明明开了 allow_write"变成一个查不出的谜。

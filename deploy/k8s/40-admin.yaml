@@ -1,0 +1,103 @@
+# crony-admin 在集群里的部署（控制台 + 调度 + Agent 内核）。
+#
+# 与 node 的差别：admin 需要**另一套权限**（只读诊断 + deployment patch），
+# 用独立的 ServiceAccount；即使 node 被攻破也拿不到 admin 的诊断/写能力。
+#
+# 单副本是刻意的：admin 持有调度器与审批状态机（etcd 里有租约）。
+# 要横向扩展必须先解决"调度器选主"，这属于后续阶段——先把话说清楚，
+# 而不是挂 2 个副本制造"看起来高可用、其实双写"的假象。
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: crony-admin
+  namespace: crony
+  labels:
+    app: crony-admin
+    app.kubernetes.io/part-of: crony
+spec:
+  replicas: 1
+  strategy:
+    # 审批单/调度状态不允许"新旧同时对外服务"，用 Recreate。
+    type: Recreate
+  selector:
+    matchLabels:
+      app: crony-admin
+  template:
+    metadata:
+      labels:
+        app: crony-admin
+    spec:
+      serviceAccountName: crony-admin
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: crony-admin
+          image: crony:local
+          imagePullPolicy: IfNotPresent
+          command: ["/app/cronyadmin"]
+          envFrom:
+            - configMapRef:
+                name: crony-config
+            - secretRef:
+                name: crony-secrets
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: 8089
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: 8089
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: 8089
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          volumeMounts:
+            - name: logs
+              mountPath: /app/admin/logs
+            - name: console
+              mountPath: /app/dist
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: logs
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        # 控制台静态资源（console/dist）。构建产物不放进镜像仓库，
+        # 用 ConfigMap/镜像挂载都行；这里用 emptyDir 占位并留说明，
+        # 真实环境请换成镜像内置或对象存储/CDN。
+        - name: console
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: crony-admin
+  namespace: crony
+spec:
+  type: ClusterIP
+  selector:
+    app: crony-admin
+  ports:
+    - name: http
+      port: 8089
+      targetPort: 8089

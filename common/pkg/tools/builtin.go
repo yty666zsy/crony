@@ -912,13 +912,15 @@ func (t *SQLTool) Execute(ctx context.Context, args map[string]interface{}) (Res
 // 组装
 // ---------------------------------------------------------------------------
 
-// Sources 三个可注入数据源。为 nil 的工具不会被注册。
+// Sources 四个可注入数据源。为 nil 的工具不会被注册。
 type Sources struct {
 	NodeStatus NodeStatusSource
 	Logs       LogSource
 	SQL        SQLSource
 	// Probe admin→node 只读探测通道（只有 admin 侧装配：节点不能给自己发探测请求）。
 	Probe ProbeSource
+	// K8s 只读集群查询通道（阶段 K2；只有配置了集群的进程才装配）。
+	K8s K8sReadSource
 }
 
 // NewReadonlyRegistry 创建"只读工具集"注册表。
@@ -955,6 +957,13 @@ func NewReadonlyRegistry(policy Policy, src Sources, opts ...Option) (*Registry,
 	// 那条通道的方向是 admin→node，节点给自己发请求没有意义）。
 	if src.Probe != nil {
 		if err := r.Register(NewNodeProbeToolWithPolicy(src.Probe, policy)); err != nil {
+			return nil, err
+		}
+	}
+	// 阶段 K2：集群只读查询。未配置集群时 src.K8s 为 nil，工具**不存在**——
+	// 而不是"存在但调用必失败"（后者会让模型以为"查过集群了，什么都没发现"）。
+	if src.K8s != nil {
+		if err := r.Register(NewK8sReadonlyTool(src.K8s)); err != nil {
 			return nil, err
 		}
 	}

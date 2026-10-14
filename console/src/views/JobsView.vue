@@ -410,17 +410,34 @@ onMounted(() => {
             <el-radio-group v-model="form.job_type">
               <el-radio :value="1">Shell 命令</el-radio>
               <el-radio :value="2">HTTP 请求</el-radio>
+              <el-radio :value="4">K8s Job</el-radio>
             </el-radio-group>
           </el-form-item>
 
-          <el-form-item :label="form.job_type === 2 ? '请求 URL' : '执行命令'" prop="command">
+          <el-form-item
+            :label="form.job_type === 2 ? '请求 URL' : form.job_type === 4 ? '镜像 + 命令' : '执行命令'"
+            prop="command"
+          >
             <el-input
               v-model="form.command"
               type="textarea"
               :rows="3"
-              :placeholder="form.job_type === 2 ? 'https://intranet.example.com/api/check' : 'bash /opt/app/check.sh --all'"
+              :placeholder="
+                form.job_type === 2
+                  ? 'https://intranet.example.com/api/check'
+                  : form.job_type === 4
+                    ? 'busybox:1.36 /bin/echo hello'
+                    : 'bash /opt/app/check.sh --all'
+              "
             />
-            <p class="mt-1 text-[11px] text-ink-dim">
+            <p v-if="form.job_type === 4" class="mt-1 text-[11px] text-ink-dim">
+              第一个空格前是<b>容器镜像</b>（要命中集群侧 <code class="text-brand-300">k8s.allow-images</code> 白名单，
+              默认空 = 不允许任何镜像），其余是容器内命令。
+              需要命名空间/环境变量时改用步骤（<code class="text-brand-300">kind:"k8s"</code> 的
+              <code class="text-brand-300">k8s_namespace</code>/<code class="text-brand-300">k8s_env</code>）；
+              本表单提交的是"默认命名空间 + 单步"的简单形态。
+            </p>
+            <p v-else class="mt-1 text-[11px] text-ink-dim">
               Shell 命令会在目标节点上以进程组方式启动（阶段 1 已支持整组取消）。
             </p>
           </el-form-item>

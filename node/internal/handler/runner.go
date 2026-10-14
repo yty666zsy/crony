@@ -166,6 +166,15 @@ func SetAgentRunner(r executor.AgentRunner) {
 	defaultRunCoordinator.registry.Register(executor.NewAgentExecutor(r))
 }
 
+// SetK8sRunner 注入 K8s 集群执行器（由 service 层在启动时调用；未配置集群时传 nil）。
+//
+// 与 SetAgentRunner 同一个理由：执行器抽象不该依赖 client-go，
+// 同时"节点没配集群"必须表现为**明确失败**（"本节点未接入 Kubernetes"），
+// 而不是让 k8s 步骤悄悄跑成别的类型。
+func SetK8sRunner(r executor.K8sRunner) {
+	defaultRunCoordinator.registry.Register(executor.NewK8sExecutor(r))
+}
+
 // policyFor 解析任务的并发策略；未知取值回退到默认 skip（不允许静默放行）。
 func (c *RunCoordinator) policyFor(job *Job) runpolicy.ConcurrencyPolicy {
 	if job == nil {
@@ -681,6 +690,26 @@ func BuildPlan(job *Job, runID string) (executor.Plan, error) {
 		}
 		// 巡检材料在运行时装配（见 service 层的 nodeAgentRunner）：只有节点侧才知道
 		// 本机日志目录与节点身份，编排层不该替它猜。
+	case models.JobTypeK8s:
+		// type=4（k8s）：任务体是"镜像 + 容器内命令"，在集群里跑一个 Job。
+		//
+		// 切分规则与 type=1 逐字一致（models.SplitCommand）：第一个空格前是镜像，
+		// 其余是容器内 argv。需要命名空间/环境变量时用 steps_json（kind=k8s）。
+		cmd := job.Cmd
+		if len(cmd) == 0 {
+			job.SplitCmd()
+			cmd = job.Cmd
+		}
+		if len(cmd) == 0 {
+			return executor.Plan{}, fmt.Errorf("k8s 任务 %d 没有解析出任何内容（需要至少一个容器镜像）", job.ID)
+		}
+		step.Kind = executor.KindK8s
+		step.Request = executor.Request{
+			Kind:    executor.KindK8s,
+			Command: cmd[0],
+			Args:    cmd[1:],
+			Timeout: time.Duration(job.Timeout) * time.Second,
+		}
 	default:
 		cmd := job.Cmd
 		if len(cmd) == 0 {

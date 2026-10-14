@@ -1,0 +1,31 @@
+# crony 在 Kubernetes 里运行（命名空间 / 服务账号 / 最小权限）。
+#
+# 为什么节点与控制台各用**一个独立 ServiceAccount**，而不是共用一个：
+#   - crony-node 需要 batch/jobs 的 create/delete（它要真的起 Pod 干活）；
+#   - crony-admin 只需要只读诊断 + deployment 的 patch（滚动重启）；
+#   两者权限**不同**，共用一个 SA 就等于把"能起任意 Pod"的权限顺手给了
+#   只该看诊断的组件。K8s 里权限是给 SA 的，不是给"进程名"的，
+#   所以这里必须物理隔离。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: crony
+  labels:
+    app.kubernetes.io/part-of: crony
+---
+# 任务 Pod 与 crony 自身都跑在这个命名空间里，因此 k8s.namespace 配置为 crony。
+# 好处：镜像白名单 + 命名空间边界 + RBAC 三者口径一致（都是 crony），
+# 不需要"任务跑来跑去、权限跟着放宽"。
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: crony-node
+  namespace: crony
+automountServiceAccountToken: true
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: crony-admin
+  namespace: crony
+automountServiceAccountToken: true

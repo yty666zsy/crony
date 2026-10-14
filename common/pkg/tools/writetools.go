@@ -204,6 +204,8 @@ func numericText(v interface{}) string {
 type WriteSources struct {
 	// Retry 重跑执行器。为 nil 时不注册 job_retry。
 	Retry RetryExecutor
+	// Rollout 集群滚动重启执行器（阶段 K3）。为 nil 时不注册 k8s_rollout_restart。
+	Rollout K8sRolloutExecutor
 }
 
 // RegisterWriteTools 按策略注册写工具，返回实际注册的工具名（供启动日志展示）。
@@ -223,9 +225,18 @@ func RegisterWriteTools(r *Registry, src WriteSources) ([]string, error) {
 	if !policy.AllowWrite || !policy.Autonomy.AllowsWriteTools() {
 		return nil, nil
 	}
-	registered := make([]string, 0, 1)
+	registered := make([]string, 0, 2)
 	if src.Retry != nil {
 		tool := NewJobRetryTool(src.Retry)
+		if err := r.Register(tool); err != nil {
+			return registered, err
+		}
+		registered = append(registered, tool.Name())
+	}
+	// 阶段 K3：集群写动作。只有在"接入集群"的部署里 src.Rollout 才非 nil，
+	// 因此没配集群的部署**看不到**这个工具（不是"看得到但调用失败"）。
+	if src.Rollout != nil {
+		tool := NewK8sRolloutTool(src.Rollout)
 		if err := r.Register(tool); err != nil {
 			return registered, err
 		}

@@ -112,7 +112,7 @@ func TestParseJobPlanRejectsStructurallyBrokenPlans(t *testing.T) {
 		{"索引重复", `{"steps":[{"index":1,"command":"a"},{"index":1,"command":"b"}]}`, "index 重复"},
 		{"索引为负", `{"steps":[{"index":-1,"command":"a"}]}`, "不允许负数"},
 		{"缺少命令", `{"steps":[{"index":0,"command":"  "}]}`, "缺少 command"},
-		{"kind 非法", `{"steps":[{"index":0,"command":"a","kind":"k8s"}]}`, "kind 非法"},
+		{"kind 非法", `{"steps":[{"index":0,"command":"a","kind":"nomad"}]}`, "kind 非法"},
 		{"join 非法", `{"steps":[{"index":0,"command":"a","join":"majority"}]}`, "join 非法"},
 		{"condition 非法", `{"steps":[{"index":0,"command":"a","condition":"on_error"}]}`, "condition 非法"},
 		{"http_method 非法", `{"steps":[{"index":0,"command":"http://x","http_method":"PATCH"}]}`, "http_method 非法"},

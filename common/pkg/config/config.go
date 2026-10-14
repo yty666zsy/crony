@@ -165,6 +165,21 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("llm.offline-tool-call", "")
 	v.SetDefault("llm.offline-response", "")
 
+	// k8s.* 同样显式注册：默认全是"关着"的那一档。
+	// 特别是 allow-images 默认为空 = 不允许任何镜像（创建 Pod 等于在集群里跑任意代码）。
+	v.SetDefault("k8s.enabled", false)
+	v.SetDefault("k8s.kubeconfig", "")
+	v.SetDefault("k8s.context", "")
+	v.SetDefault("k8s.namespace", "default")
+	v.SetDefault("k8s.allow-namespaces", []string{})
+	v.SetDefault("k8s.allow-images", []string{})
+	v.SetDefault("k8s.default-cpu", "")
+	v.SetDefault("k8s.default-memory", "")
+	v.SetDefault("k8s.service-account-name", "")
+	v.SetDefault("k8s.ttl-seconds-after-finished", 600)
+	v.SetDefault("k8s.poll-interval-seconds", 2)
+	v.SetDefault("k8s.allow-privilege-escalation", false)
+
 	// SLO 违约处置（阶段 5 补全）。注册默认值有两个作用：
 	//  1) 配置文件里没有 slo 段时，Unmarshal 得到"关闭 + 冷却 30 分钟"的安全缺省；
 	//  2) 让 CRONY_SLO_BREACH_ACTION_ENABLED / CRONY_SLO_COOLDOWN_SECONDS 可注入。

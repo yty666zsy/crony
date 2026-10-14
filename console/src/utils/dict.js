@@ -31,10 +31,22 @@ export const TRIGGER_SOURCE = {
   6: { key: 'self_heal', text: '自愈动作' },
 }
 
-/** 任务类型：1 cmd / 2 http */
+/**
+ * 任务类型（与 common/models/job.go 的 JobType 逐项对应）：
+ *   1 cmd / 2 http / 3 agent（阶段 2）/ 4 k8s（阶段 K1）
+ *
+ * 3 与 4 的区别要看清：
+ *   - 3（agent 任务）**不在**"新建任务"表单里：它由自然语言建任务向导或诊断链路创建，
+ *     手填一个"自然语言目标"很容易造出一个没人能解释的任务；
+ *   - 4（k8s 任务）在表单里可选（阶段 K4）：它就是"镜像 + 容器内命令"，
+ *     运维看得懂，前提是集群侧配了镜像白名单（k8s.allow-images）。
+ * 两个都在字典里，因为列表/运行详情必须能显示它们的名字——显示"—"会让人以为数据坏了。
+ */
 export const JOB_TYPE = {
   1: { key: 'cmd', text: 'Shell 命令' },
   2: { key: 'http', text: 'HTTP 请求' },
+  3: { key: 'agent', text: 'Agent 任务' },
+  4: { key: 'k8s', text: 'K8s Job' },
 }
 
 /** 任务分配状态：0 未分配 / 1 已分配 */

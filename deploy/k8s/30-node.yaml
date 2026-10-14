@@ -1,0 +1,91 @@
+# crony-node 在集群里的部署：**每个副本是一个 crony 节点**（worker 进程）。
+#
+# 这一步是"节点不再全是本机进程"的落地：
+#   - 之前：node 作为宿主机上的独立进程，起几个就有几个"服务器"；
+#   - 现在：node 作为 Pod，副本数就是节点数，滚动升级/重调度交给 K8s；
+#   - 节点侧仍然只用 ServiceAccount 调集群（in-cluster config），
+#     镜像里**不放 kubeconfig**（buildRESTConfig 优先 in-cluster 正是这个原因：
+#     镜像里残留旧 kubeconfig 会让 Pod 连到错误的集群）。
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: crony-node
+  namespace: crony
+  labels:
+    app: crony-node
+    app.kubernetes.io/part-of: crony
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: crony-node
+  template:
+    metadata:
+      labels:
+        app: crony-node
+    spec:
+      serviceAccountName: crony-node
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      # 跨可用区：优先把 3 个副本摊到不同可用区，而不是靠运气。
+      # whenUnsatisfiable=ScheduleAnyway 而不是 DoNotSchedule：
+      # 单可用区集群（本地 kind/开发集群）也能起来，不会因为"只有 1 个 zone"卡住。
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: crony-node
+      containers:
+        - name: crony-node
+          # 同一镜像内含 cronyadmin 与 cronynode 两个二进制（见根 Dockerfile）。
+          # 本地 kind 集群：kind load docker-image crony:local
+          # 真集群：换成你的仓库地址，例如 registry.example.com/crony:1.2.0
+          image: crony:local
+          imagePullPolicy: IfNotPresent
+          command: ["/app/cronynode"]
+          envFrom:
+            - configMapRef:
+                name: crony-config
+            - secretRef:
+                name: crony-secrets
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # 日志目录与 /tmp 必须可写（根文件系统只读）
+            - name: logs
+              mountPath: /app/node/logs
+            - name: tmp
+              mountPath: /tmp
+          # 节点自身也监听 system.addr（默认 8089）；用 TCP 探针而不是路径探针，
+          # 因为"端口开着"是节点可接受指令的最小事实。
+          readinessProbe:
+            tcpSocket:
+              port: 8089
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 8089
+            initialDelaySeconds: 20
+            periodSeconds: 30
+      volumes:
+        - name: logs
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}

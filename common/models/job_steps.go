@@ -41,12 +41,18 @@ type JobStepSpec struct {
 	Index int `json:"index"`
 	// Name 展示名（控制台/审计用）。
 	Name string `json:"name,omitempty"`
-	// Kind 执行器类型：shell / http / agent。为空时继承任务的 job_type。
+	// Kind 执行器类型：shell / http / agent / k8s。为空时继承任务的 job_type。
 	Kind string `json:"kind,omitempty"`
-	// Command：shell=程序或脚本、http=URL、agent=自然语言目标。
+	// Command：shell=程序或脚本、http=URL、agent=自然语言目标、k8s=容器镜像。
 	Command string `json:"command"`
 	// Args：argv 模式的参数（给 shell 步骤用）。写了它就是 argv 模式，按原样传参。
+	// k8s 步骤下它是**容器内命令**（argv），与 shell 的 argv 语义一致。
 	Args []string `json:"args,omitempty"`
+	// K8sNamespace 仅 k8s 步骤：目标命名空间（空 = 运行时的默认命名空间）。
+	K8sNamespace string `json:"k8s_namespace,omitempty"`
+	// K8sEnv 仅 k8s 步骤：注入容器的环境变量（在运行时基线上叠加）。
+	// 刻意用 map 而不是 "K=V,K=V" 字符串：逗号与等号都在真实值里出现过。
+	K8sEnv map[string]string `json:"k8s_env,omitempty"`
 	// DependsOn 见文件头说明。
 	DependsOn string `json:"depends_on,omitempty"`
 	// Join 汇聚策略：all_success / any_success / all_done（空=all_success）。
@@ -129,7 +135,7 @@ func (p *JobPlanSpec) Normalize() error {
 		}
 		if s.Kind != "" {
 			if _, ok := ParseStepKind(s.Kind); !ok {
-				return fmt.Errorf("步骤 %d 的 kind 非法：%q（可选 shell/http/agent）", s.Index, s.Kind)
+				return fmt.Errorf("步骤 %d 的 kind 非法：%q（可选 shell/http/agent/k8s）", s.Index, s.Kind)
 			}
 		}
 		if _, ok := ParseJoinName(s.Join); !ok {
@@ -216,6 +222,7 @@ const (
 	StepKindShell StepKind = "shell"
 	StepKindHTTP  StepKind = "http"
 	StepKindAgent StepKind = "agent"
+	StepKindK8s   StepKind = "k8s"
 )
 
 // ParseStepKind 解析步骤类型（大小写不敏感，空串交给调用方继承任务类型）。
@@ -227,6 +234,8 @@ func ParseStepKind(raw string) (StepKind, bool) {
 		return StepKindHTTP, true
 	case StepKindAgent:
 		return StepKindAgent, true
+	case StepKindK8s:
+		return StepKindK8s, true
 	default:
 		return "", false
 	}

@@ -232,6 +232,8 @@ func (srv *NodeServer) Run() (err error) {
 	}
 	// 阶段 2：装配 Agent 运行时（未配置 llm 时只告警，不影响普通任务）。
 	srv.initAgentRuntime()
+	// 阶段 K1：装配 K8s 集群执行器（未配置/连不上时只告警，不影响其它任务）。
+	srv.initK8sRuntime()
 	// 按 uuid 就地登记：重启时复用同一行（Update），避免同一节点在库里出现多行；
 	// 若该行已被清理（例如真失联后 admin 做过 FailOver 清理），则重新插入。
 	// 旧实现无条件 Insert()，重启一次就多一行（节点页重复、状态更新写到最旧那行上）。

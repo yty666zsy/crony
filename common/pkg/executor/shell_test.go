@@ -177,16 +177,21 @@ func TestShellExecutorRejectsInvalidRequest(t *testing.T) {
 // 未注册的类型/非法请求都返回结构化失败，而不是 panic 或静默成功。
 func TestRegistryRunValidatesAndDispatches(t *testing.T) {
 	registry := DefaultRegistry()
-	// 阶段 2 起默认注册表是 agent/http/shell（有序）：
-	// agent 执行器已注册但**未注入运行器**，这样"类型未注册"与"模型未配置"能被区分开。
-	if kinds := registry.Kinds(); len(kinds) != 3 || kinds[0] != KindAgent || kinds[1] != KindHTTP || kinds[2] != KindShell {
-		t.Fatalf("默认注册表应包含 agent/http/shell（有序），实际 %v", kinds)
+	// 阶段 K1 起默认注册表是 agent/http/k8s/shell（有序）：
+	// agent/k8s 执行器已注册但**未注入运行器**，这样"类型未注册"与
+	// "模型未配置"/"集群未接入"能被区分开。
+	if kinds := registry.Kinds(); len(kinds) != 4 || kinds[0] != KindAgent || kinds[1] != KindHTTP ||
+		kinds[2] != KindK8s || kinds[3] != KindShell {
+		t.Fatalf("默认注册表应包含 agent/http/k8s/shell（有序），实际 %v", kinds)
 	}
 	if _, ok := KindOf("SHELL"); !ok {
 		t.Error("KindOf 应大小写不敏感")
 	}
 	if _, ok := KindOf("agent"); !ok {
 		t.Error("agent 是阶段 2 已落地的执行器类型，KindOf 应能解析")
+	}
+	if _, ok := KindOf("k8s"); !ok {
+		t.Error("k8s 是阶段 K1 已落地的执行器类型，KindOf 应能解析")
 	}
 	if _, ok := KindOf("container"); ok {
 		t.Error("尚未落地的执行器类型不应被解析成功")

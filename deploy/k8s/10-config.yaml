@@ -1,0 +1,66 @@
+# crony 配置：非敏感项走 ConfigMap，敏感项走 Secret。
+#
+# 键名映射规则（common/pkg/config/config.go: applyEnvOverrides）：
+#   配置键 `a.b-c` → 环境变量 `CRONY_A_B_C`（`.` 与 `-` 都换成 `_`，前缀 CRONY_）
+#   列表型配置用**逗号分隔**，例如 CRONY_K8S_ALLOW_IMAGES=busybox*,alpine:3.20
+#   （有测试兜底：common/pkg/config/config_k8s_test.go）
+#
+# 为什么 k8s 段要写在这里而不是"什么都不配就用默认"：
+#   k8s.allow-images 默认是**空 = 不允许任何镜像**。这不是遗漏，是刻意的
+#   ——创建 Pod 等于在集群里执行任意代码。所以下面这行必须由人来写，
+#   写什么就等于承认"允许在集群里跑这些镜像"。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: crony-config
+  namespace: crony
+data:
+  ENVIRONMENT: "production"
+  TZ: "Asia/Shanghai"
+
+  # ---- 数据面（改成你环境里 MySQL / etcd 的地址）----
+  # 同集群内用 Service 名；本地演示可用 host.docker.internal 或宿主机 IP。
+  # 本地真集群联调最省事的做法：直接复用宿主机的 MySQL/etcd，
+  # 并把它们的监听地址从 127.0.0.1 改成 0.0.0.0（否则集群里的 Pod 连不上）。
+  CRONY_MYSQL_PATH: "host.docker.internal"
+  CRONY_MYSQL_PORT: "13306"
+  CRONY_MYSQL_DB_NAME: "crony"
+  CRONY_MYSQL_USERNAME: "root"
+  CRONY_ETCD_ENDPOINTS: "http://host.docker.internal:2379"
+
+  # ---- 集群接入（阶段 K1/K4）----
+  CRONY_K8S_ENABLED: "true"
+  # 任务 Job 与 crony 自身同命名空间：镜像白名单 / 命名空间边界 / RBAC 三者口径一致
+  CRONY_K8S_NAMESPACE: "crony"
+  # 明确列出允许的镜像（前缀通配）。写 "*" 等于接受任意镜像，不要图省事。
+  CRONY_K8S_ALLOW_IMAGES: "busybox*,alpine:3.20"
+  # 额外允许的命名空间：默认空 = 只允许上面那一个。故意留空。
+  CRONY_K8S_ALLOW_NAMESPACES: ""
+  # 任务容器默认资源（不设则不限，容易被一个死循环任务拖垮节点）
+  CRONY_K8S_DEFAULT_CPU: "200m"
+  CRONY_K8S_DEFAULT_MEMORY: "256Mi"
+  # 失败现场保留 15 分钟（默认 600s）：足够人去 kubectl describe / 看事件
+  CRONY_K8S_TTL_SECONDS_AFTER_FINISHED: "900"
+  # 容器提权默认关闭；这里显式再写一遍，避免被"临时打开忘了关"
+  CRONY_K8S_ALLOW_PRIVILEGE_ESCALATION: "false"
+
+  # ---- Agent 工具的写能力：默认全关（放量只能收紧，不能靠部署顺手打开）----
+  # 想演示 k8s_rollout_restart 的审批链路时，把下面这行改成 "true"，
+  # 并且必须同时开 tools.allow-write，否则写工具根本不注册。
+  CRONY_TOOLS_ALLOW_WRITE: "false"
+  CRONY_TOOLS_AUTONOMY: "L1"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: crony-secrets
+  namespace: crony
+type: Opaque
+stringData:
+  # 占位符：请改成真实值，或改用 `kubectl create secret` / 外部密钥管理。
+  # 这里刻意不写任何"看起来像口令"的默认值——镜像/清单进仓库后不该带着密钥。
+  CRONY_MYSQL_PASSWORD: "REPLACE_ME"
+  CRONY_AUTH_JWT_SECRET: "REPLACE_ME_WITH_openssl_rand_hex_32"
+  CRONY_AUTH_BOOTSTRAP_ADMIN_USER: "admin"
+  CRONY_AUTH_BOOTSTRAP_ADMIN_PASSWORD: "REPLACE_ME_AT_LEAST_8_CHARS"
+  CRONY_AUTH_ALLOW_PUBLIC_REGISTER: "false"

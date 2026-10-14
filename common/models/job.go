@@ -23,6 +23,15 @@ const (
 	//   - 因此 Agent 任务的所有副作用被限制在"只读工具 + 落迹"，
 	//     这也是它能直接排进现有调度器的前提（不需要新的权限模型）。
 	JobTypeAgent = JobType(3)
+	// JobTypeK8s 阶段 K1 新增：任务体是"一个容器镜像 + 容器内命令"，
+	// 由节点把这一步提交成 Kubernetes Job 在集群里执行（见 executor.K8sExecutor）。
+	//
+	// 与 type=1 的关键区别：执行位置不再是"运行 crony node 的那台机器"，
+	// 而是集群中的一个 Pod。因此单步形态下：
+	//   - command 的第一个空格前的部分 = 容器镜像；
+	//   - 其余部分 = 容器内命令 argv（与 type=1 的 SplitCmd 切分规则一致）。
+	// 需要命名空间/环境变量/多步骤编排时用 steps_json（kind=k8s）。
+	JobTypeK8s = JobType(4)
 
 	HTTPMethodGet  = 1
 	HTTPMethodPost = 2

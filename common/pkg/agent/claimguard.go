@@ -25,11 +25,13 @@ import (
 // 设计取向是"宁可多标一句，不可少标一句"：误标只会让报告多一条提示，
 // 漏标则可能让人照着未观测的结论去改生产配置。
 
-// nodeObservedSourcePrefixes 视为"节点侧观测"的证据来源。
+// nodeObservedSourcePrefixes 视为"节点侧/集群侧观测"的证据来源。
 //
-// 目前只有 node_status 工具产出的 source=node；节点侧 shell_readonly
-// （阶段 3 后续的只读探针通道）落地后应一并加进来。
-var nodeObservedSourcePrefixes = []string{"node"}
+// 目前有 node_status 工具产出的 source=node，以及阶段 K2 的 k8s_readonly
+// 工具产出的 source=k8s（Pod/事件/日志都是**集群里的机器自己**才有的观测，
+// admin 侧不可能凭空知道）。节点侧 shell_readonly（只读探针通道）落地后
+// 应一并加进来。
+var nodeObservedSourcePrefixes = []string{"node", "k8s"}
 
 // nodeClaim 一类节点侧事实断言的检测规则。
 type nodeClaim struct {

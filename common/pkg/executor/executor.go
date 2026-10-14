@@ -30,10 +30,16 @@ const (
 	// KindAgent 阶段 2 新增：一次 Agent 会话（有界 ReAct 循环 + 只读工具）。
 	// 由 node 侧注入的 AgentRunner 真正执行，executor 只负责编排/重试/落库。
 	KindAgent Kind = "agent"
-	// 预留（阶段 3 之后逐个落地）：
-	// KindContainer Kind = "container"
-	// KindSQL       Kind = "sql"
-	// KindPython    Kind = "python"
+	// KindK8s 阶段 K1 新增：在 Kubernetes 集群里以 Job 方式执行（见 k8s.go）。
+	// 由注入的 K8sRunner 真正调用集群，executor 只负责编排/重试/落库。
+	//
+	// 为什么不复用 KindShell 把 `kubectl apply` 拼进命令：
+	// 那样"集群里跑的是什么"就藏在一条字符串里，无法校验、无法限制命名空间与镜像、
+	// 也无法把 Pod/退出码/日志作为**结构化产物**落库（只能靠人肉 grep 日志）。
+	KindK8s Kind = "k8s"
+	// 预留（后续逐个落地）：
+	// KindSQL    Kind = "sql"
+	// KindPython Kind = "python"
 )
 
 var (
@@ -82,6 +88,11 @@ type Request struct {
 	// 公共
 	Timeout        time.Duration
 	MaxOutputBytes int
+
+	// k8s（阶段 K1）：Command = 容器镜像；Args = 容器内命令（argv，
+	// 与 shell 的 argv 语义一致：每个元素是一段，不经 shell 解析）。
+	// K8sNamespace 为空时用运行时默认命名空间。
+	K8sNamespace string
 
 	// agent（阶段 2）
 	// AgentKind 会话类型：diagnose（失败诊断）/ inspect（巡检总结）/ nljob（草案）。
@@ -238,6 +249,13 @@ func DescribeRequest(req Request) string {
 		return "shell: " + req.Command
 	case KindHTTP:
 		return fmt.Sprintf("http: %s %s", req.Method, req.URL)
+	case KindK8s:
+		// 只打印镜像/命名空间/容器命令，**不打印 Env**：
+		// env 里经常被塞进凭据，而描述串会进日志与审计。
+		if req.K8sNamespace != "" {
+			return fmt.Sprintf("k8s: ns=%s image=%s args=%v", req.K8sNamespace, req.Command, req.Args)
+		}
+		return fmt.Sprintf("k8s: image=%s args=%v", req.Command, req.Args)
 	default:
 		return string(req.Kind)
 	}

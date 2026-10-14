@@ -151,6 +151,20 @@ func compileStep(job *models.Job, spec *models.JobPlanSpec, pos int) (executor.S
 			AgentGoal: s.Command,
 			Timeout:   timeout,
 		}
+	case executor.KindK8s:
+		// k8s 步骤：command = 容器镜像，args = 容器内命令（argv）。
+		//
+		// 这里**不做 TrimSpace**：镜像名带空格是配置手误，必须由执行器明确拒绝
+		// （"镜像名不能有首尾空格"），而不是被静默修好——静默修好会掩盖真实问题，
+		// 让人以为"配置没问题却跑出了别的东西"。
+		step.Request = executor.Request{
+			Kind:         executor.KindK8s,
+			Command:      s.Command,
+			Args:         s.Args,
+			K8sNamespace: s.K8sNamespace,
+			Env:          s.K8sEnv,
+			Timeout:      timeout,
+		}
 	default:
 		argv, err := resolveArgv(s)
 		if err != nil {
@@ -226,6 +240,8 @@ func resolveKind(job *models.Job, s models.JobStepSpec) (executor.Kind, error) {
 		return executor.KindHTTP, nil
 	case models.JobTypeAgent:
 		return executor.KindAgent, nil
+	case models.JobTypeK8s:
+		return executor.KindK8s, nil
 	case models.JobTypeCmd, 0:
 		return executor.KindShell, nil
 	default:

@@ -1,0 +1,85 @@
+# crony 的 RBAC：两份 Role 分别对应"执行任务"和"只读诊断 + 一个写动作"。
+#
+# 权限清单是**照着代码列出来的**，不是照印象写的：
+#   common/pkg/k8sclient/client.go  RunK8sJob → Jobs(create/get/delete) + Pods(get/list/watch) + Pods/log(get)
+#   common/pkg/k8sclient/read.go    Read      → Pods(list/get) + Events(list) + Deployments(list) + Nodes(list) + Pods/log(get)
+#   common/pkg/k8sclient/read.go    RolloutRestart → Deployments(patch)
+# 多给一条权限就多一条"Agent 能碰但它不需要碰"的路，所以这里逐条对应。
+---
+# ---------- crony-node：把任务跑成 Job ----------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: crony-node-jobs
+  namespace: crony
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    # delete 是必需的：同一个 run 重建同名 Job 时必须先删旧的
+    # （见 client.go 对 AlreadyExists 的处理——绝不允许拿上一次的结论当这一次）
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    # 收容器日志：失败的真正原因（段错误、配置报错）几乎只出现在日志里
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: crony-node-jobs
+  namespace: crony
+subjects:
+  - kind: ServiceAccount
+    name: crony-node
+    namespace: crony
+roleRef:
+  kind: Role
+  name: crony-node-jobs
+  apiGroup: rbac.authorization.k8s.io
+---
+# ---------- crony-admin：只读诊断 + 滚动重启 ----------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: crony-admin-diagnose
+  namespace: crony
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["events"]
+    # 事件是"Pod 为什么起不来"的第一手材料（ImagePullBackOff/驱逐/调度失败都只在事件里）
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    # 唯一允许的写动作：滚动重启（可逆、不改期望状态）。
+    # 刻意**不给** delete/update：改镜像、改副本数、删 Deployment 都不在能力范围内，
+    # 即使 Agent 想提议也执行不了（工具层根本没有对应 op）。
+    verbs: ["patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: crony-admin-diagnose
+  namespace: crony
+subjects:
+  - kind: ServiceAccount
+    name: crony-admin
+    namespace: crony
+roleRef:
+  kind: Role
+  name: crony-admin-diagnose
+  apiGroup: rbac.authorization.k8s.io
