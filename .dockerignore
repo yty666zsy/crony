@@ -11,6 +11,10 @@ node/logs
 .env
 .env.*
 !.env.example
+# 控制台的环境文件（console/.env 默认 VITE_USE_MOCK=true）：镜像构建必须连真后端，
+# 不能把 mock 开关带进去（Dockerfile 的 web 阶段会显式覆盖）。
+console/.env
+console/.env.local
 .tags
 .tags_sorted_by_file
 README*.md

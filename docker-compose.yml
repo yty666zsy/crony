@@ -5,7 +5,7 @@
 #      # 生成 JWT 密钥： openssl rand -hex 32
 # 启动：docker compose up -d --build
 # 日志：docker compose logs -f admin
-# 访问：http://127.0.0.1:8089/ping  （旧版前端位于 /，AI Agent 控制台在阶段 1 挂载 /console）
+# 访问：控制台 http://127.0.0.1:8089/console/   （存活探针 /ping；镜像内已含控制台构建产物）
 #
 # 注意：生产模式下 admin 未配置 CRONY_AUTH_JWT_SECRET 会拒绝启动（fail-fast），
 # 这是有意的——旧版本把签名密钥硬编码在代码里，任何人都能伪造管理员令牌。
@@ -78,7 +78,7 @@ services:
       CRONY_AUTH_JWT_SECRET: ${CRONY_AUTH_JWT_SECRET:?请设置 CRONY_AUTH_JWT_SECRET（openssl rand -hex 32）}
       CRONY_AUTH_TOKEN_EXPIRE_HOURS: ${CRONY_AUTH_TOKEN_EXPIRE_HOURS:-168}
       CRONY_AUTH_BOOTSTRAP_ADMIN_USER: ${CRONY_AUTH_BOOTSTRAP_ADMIN_USER:-admin}
-      CRONY_AUTH_BOOTSTRAP_ADMIN_PASSWORD: ${CRONY_AUTH_BOOTSTRAP_ADMIN_PASSWORD:?请在 .env 中设置初始管理员口令（>= 8 位）}
+      CRONY_AUTH_BOOTSTRAP_ADMIN_PASSWORD: ${CRONY_AUTH_BOOTSTRAP_ADMIN_PASSWORD:?请在 .env 中设置初始管理员口令（8~20 位，且只能是字母/数字）}
       CRONY_AUTH_BOOTSTRAP_ADMIN_EMAIL: ${CRONY_AUTH_BOOTSTRAP_ADMIN_EMAIL:-}
       CRONY_AUTH_ALLOW_PUBLIC_REGISTER: "false"
     ports:
