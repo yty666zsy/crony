@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/jakecoffman/cron"
+	"github.com/tmnhs/crony/common/pkg/cronspec"
 )
 
 // NextTriggerCount 生成"接下来 N 次触发"时默认取几次。
@@ -20,34 +21,13 @@ var ErrInvalidCronSpec = fmt.Errorf("agent: cron 表达式无法解析")
 
 // ParseSpec 安全解析 cron 表达式。
 //
-// 为什么要包一层：`cron.Parse` 在表达式非法时**直接 panic**（内部是 log.Panicf），
-// 而且 `spec[0]` 在空字符串上就会 panic。如果让模型产出的表达式直接进这个函数，
-// 一个幻觉表达式就能把 node 进程打挂。这里把它转成普通错误。
+// 为什么还要包一层：本包的错误**按 agent 的语义**（ErrInvalidCronSpec）暴露给上层，
+// 而上层（模型草稿/复验）已经用 errors.Is(err, ErrInvalidCronSpec) 判定。
+// 真正的解析与 panic 兜底在 common/pkg/cronspec（唯一事实来源），这里只做错误归类。
 func ParseSpec(spec string) (cron.Schedule, error) {
-	clean := strings.TrimSpace(spec)
-	if clean == "" {
-		return nil, fmt.Errorf("%w: 表达式为空", ErrInvalidCronSpec)
-	}
-	if len(clean) > 128 {
-		return nil, fmt.Errorf("%w: 表达式过长（%d 字符）", ErrInvalidCronSpec, len(clean))
-	}
-	var (
-		sched cron.Schedule
-		perr  error
-	)
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				perr = fmt.Errorf("%w: %v", ErrInvalidCronSpec, r)
-			}
-		}()
-		sched = cron.Parse(clean)
-	}()
-	if perr != nil {
-		return nil, perr
-	}
-	if sched == nil {
-		return nil, fmt.Errorf("%w: 解析结果为空", ErrInvalidCronSpec)
+	sched, err := cronspec.Parse(spec)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidCronSpec, err)
 	}
 	return sched, nil
 }

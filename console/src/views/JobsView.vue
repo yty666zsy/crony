@@ -61,7 +61,7 @@ const form = reactive({
   id: null,
   name: '',
   command: '',
-  spec: '0 3 * * *',
+  spec: '0 0 3 * * *',
   job_type: 1,
   http_method: 2,
   run_on: '',
@@ -80,7 +80,24 @@ const formRef = ref(null)
 const rules = {
   name: [{ required: true, message: '请输入任务名称', trigger: 'blur' }],
   command: [{ required: true, message: '请输入执行命令或 URL', trigger: 'blur' }],
-  spec: [{ required: true, message: '请输入 cron 表达式', trigger: 'blur' }],
+  // cron 段数：本系统按 6 段「秒 分 时 日 月 周」解析。5 段（如控制台曾默认的 0 3 * * *）
+  // 会被底层库解释成「秒 分 时 日 月」= 每小时第 3 分钟，而不是每天 03:00。
+  // 这里先挡一道只是少一次来回，真正的拒绝在后端 /job/add（code=1002，见 common/pkg/cronspec）。
+  spec: [
+    { required: true, message: '请输入 cron 表达式', trigger: 'blur' },
+    {
+      validator: (rule, value, cb) => {
+        const v = String(value || '').trim()
+        if (!v || v.startsWith('@')) return cb()
+        const n = v.split(/\s+/).filter(Boolean).length
+        if (n !== 6) {
+          return cb(new Error(`需要 6 段「秒 分 时 日 月 周」，当前 ${n} 段：每天 03:00 应写 0 0 3 * * *`))
+        }
+        cb()
+      },
+      trigger: 'blur',
+    },
+  ],
   job_type: [{ required: true, message: '请选择任务类型', trigger: 'change' }],
 }
 
@@ -126,7 +143,7 @@ function openCreate() {
     id: null,
     name: '',
     command: '',
-    spec: '0 3 * * *',
+    spec: '0 0 3 * * *',
     job_type: 1,
     http_method: 2,
     run_on: '',
@@ -450,10 +467,13 @@ onMounted(() => {
           </el-form-item>
 
           <el-form-item label="Cron 表达式" prop="spec">
-            <el-input v-model="form.spec" placeholder="分 时 日 月 周，例如 0 3 * * *" />
+            <el-input v-model="form.spec" placeholder="秒 分 时 日 月 周，例如 0 0 3 * * *" />
             <p class="mt-1 text-[11px] text-ink-dim">
-              例：<code class="text-brand-300">0 3 * * *</code> 每天 03:00；
-              <code class="text-brand-300">*/30 * * * *</code> 每 30 分钟。
+              <b>必须 6 段</b>「秒 分 时 日 月 周」。例：<code class="text-brand-300">0 0 3 * * *</code> 每天 03:00；
+              <code class="text-brand-300">*/30 * * * * *</code> 每 30 秒；也可写 <code class="text-brand-300">@daily</code>。
+              <br />
+              注意：写成 5 段（如 <code class="text-brand-300">0 3 * * *</code>）会被本系统按「秒 分 时 日 月」解释成
+              <b>每小时第 3 分钟</b>，而不是每天 03:00，因此后端会直接拒绝。
             </p>
           </el-form-item>
 

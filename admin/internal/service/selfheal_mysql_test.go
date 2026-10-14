@@ -57,9 +57,9 @@ func TestIntegrationSelfHealAgainstRealMySQL(t *testing.T) {
 	}
 	jobs := []*models.Job{
 		{ID: jobID, Name: tag + "-job", Command: "echo hi", Type: models.JobTypeCmd,
-			Spec: "0 0 1 1 *", Status: models.JobStatusAssigned, Timeout: 60, SelfHeal: 1, RunOn: nodeUUID},
+			Spec: "0 0 1 1 * *", Status: models.JobStatusAssigned, Timeout: 60, SelfHeal: 1, RunOn: nodeUUID},
 		{ID: jobIDTimeout, Name: tag + "-job-timeout", Command: "sleep 100", Type: models.JobTypeCmd,
-			Spec: "0 0 1 1 *", Status: models.JobStatusAssigned, Timeout: 60, SelfHeal: 1, RunOn: nodeUUID},
+			Spec: "0 0 1 1 * *", Status: models.JobStatusAssigned, Timeout: 60, SelfHeal: 1, RunOn: nodeUUID},
 	}
 	for _, j := range jobs {
 		if err := db.Table(models.CronyJobTableName).Create(j).Error; err != nil {

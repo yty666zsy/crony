@@ -198,7 +198,7 @@ func testJob(id int) *Job {
 		Name:    "清理 90 天前日志",
 		Command: "bash /opt/scripts/clean.sh --days 90",
 		Type:    models.JobTypeCmd,
-		Spec:    "0 3 * * *",
+		Spec:    "0 0 3 * * *",
 		RunOn:   "node-prod-01",
 		Cmd:     []string{"bash", "/opt/scripts/clean.sh", "--days", "90"},
 	}}

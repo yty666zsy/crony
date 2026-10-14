@@ -1623,7 +1623,7 @@ func TestAcceptanceSuite(t *testing.T) {
 		code, _, msg := dagPost("/job/add", map[string]any{
 			"name":       jobName,
 			"command":    "echo should-not-be-saved",
-			"spec":       "0 5 * * *",
+			"spec":       "0 0 5 * * *", // 6 段：本条验的是"编排有环"，spec 必须是合法输入
 			"job_type":   1,
 			"status":     1,
 			"timeout":    60,
@@ -1648,6 +1648,48 @@ func TestAcceptanceSuite(t *testing.T) {
 		cc.note("任务名 %s 提交带环编排 → code=1021 msg=%q；库中同名行数=%d（无半成品）", jobName, truncate(msg, 80), cnt)
 	})
 
+	// AC-85：写入路径的 cron 段数校验——5 段必须**被拒**，而不是静默按"每小时"跑。
+	//
+	// 为什么这条要进黑盒验收：本系统调度库（jakecoffman/cron，兼容 robfig v1）把 **5 段**
+	// 解释为「秒 分 时 日 月」，于是 "0 3 * * *"（本意"每天 03:00"）的真实含义是
+	// "每小时第 3 分钟"：语法合法、创建成功、无任何告警，只在**运行频率**上错。
+	// 2026-10-14 真集群上踩到：控制台表单默认值就是 5 段，任务每小时重跑一次，
+	// 把成功率与 SLO 违约指标一起污染成噪声。语法层面拦不住，只能在写入时拒绝。
+	run("AC-85", "cron 段数：5 段在 /job/add 被拒（1002，报文含段数与 6 段写法），库里不留半成品", func(cc *caseCtx) {
+		tag := strings.TrimSpace(os.Getenv("CRONY_ACC_RUN_TAG"))
+		jobName := "acc-cron5-" + tag + "-" + fmt.Sprint(time.Now().UnixNano()%100000)
+		code, _, msg := dagPost("/job/add", map[string]any{
+			"name":       jobName,
+			"command":    "echo should-not-be-saved",
+			"spec":       "0 3 * * *", // 5 段：本库语义 = 每小时第 3 分钟
+			"job_type":   1,
+			"status":     1,
+			"timeout":    60,
+			"allocation": 2,
+			"run_on":     os.Getenv("CRONY_ACC_NODE_UUID"),
+		})
+		if code != 1002 {
+			cc.t.Fatalf("5 段 cron 必须被拒（1002 ErrorJobFormat，不是别的码），实际 code=%d msg=%q", code, msg)
+		}
+		if !strings.Contains(msg, "5 段") || !strings.Contains(msg, "6 段") {
+			cc.t.Fatalf("拒绝原因必须点明「几段」和「6 段怎么写」，否则运维只能猜，实际 msg=%q", msg)
+		}
+		if db == nil {
+			cc.note("任务名 %s 提交 spec=\"0 3 * * *\" → code=%d msg=%q；未配置 CRONY_TEST_MYSQL_DSN，"+
+				"跳过「库里不留半成品」核对", jobName, code, truncate(msg, 140))
+			return
+		}
+		var cnt int
+		if err := db.QueryRow("select count(*) from job where name = ?", jobName).Scan(&cnt); err != nil {
+			cc.t.Fatalf("按名称核对任务是否落库失败: %v", err)
+		}
+		if cnt != 0 {
+			cc.t.Fatalf("5 段任务被拒后库里仍留下 %d 条（%s）：拒绝必须是「什么都没发生」", cnt, jobName)
+		}
+		cc.note("任务名 %s 提交 spec=\"0 3 * * *\" → code=%d msg=%q；库中同名行数=%d（无半成品）",
+			jobName, code, truncate(msg, 140), cnt)
+	})
+
 	// AC-32：读路径——有编排的任务能读出可执行摘要；单步任务必须回 1022（"本来就没有"≠"坏了"）。
 	run("AC-32", "编排读取：有编排任务给出可执行摘要，单步任务回 1022 而不是空图", func(cc *caseCtx) {
 		if db == nil {
@@ -1663,7 +1705,7 @@ func TestAcceptanceSuite(t *testing.T) {
 			cc.t.Fatalf("清理编排夹具失败: %v", err)
 		}
 		if _, err := db.Exec("insert into job (id, name, command, steps_json, status, concurrency_policy, type, notify_type, spec, created) "+
-			"values (?, ?, ?, ?, 1, 0, 1, 0, '0 5 * * *', ?)",
+			"values (?, ?, ?, ?, 1, 0, 1, 0, '0 0 5 * * *', ?)",
 			dagJobID, "acc-dag-fixture-"+tag, "echo fallback-must-not-run", dagDiamondJSON, time.Now().UnixMilli()); err != nil {
 			cc.t.Fatalf("写入编排夹具失败: %v", err)
 		}

@@ -103,7 +103,7 @@ func itJob(id int, name string, cmd []string) *Job {
 		Name:    name,
 		Command: "echo crony-it-ok",
 		Type:    models.JobTypeCmd,
-		Spec:    "*/5 * * * *",
+		Spec:    "0 */5 * * * *",
 		RunOn:   "node-it-01",
 		Timeout: 30,
 		Cmd:     cmd,
@@ -392,7 +392,7 @@ func dagJob(id int, name, stepsJSON string) *Job {
 		Name:    name,
 		Command: "echo fallback-must-not-run",
 		Type:    models.JobTypeCmd,
-		Spec:    "*/5 * * * *",
+		Spec:    "0 */5 * * * *",
 		RunOn:   "node-it-01",
 		Timeout: 30,
 		// 关键：StepsJSON 非空时 BuildPlan 必须走编排路径，绝不回退到这条 command。

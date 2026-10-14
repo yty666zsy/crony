@@ -71,7 +71,7 @@ func testRun(runID string, jobID int, slot int64) *JobRun {
 		RunID:          runID,
 		JobID:          jobID,
 		JobName:        "集成测试任务",
-		Spec:           "*/5 * * * *",
+		Spec:           "0 */5 * * * *",
 		Command:        "echo hello",
 		JobType:        1,
 		NodeUUID:       "node-it-01",

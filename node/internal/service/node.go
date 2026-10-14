@@ -8,6 +8,7 @@ import (
 	"github.com/ouqiang/goutil"
 	"github.com/tmnhs/crony/common/models"
 	"github.com/tmnhs/crony/common/pkg/config"
+	"github.com/tmnhs/crony/common/pkg/cronspec"
 	"github.com/tmnhs/crony/common/pkg/dbclient"
 	"github.com/tmnhs/crony/common/pkg/etcdclient"
 	"github.com/tmnhs/crony/common/pkg/logger"
@@ -312,6 +313,12 @@ func (srv *NodeServer) addJob(j *handler.Job) {
 	if taskFunc == nil {
 		logger.GetLogger().Error(fmt.Sprintf("Failed to create a task to process the Job. The task protocol was not supported:%v", j.Type))
 		return
+	}
+	// 存量 5 段表达式：**不改变行为**（升级不能静默停掉正在跑的任务），但必须让它可见。
+	// 本系统调度库把 5 段解释为「秒 分 时 日 月」——"0 4 * * *" 是"每小时第 4 分钟"，
+	// 语法合法、创建成功，只在频率上错。启动/新增时打一条 WARN，运维才有机会发现。
+	if warn := cronspec.FiveSegmentsWarning(j.Spec); warn != "" {
+		logger.GetLogger().Warn(fmt.Sprintf("job[%d] %s", j.ID, warn))
 	}
 	err := goutil.PanicToError(func() {
 		srv.Cron.AddFunc(j.Spec, taskFunc, srv.jobCronName(j.ID))

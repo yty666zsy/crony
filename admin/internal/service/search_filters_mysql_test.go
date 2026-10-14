@@ -119,9 +119,9 @@ func TestIntegrationJobSearchStatusZero(t *testing.T) {
 
 	jobs := []*models.Job{
 		{ID: 910060, Name: prefix + "-unassigned", Command: "echo a", Type: models.JobTypeCmd,
-			Spec: "0 0 1 1 *", Status: models.JobStatusNotAssigned, Timeout: 60},
+			Spec: "0 0 1 1 * *", Status: models.JobStatusNotAssigned, Timeout: 60},
 		{ID: 910061, Name: prefix + "-assigned", Command: "echo b", Type: models.JobTypeCmd,
-			Spec: "0 0 1 1 *", Status: models.JobStatusAssigned, Timeout: 60},
+			Spec: "0 0 1 1 * *", Status: models.JobStatusAssigned, Timeout: 60},
 	}
 	for _, j := range jobs {
 		if err := db.Table(models.CronyJobTableName).Create(j).Error; err != nil {
