@@ -217,10 +217,10 @@ cp .env.example .env          # Windows PowerShell: Copy-Item .env.example .env
 MYSQL_ROOT_PASSWORD=MySQL的root口令
 MYSQL_PASSWORD=给crony用户用的口令
 CRONY_AUTH_JWT_SECRET=至少32字节的随机串
-CRONY_AUTH_BOOTSTRAP_ADMIN_PASSWORD=初始管理员口令（8~20位，只能字母+数字）
+CRONY_AUTH_BOOTSTRAP_ADMIN_PASSWORD=初始管理员口令（至少8位，可用符号）
 ```
 
-> ⚠️ 登录口令的校验口径是**纯字母+数字、4~20 位**（登录接口的既有约定）。所以初始管理员口令请用 `Crony2026Admin` 这类组合：写成 `change-me-...` 这种带符号的口令，账号能建出来，但登录会报"request parameter error"。
+> ⚠️ 口令强度只有一条规则：**至少 8 位、不得是弱口令**（服务端统一判定），允许字母 / 数字 / 符号 / 空格，上限 72 字节（bcrypt 的上限）。登录接口**不限制**字符集与长度下限，所以 `change-me-strong-password` 这类口令可以正常登录。
 
 生成随机密钥：
 
@@ -339,7 +339,7 @@ curl http://127.0.0.1:8089/ping         # 通了就说明 admin 活着
 
 ### 6.5 首次登录与账号说明
 
-- 启动时若**用户表为空**且设置了 `CRONY_AUTH_BOOTSTRAP_ADMIN_PASSWORD`（≥ 8 位、非弱口令、**纯字母+数字**），会自动创建管理员（默认用户名 `admin`）。
+- 启动时若**用户表为空**且设置了 `CRONY_AUTH_BOOTSTRAP_ADMIN_PASSWORD`（≥ 8 位、非弱口令，允许符号），会自动创建管理员（默认用户名 `admin`）。
 - 不设置该变量则**不会**创建任何账号，改为允许一次「首个管理员引导注册」：`POST /register`。
 - 之后 `auth.allow-public-register` 默认为 `false`，即不再开放注册。
 - 旧版本硬编码的默认账号（`root` / `123456`）**已移除**，不会再生效。
@@ -363,7 +363,7 @@ curl http://127.0.0.1:8089/ping         # 通了就说明 admin 活着
 | `CRONY_ETCD_ENDPOINTS` | etcd 地址，多个用逗号分隔 | `http://127.0.0.1:2379` |
 | `CRONY_AUTH_JWT_SECRET` | JWT 签名密钥，≥ 32 字节 | **production 必填**，缺失拒绝启动 |
 | `CRONY_AUTH_TOKEN_EXPIRE_HOURS` | 登录令牌有效期（小时） | `168` |
-| `CRONY_AUTH_BOOTSTRAP_ADMIN_USER` / `_PASSWORD` / `_EMAIL` | 首个管理员引导账号（口令 8~20 位、纯字母+数字） | 口令未设则不建账号 |
+| `CRONY_AUTH_BOOTSTRAP_ADMIN_USER` / `_PASSWORD` / `_EMAIL` | 首个管理员引导账号（口令 ≥ 8 位、非弱口令，允许符号） | 口令未设则不建账号 |
 | `CRONY_AUTH_ALLOW_PUBLIC_REGISTER` | 是否允许公开注册 | `false` |
 | `CRONY_SYSTEM_ADDR` | admin 监听端口 | `8089` |
 | `CRONY_SYSTEM_CMD_AUTO_ALLOCATION` | Shell 任务是否自动分配节点 | `false`（需手工指定） |
@@ -486,7 +486,7 @@ go test -tags integration ./common/pkg/k8sclient/... -run RealCluster
 → 你打开的是 Mock 模式。只用 `pnpm dev`（5273 端口）时默认 Mock；请改用 admin 提供的 `/console/`，或建 `console/.env.local` 写 `VITE_USE_MOCK=false`。
 
 **Q4：登录失败 / 没有账号**
-→ 分两种情况：① 库里根本没有账号 —— 设 `CRONY_AUTH_BOOTSTRAP_ADMIN_PASSWORD`（≥ 8 位、非弱口令）后重启 admin，**仅当用户表为空时**才会创建；已建过账号后改这个变量不会改口令。② 返回 `code=1001 request parameter error` —— 口令不符合登录接口的校验（**4~20 位、只能是字母和数字**），换成 `Crony2026Admin` 这类组合。
+→ 分三种情况：① 库里根本没有账号 —— 设 `CRONY_AUTH_BOOTSTRAP_ADMIN_PASSWORD`（≥ 8 位、非弱口令）后重启 admin，**仅当用户表为空时**才会创建；已建过账号后改这个变量不会改口令。② 返回 `code=1000 用户名或口令错误` —— 口令不对（口令只要求 ≥ 8 位、非弱口令，允许符号 / 空格）。③ 返回 `code=1001 request parameter error` —— 请求体为空或字段名不对（`username` / `password`），登录接口本身不限字符集。
 
 **Q5：任务建好了但从来不跑**
 → ① 任务是否**已分配节点**（未分配不执行）；② 节点是否在线；③ Shell 任务默认需手工指定节点；④ 看「执行记录」是否有失败/超时。

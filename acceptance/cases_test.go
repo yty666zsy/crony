@@ -4282,6 +4282,65 @@ func TestAcceptanceSuite(t *testing.T) {
 			"审批 通过=%d/拒绝=%d；会话 %d 次 / %d token —— 接口与库逐项一致",
 			since, days, healBy, decidedAll, deniedAll, approvedDB, rejectedDB, sessCountDB, sessTotalDB)
 	})
+
+	// ---------- 口令口径：登录接口不得施加"注册策略" ----------
+	//
+	// `request.ReqUserLogin.Password` 旧写成 `required,min=4,max=20,alphanum`，
+	// 等于**在接口层另立一套口令策略**：引导管理员口令只要含符号（`change-me-...`），
+	// 账号能建出来、登录却报 `1001 request parameter error` —— 报错方向和真实原因完全相反，
+	// 排查的人只会去怀疑"账号/口令记错了"。
+	//
+	// 口径收紧到一条：强度由服务端 `crypt` 判定（>=8 位 + 弱口令黑名单），
+	// binding 只保证"有值且不超 bcrypt 的 72 字节上限"。
+	//
+	// 这条用例从真机接口上钉死两侧边界：放宽（符号口令必须走到口令校验那一步，
+	// 而不是被绑定层挡回 1001），但**不是没边界**（超 72 字节、空口令仍然必须 1001）。
+	run("AC-86", "登录不施加注册策略：含符号口令不被绑定层拒（≠1001），超 bcrypt 上限/空口令仍拒（=1001）", func(cc *caseCtx) {
+		// 1) 含符号口令：期望落到 `1000 用户名或口令错误`（真口令当然不是它）。
+		//    若真有人把口令设成它，返回 200 同样说明绑定层放行了 —— 两者都算通过。
+		sym := newClient(base)
+		status, env, err := sym.do(http.MethodPost, "/login",
+			map[string]any{"username": user, "password": "change-me-strong-password"}, false)
+		if err != nil {
+			cc.t.Fatalf("含符号口令登录请求失败: %v", err)
+		}
+		if env.Code == 1001 {
+			cc.t.Fatalf("含符号口令被绑定层判成参数错误（HTTP %d/code %d msg=%q）—— "+
+				"登录是校验既有凭据，不该套注册策略；引导口令里带符号的账号会因此被锁在门外",
+				status, env.Code, truncate(env.Msg, 160))
+		}
+		if status != http.StatusOK {
+			cc.t.Fatalf("含符号口令请求的 HTTP 状态异常: %d", status)
+		}
+
+		// 2) 空口令：`required` 必须仍然拦下（放宽不等于放行空值）。
+		empty := newClient(base)
+		_, envEmpty, err := empty.do(http.MethodPost, "/login",
+			map[string]any{"username": user, "password": ""}, false)
+		if err != nil {
+			cc.t.Fatalf("空口令登录请求失败: %v", err)
+		}
+		if envEmpty.Code != 1001 {
+			cc.t.Fatalf("空口令应被绑定层拒为 1001（request parameter error），实际 code=%d msg=%q",
+				envEmpty.Code, truncate(envEmpty.Msg, 160))
+		}
+
+		// 3) 73 字节口令：超过 bcrypt 的 72 字节上限，必须在绑定层被拒。
+		//    这一条防的是"把放宽理解成取消边界"。
+		tooLong := newClient(base)
+		_, envLong, err := tooLong.do(http.MethodPost, "/login",
+			map[string]any{"username": user, "password": strings.Repeat("a", 73)}, false)
+		if err != nil {
+			cc.t.Fatalf("超长口令登录请求失败: %v", err)
+		}
+		if envLong.Code != 1001 {
+			cc.t.Fatalf("73 字节口令应被拒为 1001（binding max=72 = bcrypt 上限），实际 code=%d msg=%q",
+				envLong.Code, truncate(envLong.Msg, 160))
+		}
+
+		cc.note("含符号口令 HTTP %d/code %d（放行到口令校验）；空口令 code=%d；73 字节口令 code=%d",
+			status, env.Code, envEmpty.Code, envLong.Code)
+	})
 }
 
 // fmtRate 把比率渲染成可读文本：负数（NoSample）显示"无样本"。

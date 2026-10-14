@@ -31,20 +31,33 @@ const pwFormRef = ref(null)
 const pwSubmitting = ref(false)
 const pwForm = reactive({ old_pw: '', new_pw: '', confirm_pw: '' })
 
-// 与后端 request.ReqChangePassword 的 binding 完全对齐：
-//   Password / NewPassword 均要求 `required,min=4,max=20,alphanum`
-// 其中 **alphanum = 只接受字母和数字**（不接受符号、空格、下划线）。
-// 以前这里的规则是"至少 8 位"、没有上限也不限字符集，于是用户输入符号或超长口令时，
-// 前端放行、后端回一句语焉不详的 `request parameter error`（code 1009）——
-// 既难排查，也让人以为是自己敲错了。前端规则必须和真后端一致。
-const PW_PATTERN = /^[A-Za-z0-9]{4,20}$/
-const PW_RULE_MESSAGE = '口令必须是 4–20 位字母或数字（后端 alphanum 限制，不接受符号/空格）'
+// 与后端 request.ReqChangePassword 的 binding 对齐（本版已放宽）：
+//   Password / NewPassword 只校验 `required,min=1,max=72`，
+//   即"接口层不再管字符集与长度下限，口令强度由后端 crypt 一处判定"
+//   （>=8 位 + 弱口令黑名单，允许符号 / 空格）。
+//
+// 旧的 `min=4,max=20,alphanum` 等于在接口层另立一套策略，
+// 会做出"能建出来、却用不了"的账号：引导口令里带 `-` 的账号登录直接报
+// `request parameter error`，排查方向被彻底带偏。前端因此只留"非空 + 不超上限"，
+// 只在提交前把后端那条真实规则（至少 8 位）提前提示出来，避免白跑一趟。
+const PW_MIN = 8 // 与 crypt.HashPassword 的下限一致
+const PW_MAX = 72 // bcrypt 的字节上限
+const PW_RULE_MESSAGE = `新口令至少 ${PW_MIN} 位，且不超过 ${PW_MAX} 字节（可用符号 / 空格）`
+
+function checkNewPw(_rule, value, cb) {
+  const v = String(value ?? '')
+  if (v.length < PW_MIN || new TextEncoder().encode(v).length > PW_MAX) {
+    cb(new Error(PW_RULE_MESSAGE))
+    return
+  }
+  cb()
+}
 
 const pwRules = {
   old_pw: [{ required: true, message: '请输入当前口令', trigger: 'blur' }],
   new_pw: [
     { required: true, message: '请输入新口令', trigger: 'blur' },
-    { pattern: PW_PATTERN, message: PW_RULE_MESSAGE, trigger: 'blur' },
+    { validator: checkNewPw, trigger: 'blur' },
   ],
   confirm_pw: [
     { required: true, message: '请再次输入新口令', trigger: 'blur' },

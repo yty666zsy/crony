@@ -947,16 +947,23 @@ export function settingsQuery() {
 }
 
 // changePassword 必须与真后端 `POST /user/change_pw` 的契约一致：
-// 请求体是 {password, new_password}（不是 old_pw/new_pw），校验是 alphanum + 4~20 位。
-// 以前这里编的是 old_pw/new_pw + "至少 8 位"，于是控制台按 mock 写出来的调用在真后端
-// 必然失败（code 1009 request parameter error），而 mock 模式又"一切正常"，
-// 把不一致悄悄藏了起来——mock 的职责是复现真契约，不是另立一套。
+// 请求体是 {password, new_password}（不是 old_pw/new_pw）；
+// binding 只要求"非空 + 不超 bcrypt 的 72 字节上限"，**强度由后端 crypt.HashPassword 判定**
+// （>=8 位 + 弱口令黑名单，允许符号/空格）。
+// 以前这里编的是 old_pw/new_pw + "至少 8 位"，后来又硬编了 `alphanum 4~20 位`，
+// 两次都和真后端对不上：控制台按 mock 写出来的调用在真后端必然失败（1009/1001），
+// 而 mock 模式又"一切正常"，把不一致悄悄藏了起来——mock 的职责是复现真契约，不是另立一套。
 export function changePassword({ password, new_password: newPassword, username } = {}) {
-  const PW = /^[A-Za-z0-9]{4,20}$/
   if (!password || !newPassword) return { code: 1001, data: {}, msg: '口令不能为空' }
-  if (!PW.test(String(password)) || !PW.test(String(newPassword))) {
+  const PWCAP = 72 // bcrypt 字节上限
+  if (new TextEncoder().encode(String(password)).length > PWCAP ||
+      new TextEncoder().encode(String(newPassword)).length > PWCAP) {
     // 1001 = resp.ErrorRequestParameter，与真后端绑定失败时的返回码一致。
     return { code: 1001, data: {}, msg: '[change_password] request parameter error' }
+  }
+  if (String(newPassword).length < 8) {
+    // 真后端这里是 service 侧 crypt.HashPassword 的报错，返回 1000 + 可读消息。
+    return { code: 1000, data: {}, msg: '新口令至少 8 位' }
   }
   return { code: 200, data: { username: username || 'admin' }, msg: '口令修改成功（Mock）' }
 }
