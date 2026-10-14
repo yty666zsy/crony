@@ -203,7 +203,7 @@ onMounted(load)
                   <el-input v-model="pwForm.old_pw" type="password" show-password placeholder="当前登录口令" />
                 </el-form-item>
                 <el-form-item label="新口令" prop="new_pw">
-                  <el-input v-model="pwForm.new_pw" type="password" show-password placeholder="4–20 位字母或数字" />
+                  <el-input v-model="pwForm.new_pw" type="password" show-password placeholder="至少 8 位，可用字母/数字/符号" />
                 </el-form-item>
                 <el-form-item label="确认新口令" prop="confirm_pw">
                   <el-input v-model="pwForm.confirm_pw" type="password" show-password placeholder="再次输入" />
